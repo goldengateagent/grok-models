@@ -89,7 +89,7 @@ def load_providers() -> dict:
 
 
 def http_get_json(url: str) -> object:
-    headers = {"User-Agent": "sync_models.py", "Accept": "application/json"}
+    headers = {"User-Agent": "grok-models.py", "Accept": "application/json"}
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
