@@ -1,15 +1,16 @@
 # Plan: Grok Build provider model sync
 
 Build this in the **current project directory**. The script (`grok-models.py`) and its
-data files live here. The script writes `models.toml` (in this same directory), which
-Grok Build reads as the managed model config.
+data files live here. The script merges its generated `[model.*]` tables into the Grok
+Build home config (`~/.grok/config.toml`, or `$GROK_HOME/config.toml`), preserving all
+other config sections.
 
 ## Goal
 
 Maintain custom `[model.*]` tables for one or more providers. The user adds providers;
 the script pulls each provider's models and metadata **live from
 `https://models.dev/api.json`**; the user can enable/disable providers and models;
-enabled models are written into `models.toml`.
+enabled models are written into `~/.grok/config.toml`.
 
 No separate per-provider model-list URL, no `models.json`, and no `models-cache.json`.
 `models.dev/api.json` is the single source of truth for everything (base URL, env key,
@@ -21,7 +22,7 @@ context window, reasoning).
 |---|---|
 | `grok-models.py` | CLI (stdlib only, no third-party packages) |
 | `providers.json` | User-managed list of providers + their model enabled flags |
-| `models.toml` | Generated Grok Build `[model.*]` config (output) |
+| `config.toml` | Grok Build home config (`~/.grok/config.toml`); merged `[model.*]` output |
 | `models.dev.json` | Downloaded snapshot of `models.dev/api.json`, kept as a reference only |
 
 ### `providers.json`
@@ -54,12 +55,14 @@ fetched live from `models.dev/api.json` at sync time and are **not** duplicated 
 - Adding a provider populates `models` with every live model, all `enabled: false` by
   default (the user enables the ones they want).
 
-### `models.toml` (output)
+### `config.toml` (output)
 
-Generated in the script's directory. Contains only `[model.*]` tables owned by this
-script. On each write, tables for providers currently (or previously) in models.dev are
-stripped and regenerated from `providers.json`, so deleting a provider also removes its
-tables. Unrelated content is not expected in this dedicated file.
+The Grok Build home config (`~/.grok/config.toml`, or `$GROK_HOME/config.toml`). The
+script merges its `[model.*]` tables into this file, **preserving every other section**
+(`[cli]`, `[features]`, `[marketplace]`, `[models]`, `[ui]`, `[privacy]`, and any
+`[model.*]` table for a provider it does not manage). On each write, only the `[model.*]`
+tables it owns are stripped and regenerated from `providers.json`, so deleting a provider
+also removes its tables. The script never alters any config it does not own.
 
 ## CLI
 
@@ -85,8 +88,8 @@ python grok-models.py --config
    - Warn if the provider has no `api` (base URL) in models.dev (SDK-only providers like
      `anthropic`, `google`); the table gets an empty `base_url`.
 4. Persist any changes back to `providers.json`.
-5. Backup `models.toml` → `models.toml.bak`, then write tables for all enabled
-   providers + enabled models.
+5. Backup `~/.grok/config.toml` → `config.toml.bak`, then merge `[model.*]` tables for
+   all enabled providers + enabled models into it.
 
 ### `--add-provider`
 
@@ -98,8 +101,8 @@ python grok-models.py --config
 3. Append the provider to `providers.json` with every model `enabled: false` by default
    (no other
    prompts at add time).
-4. Offer **`Sync now? [Y]`**. Accepting runs the sync and writes `models.toml`. Declining
-   leaves `providers.json` updated without touching `models.toml`.
+4. Offer **`Sync now? [Y]`**. Accepting runs the sync and writes `~/.grok/config.toml`.
+   Declining leaves `providers.json` updated without touching `config.toml`.
 
 ### `--config`
 
@@ -112,7 +115,7 @@ falls back to a **numbered, paged menu** when it is not.
    - **Disable provider** / **Enable provider** — toggles the whole provider (gates all
      its tables).
    - **Delete provider** — confirm first; removes it from `providers.json` and runs the
-     sync immediately so its tables are stripped from `models.toml`.
+     sync immediately so its tables are stripped from `~/.grok/config.toml`.
    - **Back** — return to provider list.
 3. **Configure models (curses widget)** — type to filter live, `↑`/`↓` to move,
    `←`/`→` to page, `Enter` toggles the selected model's enabled state, `Backspace`
@@ -120,7 +123,7 @@ falls back to a **numbered, paged menu** when it is not.
    `free` models get a `[free]` tag. The list is sorted **enabled first, then free
    models, then alphabetical**, with separator lines between enabled | free-disabled |
    rest. Toggling writes `providers.json` immediately; the sync runs after editing so
-   `models.toml` reflects the changes.
+   `~/.grok/config.toml` reflects the changes.
 
 The numbered fallback has the same behavior: substring filter, `p`/`n` paging (15 per
 page), separators, and toggle a model by its number.
@@ -183,11 +186,14 @@ default = false
 - Python 3, stdlib only. **No `tomlkit` or other third-party packages** — TOML is written
   and validated with the standard library (`tomllib` when available; the write still
   succeeds if it is not).
-- All work stays in the project directory; no files under `~/.grok`.
+- The script writes to the Grok Build home config (`~/.grok/config.toml`, or
+  `$GROK_HOME/config.toml`); it adds/updates only the `[model.*]` tables it manages and
+  never alters any other config section. Its own files (`grok-models.py`, `providers.json`)
+  stay in the project directory.
 - Hit `https://models.dev/api.json` **live** when the script runs (the bundled
   `models.dev.json` is only a reference snapshot).
 - Print a summary: providers synced, models added, models removed, models/providers
   missing (skipped), tables written.
 - Exit non-zero on HTTP failure or invalid output.
 - After writing, tell the user to **quit and relaunch** Grok Build; a new session in the
-  same process will not reload `models.toml`.
+  same process will not reload `~/.grok/config.toml`.

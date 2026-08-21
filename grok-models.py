@@ -9,6 +9,7 @@ https://models.dev/api.json so no separate model cache is needed.
 from __future__ import annotations
 
 import argparse
+import os
 import copy
 import curses
 import json
@@ -21,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROVIDERS_PATH = HERE / "providers.json"
-MODELS_TOML_PATH = HERE / "models.toml"
+CONFIG_TOML_PATH = Path(os.environ.get("GROK_HOME", Path.home() / ".grok")) / "config.toml"
 MODELS_DEV_URL = "https://models.dev/api.json"
 
 TOML_SCALAR_FIELDS = (
@@ -804,8 +805,8 @@ def validate_toml_text(text: str) -> None:
         fail(f"invalid TOML write: {exc}")
 
 
-def write_models_toml(provider_ids: list[str], tables: list[tuple[str, dict]]) -> Path:
-    path = MODELS_TOML_PATH
+def write_config_toml(provider_ids: list[str], tables: list[tuple[str, dict]]) -> Path:
+    path = CONFIG_TOML_PATH
     if path.exists():
         shutil.copy2(path, path.with_name(path.name + ".bak"))
     text = write_toml_stdlib(path, provider_ids, tables)
@@ -818,7 +819,7 @@ def write_models_toml(provider_ids: list[str], tables: list[tuple[str, dict]]) -
 
 
 def run_sync() -> tuple[Path | None, dict]:
-    """Reconcile providers.json with the live API and (re)write models.toml."""
+    """Reconcile providers.json with the live API and (re)write ~/.grok/config.toml."""
     providers_doc = load_providers()
     if not providers_doc["providers"]:
         print("No providers in providers.json. Use --add-provider to add one.")
@@ -903,7 +904,7 @@ def run_sync() -> tuple[Path | None, dict]:
     if changed:
         dump_json(PROVIDERS_PATH, providers_doc)
 
-    path = write_models_toml(managed_ids, tables)
+    path = write_config_toml(managed_ids, tables)
     return path, stats
 
 
@@ -1068,7 +1069,7 @@ def print_summary(stats: dict, path: Path) -> None:
 def print_relaunch() -> None:
     print(
         "Quit and relaunch Grok Build. A new session in the same process "
-        "will not reload models.toml."
+        "will not reload config.toml."
     )
 
 
