@@ -945,7 +945,7 @@ def cmd_add_provider() -> int:
     }
     providers_doc["providers"].append(entry)
     dump_json(PROVIDERS_PATH, providers_doc)
-    print(f"Added provider {provider_id!r} with {len(models_map)} models (all enabled).")
+    print(f"Added provider {provider_id!r} with {len(models_map)} models (all disabled).")
 
     answer = prompt_line("Sync now?", "Y")
     parsed = parse_bool(answer) if answer else True
