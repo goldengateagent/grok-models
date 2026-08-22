@@ -9,6 +9,7 @@ https://models.dev/api.json so no separate model cache is needed.
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import copy
 import curses
@@ -124,11 +125,18 @@ def first_letter_cap(text: str) -> str:
     return text[0].upper() + text[1:]
 
 
-def first_env_key(provider: dict) -> str:
-    env = provider.get("env")
-    if isinstance(env, list) and env:
-        return env[0] or ""
+def api_env_key(pinfo: dict) -> str:
+    """First env var name for this provider, from a raw models.dev entry."""
+    env = pinfo.get("env")
+    if isinstance(env, list) and env and isinstance(env[0], str):
+        return env[0]
     return ""
+
+
+def first_env_key(provider: dict) -> str:
+    """Stored env var name from a providers.json provider entry."""
+    env_key = provider.get("env_key")
+    return env_key if isinstance(env_key, str) else ""
 
 
 def table_model_id(provider_id: str, live_id: str) -> str:
@@ -168,9 +176,8 @@ def prompt_required(label: str) -> str:
         print("Value required.")
 
 
-def search_providers(api: dict) -> str | None:
-    """Interactively search the models.dev provider list; return a chosen id."""
-    term = prompt_required("Search term")
+def search_providers(api: dict, term: str) -> str | None:
+    """Search the models.dev provider list with term; return a chosen id."""
     term_l = term.lower()
     matches: list[tuple[str, str]] = []
     for pid, pinfo in api.items():
@@ -255,9 +262,11 @@ def _curses_select_win(
     title: str,
     multi: bool = False,
     preselected: list[int] | None = None,
-    allow_cancel: bool = True,
+    back_on_left: bool = False,
+    footer: str | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme."""
+    curses.set_escdelay(25)
     if not options:
         return None
     curses.curs_set(0)
@@ -308,12 +317,20 @@ def _curses_select_win(
             stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(5) | curses.A_DIM)
         except curses.error:
             pass
-        
+
+        # Footer line directly below the separator (cyan, like free models)
+        if footer:
+            try:
+                stdscr.addstr(sep_y + 1, 2, footer[:width - 4], curses.color_pair(3))
+            except curses.error:
+                pass
+
         # Hint bar
-        hint = "↑/↓: move  Enter: select"
+        hint = "↑/↓: move  Enter/→: select"
         if multi:
             hint += "  Space: toggle"
-        hint += "  q/ESC: cancel"
+        if back_on_left:
+            hint += "  ←: back"
         _curses_draw_status(stdscr, hint)
         
         stdscr.refresh()
@@ -329,14 +346,23 @@ def _curses_select_win(
                 state.discard(current)
             else:
                 state.add(current)
-        elif ch in (curses.KEY_ENTER, 10, 13):
+        elif ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT):
             return sorted(state) if multi else current
-        elif allow_cancel and ch in (ord("q"), 27):
+        elif back_on_left and ch == curses.KEY_LEFT:
+            return None
+        elif ch == 27 and back_on_left:
+            # ESC goes back in submenus
+            return None
+        elif ch == ord("q") and not back_on_left:
+            # q quits the tool; only bound at the main menu
             return None
 
 
 def _numbered_select(
-    options: list[str], title: str | None = None, allow_cancel: bool = True
+    options: list[str],
+    title: str | None = None,
+    allow_cancel: bool = True,
+    footer: str | None = None,
 ) -> int | None:
     """Numbered fallback menu. Returns the chosen index, or None to cancel."""
     if not options:
@@ -345,6 +371,8 @@ def _numbered_select(
         print(title)
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
+    if footer:
+        print(footer)
     while True:
         prompt = "Select (number, or 'q' to cancel)" if allow_cancel else "Select (number)"
         choice = prompt_line(prompt)
@@ -382,6 +410,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
     model ids live, arrow to move, Enter toggles the selected model's
     enabled state, q/ESC finishes. Left/Right arrows page.
     Mutates models in place. Returns True if any toggle happened, False otherwise."""
+    curses.set_escdelay(25)
     curses.curs_set(0)
     _curses_init_colors()
     query = ""
@@ -461,27 +490,36 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
             except curses.error:
                 pass
         
-        hint = "↑/↓: move  ←/→: page  Enter: toggle  q/ESC: done  Backspace: clear filter"
+        hint = "↑/↓/←/→: move  ESC: back  Enter: toggle  Filter: type"
         _curses_draw_status(stdscr, hint)
-        
+
         stdscr.refresh()
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
             continue
-        if ch in (ord("q"), 27):  # q or ESC -> done
+        if ch == 27:  # ESC -> back to provider menu
             return changed
         if ch == curses.KEY_UP and current > 0:
             current -= 1
         elif ch == curses.KEY_DOWN and current < len(filtered) - 1:
             current += 1
         elif ch == curses.KEY_RIGHT:
-            # Page down: jump one screen down
-            if current + list_h < len(filtered):
-                current = min(current + list_h, len(filtered) - 1)
+            # Page down: full next page, first row of that page selected
+            if filtered:
+                top = min((current // list_h + 1) * list_h, max(0, len(filtered) - 1))
+                current = top
         elif ch == curses.KEY_LEFT:
-            # Page up: jump one screen up
-            if current - list_h >= 0:
-                current = max(current - list_h, 0)
+            if current == 0:
+                # At the very top of the first page: left goes back
+                return changed
+            if current < list_h:
+                # Already on the first page: left just goes to its top
+                top = 0
+                current = 0
+            else:
+                # Page up: full previous page, first row selected
+                top = ((current // list_h) - 1) * list_h
+                current = top
         elif ch in (curses.KEY_BACKSPACE, 127, 8):
             query = query[:-1]
             current = 0
@@ -503,6 +541,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
 
 def _curses_confirm_win(stdscr, prompt: str) -> bool:
     """Yes/no prompt drawn into an existing stdscr with color."""
+    curses.set_escdelay(25)
     curses.curs_set(0)
     _curses_init_colors()
     stdscr.erase()
@@ -532,11 +571,16 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
     def main(stdscr) -> bool:
         changed = False
         while True:
-            labels = [_provider_label(p) for p in providers]
-            pi = _curses_select_win(stdscr, labels, "Select a provider  (q cancels)")
+            if not providers:
+                return changed
+            ordered = sorted(providers, key=lambda p: p["id"])
+            labels = [_provider_label(p) for p in ordered]
+            pi = _curses_select_win(
+                stdscr, labels, "Select a provider  (q: quit)"
+            )
             if pi is None:
                 return changed
-            selected = providers[pi]
+            selected = ordered[pi]
             while True:
                 enabled = bool(selected.get("enabled", True))
                 actions = [
@@ -546,7 +590,15 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     "Back",
                 ]
                 ai = _curses_select_win(
-                    stdscr, actions, f"Provider: {selected['id']}  (q cancels)"
+                    stdscr,
+                    actions,
+                    f"Provider: {selected['id']}",
+                    back_on_left=True,
+                    footer=(
+                        f"Required env var: {_env_status_line(first_env_key(selected))}"
+                        if first_env_key(selected)
+                        else None
+                    ),
                 )
                 if ai is None or actions[ai] == "Back":
                     break
@@ -567,9 +619,13 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                             for p in providers_doc["providers"]
                             if p.get("id") != selected["id"]
                         ]
+                        _record_removed_provider(providers_doc, selected["id"])
+                        providers[:] = [
+                            p for p in providers if p.get("id") != selected["id"]
+                        ]
                         dump_json(PROVIDERS_PATH, providers_doc)
                         changed = True
-                        return changed
+                    break
         return changed
 
     try:
@@ -646,6 +702,352 @@ def _config_models_numbered(ids: list[str], models: dict) -> bool:
 def _provider_label(p: dict) -> str:
     state = "enabled" if p.get("enabled", True) else "disabled"
     return f"{p['id']} ({p.get('name') or p['id']}) [{state}]"
+
+
+_ANSI = {
+    "green": "\033[32m",
+    "cyan": "\033[36m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "reset": "\033[0m",
+}
+
+
+def _supports_color() -> bool:
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _paint(text: str, code: str | None, use_color: bool) -> str:
+    if not use_color or code is None:
+        return text
+    return f"{_ANSI[code]}{text}{_ANSI['reset']}"
+
+
+def _provider_state_line(p: dict) -> str:
+    penabled = bool(p.get("enabled", True))
+    marker = "●" if penabled else "○"
+    return (
+        f"{marker} ({p.get('name') or p['id']}) - {p['id']}"
+        f"  [{'enabled' if penabled else 'disabled'}]"
+    )
+
+
+def render_list_text(
+    providers_doc: dict,
+    provider_filter: str | None,
+    use_color: bool,
+    providers_only: bool = False,
+) -> None:
+    providers = [
+        p for p in providers_doc.get("providers", [])
+        if isinstance(p, dict) and p.get("id")
+    ]
+    if provider_filter is not None and provider_filter not in [
+        p["id"] for p in providers
+    ]:
+        hints = difflib.get_close_matches(provider_filter, [p["id"] for p in providers])
+        hint = f" (did you mean: {', '.join(hints)}?)" if hints else ""
+        fail(f"unknown provider {provider_filter!r}{hint}")
+    print("Configured providers")
+    if not providers:
+        print("No providers configured yet. Add with --add-provider")
+        return
+
+    shown_providers = providers
+    if provider_filter is not None:
+        by_id = {p["id"]: p for p in providers}
+        shown_providers = [by_id[provider_filter]]
+
+    if providers_only and provider_filter is None:
+        enabled_providers = 0
+        for i, provider in enumerate(shown_providers):
+            penabled = bool(provider.get("enabled", True))
+            if penabled:
+                enabled_providers += 1
+            code = "bold" if penabled else None
+            print(_paint(_provider_state_line(provider), code, use_color))
+            env = first_env_key(provider)
+            if env:
+                print(_paint(f"    {_env_status_line(env)}", "cyan", use_color))
+        print()
+        print(
+            f"Summary: {len(shown_providers)} providers · "
+            f"{enabled_providers} enabled"
+        )
+        return
+
+    total_models = 0
+    enabled_models = 0
+    enabled_providers = 0
+    for i, provider in enumerate(shown_providers):
+        if i > 0:
+            print()
+        pid = provider["id"]
+        pname = provider.get("name") or pid
+        penabled = bool(provider.get("enabled", True))
+        if penabled:
+            enabled_providers += 1
+
+        models_map = provider.get("models")
+        ids = list(models_map.keys()) if isinstance(models_map, dict) else []
+        order, _, _ = _sort_model_indices(ids, models_map or {})
+        en_count = sum(
+            1
+            for mid in ids
+            if isinstance(models_map.get(mid), dict)
+            and models_map[mid].get("enabled", True)
+        ) if isinstance(models_map, dict) else 0
+        total_models += len(ids)
+        enabled_models += en_count
+
+        marker = "●" if penabled else "○"
+        line = (
+            f"{marker} ({pname}) - {pid}  [{'enabled' if penabled else 'disabled'}]"
+            f"  {en_count}/{len(ids)} models"
+        )
+        if penabled:
+            print(_paint(line, "bold", use_color))
+        else:
+            print(_paint(line, None, use_color))
+
+        if not ids:
+            print(_paint("    (no models)", "dim", use_color))
+            continue
+        for idx in order:
+            mid = ids[idx]
+            m = models_map.get(mid) if isinstance(models_map, dict) else None
+            menabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
+            free_tag = "  [free]" if "free" in mid.lower() else ""
+            mline = f"    {'●' if menabled else '○'} {mid}{free_tag}"
+            code = "green" if menabled else "dim"
+            print(_paint(mline, code, use_color))
+
+    summary = (
+        f"Summary: {len(shown_providers)} providers · {enabled_providers} enabled · "
+        f"{enabled_models}/{total_models} models enabled"
+    )
+    print()
+    print(summary)
+
+
+def _env_value(env_var: str) -> str:
+    """Current value of an env var: first 10 chars + ellipsis, or empty string."""
+    val = os.environ.get(env_var, "")
+    return f'"{val[:10]}..."' if val else '""'
+
+
+def _env_status_line(env_var: str) -> str:
+    """Format an env var requirement with its current value status."""
+    if not env_var:
+        return ""
+    val = os.environ.get(env_var, "")
+    shown = f'"{val[:10]}..."' if val else '""'
+    return f"{env_var} = {shown}"
+
+
+def enabled_provider_env_vars(providers_doc: dict) -> list[str]:
+    """Return the required API-key env vars for all enabled providers."""
+    env_vars = []
+    for p in providers_doc.get("providers", []):
+        if not isinstance(p, dict) or not p.get("id"):
+            continue
+        if not p.get("enabled", True):
+            continue
+        env = first_env_key(p)
+        if env and env not in env_vars:
+            env_vars.append(env)
+    return env_vars
+
+
+def print_env_requirements(providers_doc: dict) -> None:
+    """List each enabled provider's required env var and whether it is set."""
+    env_vars = enabled_provider_env_vars(providers_doc)
+    if not env_vars:
+        return
+    print()
+    print("Required environment variables:")
+    for env_var in env_vars:
+        print(f"  {_env_status_line(env_var)}")
+
+
+def render_models_text(use_color: bool) -> int:
+    providers_doc = load_providers()
+    providers = [
+        p for p in providers_doc.get("providers", [])
+        if isinstance(p, dict) and p.get("id")
+    ]
+
+    print("Enabled models")
+
+    total_enabled = 0
+    for provider in providers:
+        pid = provider["id"]
+        penabled = bool(provider.get("enabled", True))
+        mm = provider.get("models")
+        ids = list(mm.keys()) if isinstance(mm, dict) else []
+        enabled_ids = [
+            mid
+            for mid in ids
+            if penabled and isinstance(mm[mid], dict) and mm[mid].get("enabled", True)
+        ]
+        if not enabled_ids:
+            continue
+        total_enabled += len(enabled_ids)
+        pname = provider.get("name") or pid
+        order, _, _ = _sort_model_indices(enabled_ids, mm or {})
+        for idx in order:
+            mid = enabled_ids[idx]
+            m = mm[mid] if isinstance(mm[mid], dict) else {}
+            mname = m.get("name") or mid
+            print(_paint(f"● {mname} ({pname}) - {pid}/{mid}", "green", use_color))
+
+    if not total_enabled:
+        print("No enabled models. Enable with --enable or --config")
+        return 0
+
+    print()
+    for provider in providers:
+        env = first_env_key(provider)
+        if env:
+            penabled = bool(provider.get("enabled", True))
+            marker = "●" if penabled else "○"
+            pname = provider.get("name") or provider["id"]
+            print(_paint(f"{marker} Required env var: {env} = {_env_value(env)}  ({pname})", "cyan", use_color))
+    print(f"Summary: {total_enabled} models enabled")
+    return 0
+    print(f"Summary: {total_enabled} models enabled")
+    return 0
+
+
+def cmd_disable_all() -> int:
+    providers_doc = load_providers()
+    changed = False
+    for provider in providers_doc.get("providers", []):
+        if not isinstance(provider, dict):
+            continue
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            continue
+        for mid, m in models.items():
+            if isinstance(m, dict) and m.get("enabled", True):
+                m["enabled"] = False
+                changed = True
+    if not changed:
+        print("All models already disabled.")
+        return 0
+    dump_json(PROVIDERS_PATH, providers_doc)
+    path, stats = run_sync()
+    if path is not None:
+        print_sync_report(stats, path, providers_doc)
+        print_relaunch()
+    return 0
+
+
+def resolve_targets(
+    providers_doc: dict, targets: list[str], want_enabled: bool
+) -> list[tuple[dict, str | None]]:
+    """Resolve 'provider' or 'provider/model' targets against providers.json.
+
+    Model ids are normalized ('.', '/', ':' -> '_') on both sides so TOML-style
+    keys also match. Returns (provider_dict, model_id_or_None) pairs; raises
+    SyncError with close-match hints for anything unresolvable.
+    """
+    def norm(s: str) -> str:
+        return s.replace(".", "_").replace("/", "_").replace(":", "_")
+
+    providers = [
+        p for p in providers_doc.get("providers", [])
+        if isinstance(p, dict) and p.get("id")
+    ]
+    resolved: list[tuple[dict, str | None]] = []
+    errors: list[str] = []
+    for target in targets:
+        pid, sep, mid = target.partition("/")
+        matches = [p for p in providers if norm(p["id"]) == norm(pid)]
+        if len(matches) != 1:
+            hints = difflib.get_close_matches(pid, [p["id"] for p in providers])
+            hint = f" (did you mean: {', '.join(hints)}?)" if hints else ""
+            errors.append(f"unknown provider {pid!r}{hint}")
+            continue
+        provider = matches[0]
+        if not sep:
+            resolved.append((provider, None))
+            continue
+        raw_ids = list(provider.get("models", {}).keys())
+        model_hits = [mid0 for mid0 in raw_ids if norm(mid0) == norm(mid)]
+        if len(model_hits) != 1:
+            hints = difflib.get_close_matches(mid, raw_ids)
+            hint = f" (did you mean: {', '.join(hints)}?)" if hints else ""
+            errors.append(f"unknown model {mid!r} for provider {pid!r}{hint}")
+            continue
+        resolved.append((provider, model_hits[0]))
+    if errors:
+        fail("cannot apply: " + "; ".join(errors))
+    return resolved
+
+
+def _record_removed_provider(providers_doc: dict, pid: str) -> None:
+    """Record a deleted provider id so sync strips its leftover tables."""
+    removed = providers_doc.setdefault("removed_providers", [])
+    if pid not in removed:
+        removed.append(pid)
+
+
+def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
+    providers_doc = load_providers()
+    resolved_enable = resolve_targets(providers_doc, enable_targets, True)
+    resolved_disable = resolve_targets(providers_doc, disable_targets, False)
+
+    # Later flags win when both lists hit the same target.
+    applied: dict[tuple[int, str | None], tuple[dict, str | None, bool]] = {}
+    for provider, mid, want in (
+        [(p, m, True) for p, m in resolved_enable]
+        + [(p, m, False) for p, m in resolved_disable]
+    ):
+        key = (id(provider), mid)
+        applied[key] = (provider, mid, want)
+
+    disabled_provider_ids = {
+        p["id"]
+        for p, m, want in applied.values()
+        if m is not None and want and not p.get("enabled", True)
+    }
+
+    changed = False
+    for (provider, mid, want) in applied.values():
+        label = provider["id"] + (f"/{mid}" if mid else "")
+        if mid is None:
+            if provider.get("enabled", True) == want:
+                print(f"already {'enabled' if want else 'disabled'}: {label}")
+                continue
+            provider["enabled"] = want
+            print(f"{'enabled' if want else 'disabled'}: {label}")
+        else:
+            models = provider.setdefault("models", {})
+            m = models.get(mid)
+            if not isinstance(m, dict):
+                m = models[mid] = {}
+            if m.get("enabled", True) == want:
+                print(f"already {'enabled' if want else 'disabled'}: {label}")
+                continue
+            m["enabled"] = want
+            print(f"{'enabled' if want else 'disabled'}: {label}")
+        changed = True
+
+    if not changed:
+        return 0
+
+    dump_json(PROVIDERS_PATH, providers_doc)
+    for pid in sorted(disabled_provider_ids):
+        print(
+            f"warning: provider {pid!r} is disabled; enable it too or its "
+            f"models won't be written to config.toml"
+        )
+    path, stats = run_sync()
+    if path is not None:
+        print_sync_report(stats, path, providers_doc)
+        print_relaunch()
+    return 0
 
 
 def efforts_from_models_dev(minfo: dict) -> list[dict] | None:
@@ -822,7 +1224,13 @@ def run_sync() -> tuple[Path | None, dict]:
     """Reconcile providers.json with the live API and (re)write ~/.grok/config.toml."""
     providers_doc = load_providers()
     if not providers_doc["providers"]:
-        print("No providers in providers.json. Use --add-provider to add one.")
+        if providers_doc.get("removed_providers"):
+            # Still strip tables left behind by deleted providers.
+            api = fetch_models_dev()
+            write_config_toml(set(providers_doc["removed_providers"]), [])
+            providers_doc["removed_providers"] = []
+            dump_json(PROVIDERS_PATH, providers_doc)
+        print("No providers configured yet. Add with --add-provider")
         return None, {}
     api = fetch_models_dev()
 
@@ -830,6 +1238,7 @@ def run_sync() -> tuple[Path | None, dict]:
         "providers_synced": 0,
         "models_added": 0,
         "models_removed": 0,
+        "models_renamed": 0,
         "models_missing": 0,
         "providers_missing": 0,
         "tables_written": 0,
@@ -838,10 +1247,10 @@ def run_sync() -> tuple[Path | None, dict]:
     all_provider_ids = [
         p["id"] for p in providers_doc["providers"] if isinstance(p, dict) and p.get("id")
     ]
-    # The script owns [model.*] tables for any models.dev provider: current
-    # providers plus anything the live API exposes (so deleting a provider
-    # also strips its leftover tables on the next write).
-    managed_ids = set(all_provider_ids) | set(api.keys())
+    # This tool owns [model.*] tables only for providers it has configured.
+    # Deleted providers are remembered in "removed_providers" so the next
+    # sync strips their leftover tables.
+    managed_ids = set(all_provider_ids) | set(providers_doc.get("removed_providers", []))
     tables: list[tuple[str, dict]] = []
     changed = False
 
@@ -858,6 +1267,11 @@ def run_sync() -> tuple[Path | None, dict]:
             continue
         api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
 
+        new_env_key = api_env_key(pinfo)
+        if new_env_key and provider.get("env_key") != new_env_key:
+            provider["env_key"] = new_env_key
+            changed = True
+
         models_map = provider.get("models")
         if not isinstance(models_map, dict):
             models_map = {}
@@ -866,9 +1280,25 @@ def run_sync() -> tuple[Path | None, dict]:
 
         for mid in api_models:
             if mid not in models_map:
-                models_map[mid] = {"enabled": False}
+                entry = {}
+                api_name = (
+                    api_models[mid].get("name")
+                    if isinstance(api_models[mid], dict) else None
+                )
+                if api_name:
+                    entry["name"] = api_name
+                entry["enabled"] = False
+                models_map[mid] = entry
                 stats["models_added"] += 1
                 changed = True
+            else:
+                m = models_map[mid]
+                if isinstance(m, dict):
+                    api_name = api_models[mid].get("name") if isinstance(api_models[mid], dict) else None
+                    if api_name and m.get("name") != api_name:
+                        m["name"] = api_name
+                        stats["models_renamed"] += 1
+                        changed = True
         for mid in list(models_map):
             if mid not in api_models:
                 del models_map[mid]
@@ -876,7 +1306,7 @@ def run_sync() -> tuple[Path | None, dict]:
                 changed = True
 
         base_url = pinfo.get("api") or ""
-        env_key = first_env_key(pinfo)
+        env_key = api_env_key(pinfo)
         pname = pinfo.get("name") or pid
         if not base_url:
             print(
@@ -886,7 +1316,13 @@ def run_sync() -> tuple[Path | None, dict]:
 
         for mid, m in models_map.items():
             if not isinstance(m, dict):
-                m = models_map[mid] = {"enabled": False}
+                api_name = (
+                    api_models.get(mid, {}).get("name")
+                    if isinstance(api_models.get(mid), dict) else None
+                )
+                entry = {"name": api_name} if api_name else {}
+                entry["enabled"] = False
+                m = models_map[mid] = entry
                 changed = True
             if not m.get("enabled", True):
                 continue
@@ -901,6 +1337,18 @@ def run_sync() -> tuple[Path | None, dict]:
             stats["tables_written"] += 1
         stats["providers_synced"] += 1
 
+    # Strip tables for providers deleted since the last sync.
+    removed = providers_doc.get("removed_providers", [])
+    if removed:
+        removed_keys = {
+            table_model_id(pid, mid)
+            for pid in removed
+            for mid in api.get(pid, {}).get("models", {})
+        }
+        tables = [t for t in tables if t[0] not in removed_keys]
+        providers_doc["removed_providers"] = []
+        changed = True
+
     if changed:
         dump_json(PROVIDERS_PATH, providers_doc)
 
@@ -908,27 +1356,18 @@ def run_sync() -> tuple[Path | None, dict]:
     return path, stats
 
 
-def cmd_add_provider() -> int:
-    providers_doc = load_providers()
-    api = fetch_models_dev()
+def print_sync_report(stats: dict, path: Path, providers_doc: dict) -> None:
+    """Sync summary followed by required env vars for enabled providers."""
+    print_summary(stats, path)
+    print_env_requirements(providers_doc)
+
+
+def add_provider_entry(providers_doc: dict, api: dict, provider_id: str) -> None:
+    """Add provider_id to providers_doc with all models disabled and persist."""
     existing = {p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)}
-
-    provider_id: str | None = None
-    while True:
-        raw = prompt_line("Provider id (or type 'search' to search providers)")
-        if raw.strip().lower() == "search":
-            provider_id = search_providers(api)
-            if provider_id is None:
-                continue
-        else:
-            provider_id = raw.strip()
-        if not provider_id:
-            continue
-        if provider_id in existing:
-            print(f"Provider {provider_id!r} already exists.")
-            continue
-        break
-
+    if provider_id in existing:
+        print(f"Provider {provider_id!r} already exists.")
+        return
     pinfo = api.get(provider_id)
     if not isinstance(pinfo, dict):
         fail(f"provider {provider_id!r} not found in models.dev")
@@ -936,26 +1375,42 @@ def cmd_add_provider() -> int:
     if not api_models:
         fail(f"provider {provider_id!r} has no models in models.dev")
 
-    models_map = {mid: {"enabled": False} for mid in api_models}
+    models_map = {}
+    for mid, minfo in api_models.items():
+        entry = {}
+        if isinstance(minfo, dict) and minfo.get("name"):
+            entry["name"] = minfo["name"]
+        entry["enabled"] = False
+        models_map[mid] = entry
     entry = {
         "id": provider_id,
         "name": pinfo.get("name") or provider_id,
-        "enabled": True,
-        "models": models_map,
     }
+    env = api_env_key(pinfo)
+    if env:
+        entry["env_key"] = env
+    entry["enabled"] = True
+    entry["models"] = models_map
     providers_doc["providers"].append(entry)
     dump_json(PROVIDERS_PATH, providers_doc)
     print(f"Added provider {provider_id!r} with {len(models_map)} models (all disabled).")
 
-    answer = prompt_line("Sync now?", "Y")
-    parsed = parse_bool(answer) if answer else True
-    if parsed is None:
-        parsed = True
-    if parsed:
-        path, stats = run_sync()
-        if path is not None:
-            print_summary(stats, path)
-            print_relaunch()
+
+def cmd_search(term: str) -> int:
+    """Search the models.dev provider list; the selected provider is added."""
+    api = fetch_models_dev()
+    provider_id = search_providers(api, term)
+    if provider_id is None:
+        return 0
+    providers_doc = load_providers()
+    add_provider_entry(providers_doc, api, provider_id)
+    return 0
+
+
+def cmd_add_provider(provider_id: str) -> int:
+    providers_doc = load_providers()
+    api = fetch_models_dev()
+    add_provider_entry(providers_doc, api, provider_id)
     return 0
 
 
@@ -990,11 +1445,12 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
     """Numbered (non-TTY) fallback for the entire --config flow."""
     changed = False
     while True:
-        labels = [_provider_label(p) for p in providers]
-        pi = _numbered_select(labels, "Select a provider  (q cancels)")
+        ordered = sorted(providers, key=lambda p: p["id"])
+        labels = [_provider_label(p) for p in ordered]
+        pi = _numbered_select(labels, "Select a provider  (q quits)")
         if pi is None:
             break
-        selected = providers[pi]
+        selected = ordered[pi]
         while True:
             enabled = bool(selected.get("enabled", True))
             actions = [
@@ -1003,7 +1459,13 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                 "Delete provider",
                 "Back",
             ]
-            ai = _numbered_select(actions, f"Provider: {selected['id']}  (q cancels)")
+            env_line = _env_status_line(first_env_key(selected))
+            footer = f"Required env var: {env_line}" if first_env_key(selected) else None
+            ai = _numbered_select(
+                actions,
+                f"Provider: {selected['id']}  (1-4)",
+                footer=footer,
+            )
             if ai is None or actions[ai] == "Back":
                 break
             if ai == 0:
@@ -1022,10 +1484,14 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                         for p in providers_doc["providers"]
                         if p.get("id") != selected["id"]
                     ]
+                    _record_removed_provider(providers_doc, selected["id"])
+                    providers[:] = [
+                        p for p in providers if p.get("id") != selected["id"]
+                    ]
                     dump_json(PROVIDERS_PATH, providers_doc)
                     print(f"Deleted provider {selected['id']!r}.")
                     changed = True
-                    return changed
+                break
     return changed
 
 
@@ -1033,7 +1499,7 @@ def cmd_config() -> int:
     providers_doc = load_providers()
     providers = [p for p in providers_doc["providers"] if isinstance(p, dict) and p.get("id")]
     if not providers:
-        print("No providers in providers.json. Use --add-provider to add one.")
+        print("No providers configured yet. Add with --add-provider")
         return 0
 
     changed = False
@@ -1049,49 +1515,104 @@ def cmd_config() -> int:
     if changed:
         path, stats = run_sync()
         if path is not None:
-            print_summary(stats, path)
+            print_sync_report(stats, path, providers_doc)
             print_relaunch()
     return 0
 
 
 def print_summary(stats: dict, path: Path) -> None:
     print()
-    print("Summary")
+    print(f"Updated {path}")
+    print("Sync Summary:")
     print(f"  providers synced: {stats.get('providers_synced', 0)}")
     print(f"  models added: {stats.get('models_added', 0)}")
     print(f"  models removed: {stats.get('models_removed', 0)}")
+    print(f"  models renamed: {stats.get('models_renamed', 0)}")
     print(f"  models missing (skipped): {stats.get('models_missing', 0)}")
     print(f"  providers missing (skipped): {stats.get('providers_missing', 0)}")
     print(f"  tables written: {stats.get('tables_written', 0)}")
-    print(f"Wrote {path}")
 
 
 def print_relaunch() -> None:
-    print(
-        "Quit and relaunch Grok Build. A new session in the same process "
-        "will not reload config.toml."
-    )
+    print("Relaunch Grok Build for model changes")
 
 
 def cmd_sync() -> int:
+    providers_doc = load_providers()
     path, stats = run_sync()
     if path is None:
         return 0
-    print_summary(stats, path)
+    print_sync_report(stats, path, providers_doc)
     print_relaunch()
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Sync Grok Build [model.*] tables from models.dev."
+        description="Grok Build config.toml [model.<provider-id>-<model-id>] tables will be added, updated or deleted by this command for any matched pattern of <provider-id>-<model-id>. Uniquely name your manually configured custom models to avoid modification.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  grok-models.py                              sync to config.toml\n"
+            "  grok-models.py --providers                  show configured providers\n"
+            "  grok-models.py --provider opencode          show models for a provider\n"
+            "  grok-models.py --models                     show currently enabled models\n"
+            "  grok-models.py --enable opencode            enable providers\n"
+            "  grok-models.py --enable opencode/hy3-free   enable model\n"
+            "  grok-models.py --disable openrouter         disable a provider\n"
+            "  grok-models.py --disable-all                disable all models\n"
+        ),
     )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--add-provider", action="store_true", help="Interactively add a provider")
+    group.add_argument(
+        "--add-provider",
+        metavar="ID",
+        help="Add provider ID",
+    )
+    group.add_argument(
+        "--search",
+        metavar="TERM",
+        help="Search providers",
+    )
     group.add_argument(
         "--config",
         action="store_true",
-        help="Configure a provider (enable/disable/delete) or its models (toggle enabled)",    )
+        help="Configure a provider or its models",
+    )
+    group.add_argument(
+        "--disable-all",
+        action="store_true",
+        help="Disable all models in every provider",
+    )
+    group.add_argument(
+        "--disable",
+        action="append",
+        metavar="TARGET",
+        default=[],
+        help="Disable TARGET (provider or provider/model); repeatable",
+    )
+    group.add_argument(
+        "--enable",
+        action="append",
+        metavar="TARGET",
+        default=[],
+        help="Enable TARGET (provider or provider/model); repeatable",
+    )
+    group.add_argument(
+        "--models",
+        action="store_true",
+        help="Show enabled models",
+    )
+    group.add_argument(
+        "--providers",
+        action="store_true",
+        help="Show configured providers",
+    )
+    group.add_argument(
+        "--provider",
+        metavar="ID",
+        help="Show the models for this provider",
+    )
     return parser
 
 
@@ -1100,9 +1621,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.add_provider:
-            return cmd_add_provider()
+            return cmd_add_provider(args.add_provider)
+        if args.search:
+            return cmd_search(args.search)
         if args.config:
             return cmd_config()
+        if args.providers:
+            render_list_text(
+                load_providers(),
+                None,
+                _supports_color(),
+                providers_only=True,
+            )
+            return 0
+        if args.provider is not None:
+            render_list_text(
+                load_providers(),
+                args.provider,
+                _supports_color(),
+                providers_only=False,
+            )
+            return 0
+        if args.models:
+            return render_models_text(_supports_color())
+        if args.disable_all:
+            return cmd_disable_all()
+        if args.enable or args.disable:
+            return cmd_toggle(args.enable, args.disable)
         return cmd_sync()
     except SyncError as exc:
         print(str(exc), file=sys.stderr)
