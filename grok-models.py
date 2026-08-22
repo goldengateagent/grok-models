@@ -495,31 +495,39 @@ def _curses_draw_header(stdscr, text: str) -> None:
 
 
 def _curses_draw_legend(stdscr, entries: list[tuple[str, str]]) -> None:
-    """Draw the bottom legend: bold keys, gray descriptions, │ separators.
+    """Draw the bottom legend: bold keys (faded '/' separators), gray descriptions, │ separators.
 
-    entries is a list of (key, description) pairs, e.g. [("←/→", "move")].
-    The full bottom row is painted with the theme background first so the
-    line is themed edge to edge, not just where text sits.
+    entries is a list of (key, description) pairs, e.g. [("←/→", "nav")].
+    The full row is painted with the theme background first so the line is
+    themed edge to edge, not just where text sits. It is drawn one line up
+    from the bottom so the bottom line of the screen stays a blank line of
+    padding beneath the menu.
     """
     height, width = stdscr.getmaxyx()
-    stdscr.addstr(height - 1, 0, " " * (width - 1), curses.color_pair(P.TEXT))
+    legend_y = height - 2
+    stdscr.addstr(legend_y, 0, " " * (width - 1), curses.color_pair(P.TEXT))
     x = 2
     try:
         for i, (key, desc) in enumerate(entries):
             if i > 0:
                 sep = "  │  "
-                stdscr.addstr(height - 1, x, sep, curses.color_pair(P.MUTED))
+                stdscr.addstr(legend_y, x, sep, curses.color_pair(P.MUTED))
                 x += len(sep)
             run = f"{key} {desc}"
             if x + len(run) > width - 1:
                 break
-            stdscr.addstr(
-                height - 1, x, key, curses.color_pair(P.LEGEND_KEY) | curses.A_BOLD
-            )
-            x += len(key)
-            stdscr.addstr(height - 1, x, " ", curses.color_pair(P.LEGEND_DESC))
+            # Draw the key bold, but render '/' separators faded (muted
+            # gray) so they recede against the bold key text (e.g. ↑/↓, Enter/→).
+            for ch_k in key:
+                if ch_k == "/":
+                    attr = curses.color_pair(P.MUTED)
+                else:
+                    attr = curses.color_pair(P.LEGEND_KEY) | curses.A_BOLD
+                stdscr.addstr(legend_y, x, ch_k, attr)
+                x += 1
+            stdscr.addstr(legend_y, x, " ", curses.color_pair(P.LEGEND_DESC))
             x += 1
-            stdscr.addstr(height - 1, x, desc, curses.color_pair(P.LEGEND_DESC))
+            stdscr.addstr(legend_y, x, desc, curses.color_pair(P.LEGEND_DESC))
             x += len(desc)
     except curses.error:
         pass
@@ -533,6 +541,8 @@ def _curses_select_win(
     preselected: list[int] | None = None,
     back_on_left: bool = False,
     footer: str | None = None,
+    initial: int = 0,
+    key_hint: str | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme."""
     curses.set_escdelay(25)
@@ -545,8 +555,8 @@ def _curses_select_win(
     _curses_init_colors()
     _curses_theme_bkgd(stdscr)
     state = set(preselected or [])
-    current = 0
     n = len(options)
+    current = max(0, min(initial, n - 1)) if n > 0 else 0
     top = 0
     while True:
         stdscr.erase()
@@ -602,15 +612,42 @@ def _curses_select_win(
         except curses.error:
             pass
 
-        # Footer line directly below the separator (cyan, like free models)
-        if footer:
-            try:
-                stdscr.addstr(sep_y + 1, 2, footer[:width - 4], curses.color_pair(P.VALUE))
-            except curses.error:
-                pass
+        # Footer(s): blue boxes, left-aligned, stacked under the separator.
+        # Box 1 (top) = key-setup commands; Box 2 (bottom) = env var status.
+        if footer or key_hint:
+            blue = curses.color_pair(P.VALUE)
+            bx = 2
+            legend_y = height - 2
+            y = sep_y + 1
+            # Box 1: key-setup commands (provider id + env key substituted)
+            if key_hint:
+                lines = key_hint.split("\n")
+                inner_w = min(max(len(line) for line in lines), max(1, width - bx - 4))
+                if y + len(lines) + 1 < legend_y and bx + inner_w + 2 <= width:
+                    try:
+                        stdscr.addstr(y, bx, "┌" + "─" * inner_w + "┐", blue)
+                        for i, line in enumerate(lines):
+                            stdscr.addstr(
+                                y + 1 + i, bx,
+                                "│" + line[:inner_w].ljust(inner_w) + "│", blue,
+                            )
+                        stdscr.addstr(y + 1 + len(lines), bx, "└" + "─" * inner_w + "┘", blue)
+                    except curses.error:
+                        pass
+                y += len(lines) + 2
+            # Box 2: env var status line
+            if footer:
+                inner = f" {footer[:max(1, width - 8)]} "
+                if y + 2 < legend_y and bx + len(inner) + 2 <= width:
+                    try:
+                        stdscr.addstr(y, bx, "┌" + "─" * len(inner) + "┐", blue)
+                        stdscr.addstr(y + 1, bx, "│" + inner + "│", blue)
+                        stdscr.addstr(y + 2, bx, "└" + "─" * len(inner) + "┘", blue)
+                    except curses.error:
+                        pass
 
         # Legend bar
-        legend = [("↑/↓", "move"), ("Enter/→", "select")]
+        legend = [("↑/↓", "nav"), ("Enter/→", "select")]
         if multi:
             legend.append(("Space", "toggle"))
         if back_on_left:
@@ -782,7 +819,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
             except curses.error:
                 pass
         
-        legend = [("↑/↓/←/→", "move"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")]
+        legend = [("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")]
         _curses_draw_legend(stdscr, legend)
 
         stdscr.refresh()
@@ -881,6 +918,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             if pi is None:
                 return changed
             selected = ordered[pi]
+            action_cursor = 0
             while True:
                 enabled = bool(selected.get("enabled", True))
                 actions = [
@@ -889,19 +927,29 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     "Delete provider",
                     "Back",
                 ]
+                env_key = first_env_key(selected)
                 ai = _curses_select_win(
                     stdscr,
                     actions,
                     f"Provider: {selected.get('name') or selected['id']}",
                     back_on_left=True,
+                    initial=action_cursor,
                     footer=(
-                        f"Required env var: {_env_status_line(first_env_key(selected))}"
-                        if first_env_key(selected)
+                        _env_status_line(env_key)
+                        if env_key
+                        else None
+                    ),
+                    key_hint=(
+                        f"# {selected.get('id') or selected.get('name')} api keys\n"
+                        f"pbpaste > key-file\n"
+                        f"echo 'export {env_key}=\"$(cat ~/key-file)\"' >> ~/.zshrc"
+                        if env_key
                         else None
                     ),
                 )
                 if ai is None or actions[ai] == "Back":
                     break
+                action_cursor = ai
                 if ai == 0:
                     if _curses_model_search_win(
                         list(selected["models"].keys()), selected["models"], stdscr
