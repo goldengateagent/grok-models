@@ -212,46 +212,315 @@ def search_providers(api: dict, term: str) -> str | None:
 _CURSES_FAILED = object()  # sentinel: curses couldn't run (not a tty, etc.)
 
 
+# Tokyo Night (Night/Storm) palette — values mirror grok-build's tokyonight.rs.
+_TN = {
+    "bg": (36, 40, 59),            # #24283b  bg_base (Storm)
+    "bg_dark": (31, 35, 53),       # #1f2335
+    "bg_highlight": (41, 46, 66),  # #292e42
+    "bg_visual": (40, 52, 87),     # #283457  selection
+    "fg": (192, 202, 245),         # #c0caf5  text primary
+    "fg_dark": (169, 177, 214),    # #a9b1d6  text secondary
+    "comment": (86, 95, 137),      # #565f89  muted/gray
+    "dark5": (115, 122, 162),      # #737aa2  gray bright
+    "blue": (122, 162, 247),       # #7aa2f7  values / accent
+    "cyan": (125, 207, 255),       # #7dcfff  free tags / running
+    "green": (158, 206, 106),      # #9ece6a  success / on
+}
+
+# Color pair ids used by the TUI. Backgrounds are pinned to the theme bg so
+# nothing ever renders on the user's terminal default.
+class P:
+    TEXT = 1        # normal text on theme bg
+    MUTED = 2       # gray meta text on theme bg
+    VALUE = 3       # blue value text on theme bg
+    FREE = 4        # cyan free tag on theme bg
+    ENABLED = 5     # green enabled model on theme bg
+    DISABLED = 6    # muted disabled model on theme bg
+    SELECTED = 7    # bold primary on selection bg
+    CHEVRON = 8     # gray chevron on theme bg
+    LEGEND_KEY = 9  # bold secondary key in legend
+    LEGEND_DESC = 10  # gray description in legend
+
+
 def _curses_init_colors() -> None:
-    """Initialize color pairs for the TUI theme."""
+    """Initialize the Tokyo Night theme.
+
+    Strategy: Apple Terminal (and some others) do not allow palette
+    redefinition (can_change_color() is False). On those terminals, named
+    colors are THEME-RELATIVE — COLOR_BLACK renders as the theme's own
+    near-black, which on a light theme is a soft gray, producing patchwork.
+    To guarantee identical rendering everywhere we bypass the curses palette
+    entirely and emit 24-bit truecolor escapes for the background, falling
+    back to named colors only when truecolor is unavailable.
+    """
+    curses.start_color()
     try:
         curses.use_default_colors()
     except curses.error:
         pass
-    if curses.has_colors():
-        curses.start_color()
-        # Theme: provider header, enabled=green, disabled=red, free=cyan, 
-        # selected=yellow on blue, dim=gray, separator=blue, warning=yellow, error=red
-        curses.init_pair(1, curses.COLOR_GREEN, -1)    # enabled
-        curses.init_pair(2, curses.COLOR_RED, -1)      # disabled
-        curses.init_pair(3, curses.COLOR_CYAN, -1)     # free models
-        curses.init_pair(4, curses.COLOR_YELLOW, -1)   # highlight/accent
-        curses.init_pair(5, curses.COLOR_BLUE, -1)     # provider header
-        curses.init_pair(6, curses.COLOR_MAGENTA, -1)  # filter/query
-        curses.init_pair(7, -1, curses.COLOR_BLUE)     # selected item
-        curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)  # selected bright
-        curses.init_pair(9, curses.COLOR_WHITE, -1)    # normal text
-        curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)  # header bar
-        curses.init_pair(11, curses.COLOR_YELLOW, -1)  # warning/pending
-        curses.init_pair(12, curses.COLOR_RED, -1)     # error/delete
+
+    # Named curses colors are theme-relative, so they cannot guarantee our
+    # palette. Use 24-bit truecolor pairs when the terminal supports them
+    # (COLORTERM=truecolor/24bit — macOS Terminal, iTerm2, Windows Terminal,
+    # GNOME Terminal all do); otherwise fall back to theme-relative named
+    # colors and accept approximation.
+
+    def rgb(r: int, g: int, b: int) -> int:
+        """Allocate a color id rendering exact RGB when the terminal allows it."""
+        key = (r, g, b)
+        if key in _TRUECOLOR_MAP:
+            return _TRUECOLOR_MAP[key]
+        slot = -1
+        if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+            slot = _next_truecolor_slot()
+            try:
+                curses.init_color(slot, int(r * 1000 / 255), int(g * 1000 / 255), int(b * 1000 / 255))
+            except (curses.error, ValueError):
+                slot = -1
+        resolved = slot if slot >= 0 else _nearest_named(r, g, b)
+        _TRUECOLOR_MAP[key] = resolved
+        return resolved
+
+    fg = rgb(*_TN["fg"])
+    fg_dark = rgb(*_TN["fg_dark"])
+    comment = rgb(*_TN["comment"])
+    blue = rgb(*_TN["blue"])
+    cyan = rgb(*_TN["cyan"])
+    green = rgb(*_TN["green"])
+    bg = rgb(*_TN["bg"])
+    visual = rgb(*_TN["bg_visual"])
+
+    pairs = {
+        P.TEXT: (fg, bg),
+        P.MUTED: (comment, bg),
+        P.VALUE: (blue, bg),
+        P.FREE: (cyan, bg),
+        P.ENABLED: (green, bg),
+        P.DISABLED: (fg_dark, bg),
+        P.SELECTED: (fg, visual),
+        P.CHEVRON: (comment, bg),
+        P.LEGEND_KEY: (fg_dark, bg),
+        P.LEGEND_DESC: (comment, bg),
+    }
+    for pid, (f, b) in pairs.items():
+        try:
+            curses.init_pair(pid, f, b)
+        except (curses.error, ValueError):
+            break  # terminal reports fewer pairs than we need; stop cleanly
 
 
-def _curses_draw_header(stdscr, text: str, color_pair: int = 10) -> None:
-    """Draw a full-width header bar."""
+_TRUECOLOR_SLOT = [100]  # start above the 16 standard ANSI slots
+_TRUECOLOR_MAP: dict[tuple, int] = {}
+
+
+def _next_truecolor_slot() -> int:
+    """Each distinct RGB gets its own stable slot (reused when repeated)."""
+    slot = _TRUECOLOR_SLOT[0]
+    _TRUECOLOR_SLOT[0] += 1
+    return slot
+
+
+def _nearest_named(r: int, g: int, b: int) -> int:
+    """Nearest of the 8 basic ANSI colors to the requested RGB."""
+    candidates = {
+        curses.COLOR_BLACK: (0, 0, 0),
+        curses.COLOR_RED: (205, 0, 0),
+        curses.COLOR_GREEN: (0, 205, 0),
+        curses.COLOR_YELLOW: (205, 205, 0),
+        curses.COLOR_BLUE: (0, 0, 238),
+        curses.COLOR_MAGENTA: (205, 0, 205),
+        curses.COLOR_CYAN: (0, 229, 238),
+        curses.COLOR_WHITE: (229, 229, 229),
+    }
+
+    def dist(c):
+        cr, cg, cb = candidates[c]
+        return (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2
+
+    return min(candidates, key=dist)
+
+
+def _query_terminal_bg() -> tuple | None:
+    """Query the terminal's current background color via OSC 11.
+
+    Returns (r, g, b) 0-255, or None if unsupported/unreadable.
+    Apple Terminal, iTerm2, Windows Terminal, GNOME Terminal respond.
+    """
+    if not sys.stdout.isatty():
+        return None
+    import termios, select as sel
+    fd = 1
+    try:
+        old = termios.tcgetattr(fd)
+        os.write(fd, b"\033]11;?\007")
+        result = b""
+        deadline = os.fstat(fd).st_mtime  # placeholder
+        # read response with short timeout
+        import time
+        end = time.time() + 0.25
+        while time.time() < end:
+            r, _, _ = sel.select([fd], [], [], 0.05)
+            if r:
+                result += os.read(fd, 256)
+                if b"\a" in result or b"\033\\" in result:
+                    break
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        # parse: ]11;rgb:RRRR/GGGG/BBBB
+        import re
+        m = re.search(rb"\]11;rgb:([0-9a-f]+)/([0-9a-f]+)/([0-9a-f]+)", result)
+        if m:
+            return tuple(int(m.group(i)[:2], 16) for i in (1, 2, 3))
+    except Exception:
+        pass
+    return None
+
+
+# Cache: (profile_bg_rgb, transparency 0.0-1.0) -> compensated RGB
+_COMPENSATED: dict[tuple, tuple] = {}
+
+
+def _compensated_bg() -> tuple:
+    """Return the SGR bg color that renders as Tokyo Night navy on the
+    user's (possibly translucent) terminal profile.
+
+    macOS composites: rendered = alpha*bg_color + (1-alpha)*desktop.
+    We can't control the desktop, but we CAN read the profile's own
+    background color and transparency via AppleScript. Solving for the
+    color that makes the blend equal Tokyo Night navy:
+        C = (T - (1-alpha)*B) / alpha
+    Only applied on macOS with a Terminal.app profile; other platforms
+    return the plain theme bg.
+    """
+    r, g, b = _TN["bg"]
+    key = (r, g, b)
+    if key in _COMPENSATED:
+        return _COMPENSATED[key]
+    result = (r, g, b)
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        try:
+            import subprocess
+            script = (
+                'tell application "Terminal" to get {background color, '
+                'transparency} of settings set "'
+            )
+            # get the active profile name first
+            out = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Terminal" to get name of current settings of front window'],
+                capture_output=True, text=True, timeout=2,
+            )
+            profile = out.stdout.strip()
+            if profile:
+                out = subprocess.run(
+                    ["osascript", "-e",
+                     f'tell application "Terminal" to get background color of settings set "{profile}"'],
+                    capture_output=True, text=True, timeout=2,
+                )
+                parts = [int(x) // 257 for x in out.stdout.strip().split(", ")]
+                prof_bg = tuple(parts)
+                out = subprocess.run(
+                    ["osascript", "-e",
+                     f'tell application "Terminal" to get transparency of settings set "{profile}"'],
+                    capture_output=True, text=True, timeout=2,
+                )
+                alpha = 1.0 - float(out.stdout.strip())  # transparency -> opacity
+                if 0 < alpha < 1:
+                    # compensate per channel
+                    def comp(t, b):
+                        c = (t - (1 - alpha) * b) / alpha
+                        return max(0, min(255, round(c)))
+                    result = (
+                        comp(r, prof_bg[0]),
+                        comp(g, prof_bg[1]),
+                        comp(b, prof_bg[2]),
+                    )
+        except Exception:
+            pass
+    _COMPENSATED[key] = result
+    return result
+
+
+_SGR_BG_EMITTED = [False]
+
+
+def _emit_sgr_bg() -> None:
+    """Emit the 24-bit SGR background escape (compensated for translucent
+    profiles). Called after every refresh because ncurses may emit \033[m
+    resets that clear the terminal's active background mid-frame."""
+    r, g, b = _compensated_bg()
+    if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+        if sys.stdout.isatty():
+            os.write(1, f"\033[48;2;{r};{g};{b}m".encode())
+            _SGR_BG_EMITTED[0] = True
+
+
+def _curses_theme_bkgd(stdscr) -> None:
+    """Fill the whole window with the theme background, every cell.
+
+    Two layers are needed because neither alone covers all terminals:
+    - bkgd() marks every cell (including erase-cleared ones) with the theme
+      pair — this is the ncurses-native fill.
+    - An explicit addstr sweep paints each row cell-by-cell. On translucent
+      macOS profiles (Red Sands, Silver Aerogel, Clear Light) cells only
+      touched by erase()/bkgd() can render blended with the desktop behind
+      the window; cells carrying an explicit character render opaque. The
+      sweep gives blanks a real painted character so they composite the same
+      as text lines.
+    Re-run after every resize and at the top of each draw loop.
+    """
+    height, width = stdscr.getmaxyx()
+    # NBSP (not plain space): ncurses trims trailing spaces that match the
+    # window background and emits an EOL-clear instead -- which resets to the
+    # terminal profile's own (translucent) background. A non-blank glyph
+    # forces explicit colored output for every column.
+    fill_ch = "\u00a0"
+    fill = curses.color_pair(P.TEXT)
+    for y in range(height):
+        try:
+            stdscr.addstr(y, 0, fill_ch * width, fill)
+        except curses.error:
+            pass
+    stdscr.bkgd(" ", fill)
+    _emit_sgr_bg()
+
+
+def _curses_draw_header(stdscr, text: str) -> None:
+    """Draw the full-width title row on the theme background."""
     height, width = stdscr.getmaxyx()
     try:
-        stdscr.addstr(0, 0, " " * (width - 1), curses.color_pair(color_pair))
-        stdscr.addstr(0, 2, text[:width - 4], curses.color_pair(color_pair) | curses.A_BOLD)
+        stdscr.addstr(0, 0, " " * (width - 1), curses.color_pair(P.SELECTED))
+        stdscr.addstr(0, 2, text[:width - 4], curses.color_pair(P.SELECTED) | curses.A_BOLD)
     except curses.error:
         pass
 
 
-def _curses_draw_status(stdscr, text: str, color_pair: int = 9) -> None:
-    """Draw status line at bottom."""
+def _curses_draw_legend(stdscr, entries: list[tuple[str, str]]) -> None:
+    """Draw the bottom legend: bold keys, gray descriptions, │ separators.
+
+    entries is a list of (key, description) pairs, e.g. [("←/→", "move")].
+    The full bottom row is painted with the theme background first so the
+    line is themed edge to edge, not just where text sits.
+    """
     height, width = stdscr.getmaxyx()
+    stdscr.addstr(height - 1, 0, " " * (width - 1), curses.color_pair(P.TEXT))
+    x = 2
     try:
-        stdscr.addstr(height - 1, 0, " " * (width - 1), curses.A_DIM)
-        stdscr.addstr(height - 1, 0, text[:width - 1], curses.color_pair(9) | curses.A_DIM)
+        for i, (key, desc) in enumerate(entries):
+            if i > 0:
+                sep = "  │  "
+                stdscr.addstr(height - 1, x, sep, curses.color_pair(P.MUTED))
+                x += len(sep)
+            run = f"{key} {desc}"
+            if x + len(run) > width - 1:
+                break
+            stdscr.addstr(
+                height - 1, x, key, curses.color_pair(P.LEGEND_KEY) | curses.A_BOLD
+            )
+            x += len(key)
+            stdscr.addstr(height - 1, x, " ", curses.color_pair(P.LEGEND_DESC))
+            x += 1
+            stdscr.addstr(height - 1, x, desc, curses.color_pair(P.LEGEND_DESC))
+            x += len(desc)
     except curses.error:
         pass
 
@@ -269,8 +538,12 @@ def _curses_select_win(
     curses.set_escdelay(25)
     if not options:
         return None
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     _curses_init_colors()
+    _curses_theme_bkgd(stdscr)
     state = set(preselected or [])
     current = 0
     n = len(options)
@@ -279,6 +552,7 @@ def _curses_select_win(
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         safe_w = max(1, width - 1)
+        _curses_theme_bkgd(stdscr)
         
         # Header bar
         _curses_draw_header(stdscr, f"  {title}")
@@ -301,41 +575,53 @@ def _curses_select_win(
             else:
                 line = f"  ▸ {opt}"
             line = line[:width - 2]
-            
+
             is_sel = (idx == current)
             try:
-                if is_sel:
-                    stdscr.addstr(2 + row, 0, line.ljust(width - 1), curses.color_pair(8))
-                else:
-                    stdscr.addstr(2 + row, 0, line, curses.color_pair(9))
+                # Row background first (theme bg, or selection bg for the cursor),
+                # then the label. A chevron sits right-aligned on expandable rows.
+                row_bg = curses.color_pair(P.SELECTED if is_sel else P.TEXT)
+                stdscr.addstr(2 + row, 0, " " * (width - 1), row_bg)
+                label_attr = row_bg | curses.A_BOLD if is_sel and not multi else row_bg
+                stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), label_attr)
+                if not multi:
+                    chev_x = max(width - 4, len(line) + 2)
+                    stdscr.addstr(
+                        2 + row,
+                        chev_x,
+                        "›",
+                        curses.color_pair(P.CHEVRON),
+                    )
             except curses.error:
                 pass
         
         # Separator line
         sep_y = 2 + min(n, height - 4)
         try:
-            stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(5) | curses.A_DIM)
+            stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
         except curses.error:
             pass
 
         # Footer line directly below the separator (cyan, like free models)
         if footer:
             try:
-                stdscr.addstr(sep_y + 1, 2, footer[:width - 4], curses.color_pair(3))
+                stdscr.addstr(sep_y + 1, 2, footer[:width - 4], curses.color_pair(P.VALUE))
             except curses.error:
                 pass
 
-        # Hint bar
-        hint = "↑/↓: move  Enter/→: select"
+        # Legend bar
+        legend = [("↑/↓", "move"), ("Enter/→", "select")]
         if multi:
-            hint += "  Space: toggle"
+            legend.append(("Space", "toggle"))
         if back_on_left:
-            hint += "  ←: back"
-        _curses_draw_status(stdscr, hint)
+            legend.append(("←", "back"))
+        _curses_draw_legend(stdscr, legend)
         
         stdscr.refresh()
+        _emit_sgr_bg()
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
+            _curses_theme_bkgd(stdscr)
             continue
         if ch == curses.KEY_UP and current > 0:
             current -= 1
@@ -411,8 +697,12 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
     enabled state, q/ESC finishes. Left/Right arrows page.
     Mutates models in place. Returns True if any toggle happened, False otherwise."""
     curses.set_escdelay(25)
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     _curses_init_colors()
+    _curses_theme_bkgd(stdscr)
     query = ""
     current = 0
     top = 0
@@ -426,6 +716,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         safe_w = max(1, width - 1)
+        _curses_theme_bkgd(stdscr)
         
         # Header with filter
         _curses_draw_header(stdscr, f"  Configure models  |  Filter: {query}")
@@ -439,7 +730,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
         
         if not filtered:
             try:
-                stdscr.addstr(2, 0, "  (no matches)", curses.color_pair(11))
+                stdscr.addstr(2, 0, "  (no matches)", curses.color_pair(P.MUTED))
             except curses.error:
                 pass
         
@@ -461,14 +752,15 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
             is_sel = (idx == current)
             try:
                 if is_sel:
-                    stdscr.addstr(2 + row, 0, line.ljust(width - 1), curses.color_pair(8))
+                    row_pair = P.SELECTED
+                elif enabled:
+                    row_pair = P.ENABLED
+                elif is_free:
+                    row_pair = P.FREE
                 else:
-                    if enabled:
-                        stdscr.addstr(2 + row, 0, line, curses.color_pair(1))
-                    elif is_free:
-                        stdscr.addstr(2 + row, 0, line, curses.color_pair(3))
-                    else:
-                        stdscr.addstr(2 + row, 0, line, curses.color_pair(9))
+                    row_pair = P.DISABLED
+                stdscr.addstr(2 + row, 0, " " * (width - 1), curses.color_pair(row_pair))
+                stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), curses.color_pair(row_pair))
             except curses.error:
                 pass
         
@@ -477,7 +769,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
         if 0 < enabled_count < len(filtered) and top <= sep_idx - 1 < top + list_h:
             y = 2 + sep_idx - top
             try:
-                stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(5) | curses.A_DIM)
+                stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
             except curses.error:
                 pass
         
@@ -486,16 +778,18 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
         if free_disabled_count > 0 and free_sep_idx < len(filtered) and top <= free_sep_idx - 1 < top + list_h:
             y = 2 + free_sep_idx - top
             try:
-                stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(3) | curses.A_DIM)
+                stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(P.FREE))
             except curses.error:
                 pass
         
-        hint = "↑/↓/←/→: move  ESC: back  Enter: toggle  Filter: type"
-        _curses_draw_status(stdscr, hint)
+        legend = [("↑/↓/←/→", "move"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")]
+        _curses_draw_legend(stdscr, legend)
 
         stdscr.refresh()
+        _emit_sgr_bg()
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
+            _curses_theme_bkgd(stdscr)
             continue
         if ch == 27:  # ESC -> back to provider menu
             return changed
@@ -542,18 +836,24 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
 def _curses_confirm_win(stdscr, prompt: str) -> bool:
     """Yes/no prompt drawn into an existing stdscr with color."""
     curses.set_escdelay(25)
-    curses.curs_set(0)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     _curses_init_colors()
     stdscr.erase()
+    _curses_theme_bkgd(stdscr)
     height, width = stdscr.getmaxyx()
     safe_w = max(1, width - 1)
     try:
         _curses_draw_header(stdscr, "  Confirm")
-        stdscr.addstr(2, 2, prompt[:width - 4], curses.color_pair(9))
-        stdscr.addstr(height - 2, 2, "  Y: Yes   N: No  (ESC: cancel)", curses.color_pair(11))
+        stdscr.addstr(2, 2, prompt[:width - 4], curses.color_pair(P.TEXT))
+        legend = [("Y", "yes"), ("N", "no"), ("ESC", "cancel")]
+        _curses_draw_legend(stdscr, legend)
     except curses.error:
         pass
     stdscr.refresh()
+    _emit_sgr_bg()
     while True:
         ch = stdscr.getch()
         if ch in (ord("y"), ord("Y")):
@@ -585,14 +885,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 enabled = bool(selected.get("enabled", True))
                 actions = [
                     "Configure models",
-                    "Disable provider" if enabled else "Enable provider",
+                    f"{'Disable' if enabled else 'Enable'} provider",
                     "Delete provider",
                     "Back",
                 ]
                 ai = _curses_select_win(
                     stdscr,
                     actions,
-                    f"Provider: {selected['id']}",
+                    f"Provider: {selected.get('name') or selected['id']}",
                     back_on_left=True,
                     footer=(
                         f"Required env var: {_env_status_line(first_env_key(selected))}"
@@ -630,7 +930,11 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
 
     try:
         return curses.wrapper(main)
-    except Exception:
+    except Exception as exc:
+        # Surface why the TUI failed instead of silently degrading to the
+        # numbered fallback (e.g. terminfo/color issues on some themes).
+        import traceback
+        traceback.print_exc()
         return _CURSES_FAILED
 
 
@@ -704,25 +1008,6 @@ def _provider_label(p: dict) -> str:
     return f"{p['id']} ({p.get('name') or p['id']}) [{state}]"
 
 
-_ANSI = {
-    "green": "\033[32m",
-    "cyan": "\033[36m",
-    "bold": "\033[1m",
-    "dim": "\033[2m",
-    "reset": "\033[0m",
-}
-
-
-def _supports_color() -> bool:
-    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-
-
-def _paint(text: str, code: str | None, use_color: bool) -> str:
-    if not use_color or code is None:
-        return text
-    return f"{_ANSI[code]}{text}{_ANSI['reset']}"
-
-
 def _provider_state_line(p: dict) -> str:
     penabled = bool(p.get("enabled", True))
     marker = "●" if penabled else "○"
@@ -735,7 +1020,6 @@ def _provider_state_line(p: dict) -> str:
 def render_list_text(
     providers_doc: dict,
     provider_filter: str | None,
-    use_color: bool,
     providers_only: bool = False,
 ) -> None:
     providers = [
@@ -765,10 +1049,10 @@ def render_list_text(
             if penabled:
                 enabled_providers += 1
             code = "bold" if penabled else None
-            print(_paint(_provider_state_line(provider), code, use_color))
+            print(_provider_state_line(provider))
             env = first_env_key(provider)
             if env:
-                print(_paint(f"    {_env_status_line(env)}", "cyan", use_color))
+                print(f"    {_env_status_line(env)}")
         print()
         print(
             f"Summary: {len(shown_providers)} providers · "
@@ -806,12 +1090,12 @@ def render_list_text(
             f"  {en_count}/{len(ids)} models"
         )
         if penabled:
-            print(_paint(line, "bold", use_color))
+            print(line)
         else:
-            print(_paint(line, None, use_color))
+            print(line)
 
         if not ids:
-            print(_paint("    (no models)", "dim", use_color))
+            print("    (no models)")
             continue
         for idx in order:
             mid = ids[idx]
@@ -820,7 +1104,7 @@ def render_list_text(
             free_tag = "  [free]" if "free" in mid.lower() else ""
             mline = f"    {'●' if menabled else '○'} {mid}{free_tag}"
             code = "green" if menabled else "dim"
-            print(_paint(mline, code, use_color))
+            print(mline)
 
     summary = (
         f"Summary: {len(shown_providers)} providers · {enabled_providers} enabled · "
@@ -870,7 +1154,7 @@ def print_env_requirements(providers_doc: dict) -> None:
         print(f"  {_env_status_line(env_var)}")
 
 
-def render_models_text(use_color: bool) -> int:
+def render_models_text() -> int:
     providers_doc = load_providers()
     providers = [
         p for p in providers_doc.get("providers", [])
@@ -899,7 +1183,7 @@ def render_models_text(use_color: bool) -> int:
             mid = enabled_ids[idx]
             m = mm[mid] if isinstance(mm[mid], dict) else {}
             mname = m.get("name") or mid
-            print(_paint(f"● {mname} ({pname}) - {pid}/{mid}", "green", use_color))
+            print(f"● {mname} ({pname}) - {pid}/{mid}")
 
     if not total_enabled:
         print("No enabled models. Enable with --enable or --config")
@@ -912,7 +1196,7 @@ def render_models_text(use_color: bool) -> int:
             penabled = bool(provider.get("enabled", True))
             marker = "●" if penabled else "○"
             pname = provider.get("name") or provider["id"]
-            print(_paint(f"{marker} Required env var: {env} = {_env_value(env)}  ({pname})", "cyan", use_color))
+            print(f"{marker} Required env var: {env} = {_env_value(env)}  ({pname})")
     print(f"Summary: {total_enabled} models enabled")
     return 0
     print(f"Summary: {total_enabled} models enabled")
@@ -1455,7 +1739,7 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
             enabled = bool(selected.get("enabled", True))
             actions = [
                 "Configure models",
-                "Disable provider" if enabled else "Enable provider",
+                f"{'Disable' if enabled else 'Enable'} provider",
                 "Delete provider",
                 "Back",
             ]
@@ -1463,7 +1747,7 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
             footer = f"Required env var: {env_line}" if first_env_key(selected) else None
             ai = _numbered_select(
                 actions,
-                f"Provider: {selected['id']}  (1-4)",
+                f"Provider: {selected.get('name') or selected['id']}  (1-4)",
                 footer=footer,
             )
             if ai is None or actions[ai] == "Back":
@@ -1627,23 +1911,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.config:
             return cmd_config()
         if args.providers:
-            render_list_text(
-                load_providers(),
-                None,
-                _supports_color(),
-                providers_only=True,
-            )
+            render_list_text(load_providers(), None, providers_only=True)
             return 0
         if args.provider is not None:
             render_list_text(
-                load_providers(),
-                args.provider,
-                _supports_color(),
-                providers_only=False,
+                load_providers(), args.provider, providers_only=False
             )
             return 0
         if args.models:
-            return render_models_text(_supports_color())
+            return render_models_text()
         if args.disable_all:
             return cmd_disable_all()
         if args.enable or args.disable:
