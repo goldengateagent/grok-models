@@ -67,17 +67,137 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
     }
 }
 
-/// `load_providers()`: providers.json with the same validation and default
-/// creation as the Python tool.
-pub fn load_providers() -> Res<Value> {
-    let default = serde_json::json!({ "providers": [] });
-    let mut data = load_json(&paths::providers_path(), &default)?;
-    let obj = data.as_object_mut().unwrap();
-    obj.entry("providers".to_string())
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if !obj["providers"].is_array() {
-        return fail("providers.json: 'providers' must be a list");
+// ---------------------------------------------------------------------------
+// Canonical providers.json layout. Every read and write goes through these
+// shapes, so entries come out identical no matter which code path (import,
+// add-provider, sync) produced them: fields in canonical order, providers
+// alphabetically by display name, models alphabetically by display name.
+// ---------------------------------------------------------------------------
+
+pub const TOP_LEVEL_KEY_ORDER: [&str; 2] = ["providers", "removed_providers"];
+pub const PROVIDER_KEY_ORDER: [&str; 6] =
+    ["id", "name", "env_key", "base_url", "enabled", "models"];
+const MODEL_KEY_ORDER: [&str; 2] = ["name", "enabled"];
+
+/// Rebuild an object with known keys first in canonical order; any unknown
+/// keys are preserved after them in their original order.
+pub fn order_keys(
+    data: &serde_json::Map<String, Value>,
+    key_order: &[&str],
+) -> serde_json::Map<String, Value> {
+    let mut ordered = serde_json::Map::new();
+    for key in key_order {
+        if let Some(v) = data.get(*key) {
+            ordered.insert((*key).to_string(), v.clone());
+        }
     }
+    for (k, v) in data {
+        if !key_order.contains(&k.as_str()) {
+            ordered.insert(k.clone(), v.clone());
+        }
+    }
+    ordered
+}
+
+fn str_field<'a>(o: &'a serde_json::Map<String, Value>, key: &str) -> &'a str {
+    o.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// Sort providers alphabetically by display name (id as fallback), lowercase.
+pub fn provider_sort_key(provider: &Value) -> String {
+    let key = match provider.as_object() {
+        Some(o) => {
+            let name = str_field(o, "name");
+            if name.is_empty() { str_field(o, "id") } else { name }
+        }
+        None => "",
+    };
+    key.to_lowercase()
+}
+
+/// Sort models by display name (falling back to the model id), lowercase.
+pub fn model_name_key(mid: &str, minfo: &Value) -> String {
+    let name = minfo
+        .as_object()
+        .map(|o| str_field(o, "name"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(mid);
+    name.to_lowercase()
+}
+
+/// Canonical form of one provider entry: ordered fields, models sorted
+/// alphabetically by display name.
+pub fn order_provider_entry(
+    provider: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut entry = order_keys(provider, &PROVIDER_KEY_ORDER);
+    if let Some(models) = entry.get("models").and_then(Value::as_object).cloned() {
+        let mut pairs: Vec<(&String, &Value)> = models.iter().collect();
+        pairs.sort_by_key(|(mid, minfo)| model_name_key(mid, minfo));
+        let sorted: serde_json::Map<String, Value> = pairs
+            .into_iter()
+            .map(|(mid, minfo)| {
+                let v = match minfo.as_object() {
+                    Some(o) => Value::Object(order_keys(o, &MODEL_KEY_ORDER)),
+                    None => minfo.clone(),
+                };
+                (mid.clone(), v)
+            })
+            .collect();
+        entry.insert("models".to_string(), Value::Object(sorted));
+    }
+    entry
+}
+
+/// Canonicalize the `providers` array of a doc: ordered fields per entry,
+/// list sorted by provider sort key. Used on read and on write.
+fn canonicalize_providers(data: &mut Value) {
+    if let Some(Value::Array(providers)) = data.get_mut("providers") {
+        let mut entries: Vec<Value> = providers
+            .iter()
+            .map(|p| match p.as_object() {
+                Some(o) => Value::Object(order_provider_entry(o)),
+                None => p.clone(),
+            })
+            .collect();
+        entries.sort_by_key(provider_sort_key);
+        *providers = entries;
+    }
+}
+
+/// Single write path for providers.json: emits every provider/model entry
+/// in canonical key order, providers alphabetically by display name and
+/// models alphabetically by display name, regardless of which code path
+/// produced them.
+pub fn dump_providers(path: &Path, doc: &Value) -> Res<()> {
+    let empty = serde_json::Map::new();
+    let obj = doc.as_object().unwrap_or(&empty);
+    let mut ordered = Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER));
+    canonicalize_providers(&mut ordered);
+    dump_json(path, &ordered)
+}
+
+/// `load_providers()`: providers.json with the same validation and default
+/// creation as the Python tool. Entries are canonicalized and the list is
+/// sorted on read, so menus consume this order directly.
+pub fn load_providers() -> Res<Value> {
+    load_providers_from(&paths::providers_path())
+}
+
+/// `load_providers` against an explicit path (tests use this to stay off the
+/// shared GROK_HOME environment).
+pub fn load_providers_from(path: &Path) -> Res<Value> {
+    let default = serde_json::json!({ "providers": [] });
+    let mut data = load_json(path, &default)?;
+    {
+        let obj = data.as_object_mut().unwrap();
+        obj.entry("providers".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !obj["providers"].is_array() {
+            return fail("providers.json: 'providers' must be a list");
+        }
+    }
+    canonicalize_providers(&mut data);
     Ok(data)
 }
 
@@ -92,5 +212,71 @@ mod tests {
             dumps_pretty(&v),
             "{\n  \"b\": true,\n  \"list\": [\n    1,\n    2\n  ],\n  \"s\": \"x\\\"y\",\n  \"empty\": {},\n  \"e\": []\n}\n"
         );
+    }
+
+    #[test]
+    fn order_keys_known_first_unknown_preserved() {
+        let data = serde_json::json!({"zz": 1, "enabled": true, "id": "p", "models": {}, "aa": 2});
+        let ordered = order_keys(data.as_object().unwrap(), &PROVIDER_KEY_ORDER);
+        let keys: Vec<String> = ordered.keys().cloned().collect();
+        // Canonical fields first in order, then unknown keys in original order.
+        assert_eq!(keys, ["id", "enabled", "models", "zz", "aa"]);
+    }
+
+    #[test]
+    fn order_provider_entry_sorts_models_by_display_name() {
+        let p = serde_json::json!({
+            "models": {"zeta": {"enabled": true, "name": "Zeta"},
+                       "alpha": {"name": "Alpha", "enabled": false}},
+            "enabled": true, "id": "p", "name": "P"
+        });
+        let entry = order_provider_entry(p.as_object().unwrap());
+        let keys: Vec<String> = entry.keys().cloned().collect();
+        assert_eq!(keys, ["id", "name", "enabled", "models"]);
+        let models = entry["models"].as_object().unwrap();
+        let mids: Vec<String> = models.keys().cloned().collect();
+        assert_eq!(mids, ["alpha", "zeta"]);
+        // Per-model canonical field order too.
+        let alpha: Vec<String> = models["alpha"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(alpha, ["name", "enabled"]);
+    }
+
+    #[test]
+    fn dump_providers_sorts_by_display_name_and_canonicalizes() {
+        let doc = serde_json::json!({
+            "removed_providers": ["old"],
+            "providers": [
+                {"id": "b", "name": "Beta", "enabled": false,
+                 "extra": 7,
+                 "models": {"m2": {"name": "M Two", "enabled": false}}},
+                {"id": "a", "enabled": true,
+                 "models": {"m1": {"enabled": true}}}
+            ]
+        });
+        let path = std::env::temp_dir().join(format!("gm-dumpproviders-{}.json", std::process::id()));
+        dump_providers(&path, &doc).expect("dump");
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let expected = "{\n  \"providers\": [\n    {\n      \"id\": \"a\",\n      \"enabled\": true,\n      \"models\": {\n        \"m1\": {\n          \"enabled\": true\n        }\n      }\n    },\n    {\n      \"id\": \"b\",\n      \"name\": \"Beta\",\n      \"enabled\": false,\n      \"models\": {\n        \"m2\": {\n          \"name\": \"M Two\",\n          \"enabled\": false\n        }\n      },\n      \"extra\": 7\n    }\n  ],\n  \"removed_providers\": [\n    \"old\"\n  ]\n}\n";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn load_providers_canonicalizes_on_read() {
+        let raw = "{\n  \"providers\": [\n    {\"name\": \"Zed\", \"id\": \"z\", \"models\": {}},\n    {\"id\": \"a\", \"name\": \"Ay\", \"models\": {\"m\": {\"enabled\": true}}}\n  ]\n}";
+        let path = std::env::temp_dir().join(format!("gm-loadprov-{}.json", std::process::id()));
+        std::fs::write(&path, raw).unwrap();
+        let doc = load_providers_from(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        let ids: Vec<String> = doc["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["a", "z"], "read must sort providers by display name");
+        // Entry field order is canonical on read as well.
+        let keys: Vec<String> = doc["providers"][0].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["id", "name", "models"]);
     }
 }

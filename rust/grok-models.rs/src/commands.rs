@@ -457,7 +457,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         return Ok(0);
     }
 
-    jsonio::dump_json(&providers_path, &doc)?;
+    jsonio::dump_providers(&providers_path, &doc)?;
     for pid in disabled_provider_ids {
         println!(
             "warning: provider {} is disabled; enable it too or its \
@@ -520,7 +520,7 @@ pub fn cmd_disable_all() -> Res<i32> {
         println!("All models already disabled.");
         return Ok(0);
     }
-    jsonio::dump_json(&providers_path, &doc)?;
+    jsonio::dump_providers(&providers_path, &doc)?;
     let api = sync::fetch_models_dev()?;
     let (path, stats) = sync::run_sync(&api)?;
     if let Some(path) = path {
@@ -531,13 +531,15 @@ pub fn cmd_disable_all() -> Res<i32> {
 }
 
 /// `add_provider_entry`: add provider with all models disabled and persist.
-pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str) -> Res<()> {
+pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet: bool) -> Res<()> {
     let existing: Vec<String> = usable(doc)
         .iter()
         .map(|p| p.get("id").map(id_to_string).unwrap_or_default())
         .collect();
     if existing.iter().any(|e| e == provider_id) {
-        println!("Provider {} already exists.", core::py_repr(provider_id));
+        if !quiet {
+            println!("Provider {} already exists.", core::py_repr(provider_id));
+        }
         return Ok(());
     }
     let pinfo = match api.get(provider_id) {
@@ -579,6 +581,12 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str) -> Re
     if !env.is_empty() {
         entry.insert("env_key".into(), Value::String(env));
     }
+    // Seed the provider-level base_url override from the catalog so the
+    // config menu shows the configured endpoint even before any edit.
+    let api_url = pinfo.get("api").and_then(Value::as_str).unwrap_or_default();
+    if !api_url.is_empty() {
+        entry.insert("base_url".into(), Value::String(api_url.to_string()));
+    }
     entry.insert("enabled".into(), Value::Bool(true));
     entry.insert("models".into(), Value::Object(models_map));
 
@@ -586,12 +594,14 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str) -> Re
         .and_then(Value::as_array_mut)
         .unwrap()
         .push(Value::Object(entry));
-    jsonio::dump_json(&paths::providers_path(), doc)?;
-    println!(
-        "Added provider {} with {} models (all disabled).",
-        core::py_repr(provider_id),
-        api_models.len()
-    );
+    jsonio::dump_providers(&paths::providers_path(), doc)?;
+    if !quiet {
+        println!(
+            "Added provider {} with {} models (all disabled).",
+            core::py_repr(provider_id),
+            api_models.len()
+        );
+    }
     Ok(())
 }
 
@@ -655,7 +665,7 @@ pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
 pub fn cmd_add_provider(provider_id: &str) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
     let api = sync::fetch_models_dev()?;
-    add_provider_entry(&mut doc, &api, provider_id)?;
+    add_provider_entry(&mut doc, &api, provider_id, false)?;
     Ok(0)
 }
 
@@ -707,8 +717,32 @@ pub fn cmd_import() -> Res<i32> {
         return Ok(0);
     }
 
+    // Providers that already exist are skipped by add-provider ("already
+    // exists"); per the revised flow they get enabled so run_sync reconciles
+    // them against the API (adds missing models, drops dead ones) before the
+    // per-model enables run.
+    let providers_doc_before_add = jsonio::load_providers()?;
+    let existing_ids: Vec<String> = providers_doc_before_add
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.get("id").and_then(Value::as_str).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let enable_providers: Vec<String> = provider_models
+        .keys()
+        .filter(|pid| existing_ids.iter().any(|e| e == *pid))
+        .cloned()
+        .collect();
+
     for provider_id in provider_models.keys() {
         cmd_add_provider(provider_id)?;
+    }
+
+    if !enable_providers.is_empty() {
+        cmd_toggle(&enable_providers, &[])?;
     }
 
     let enable_models: Vec<String> = provider_models
@@ -732,7 +766,7 @@ pub fn cmd_search(term: &str) -> Res<i32> {
         None => Ok(0),
         Some(pid) => {
             let mut doc = jsonio::load_providers()?;
-            add_provider_entry(&mut doc, &api, &pid)?;
+            add_provider_entry(&mut doc, &api, &pid, false)?;
             Ok(0)
         }
     }

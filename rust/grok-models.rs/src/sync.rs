@@ -114,7 +114,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert("removed_providers".into(), Value::Array(Vec::new()));
             }
-            jsonio::dump_json(&providers_path, &doc)?;
+            jsonio::dump_providers(&providers_path, &doc)?;
         }
         println!("No providers configured yet. Add with --add-provider");
         return Ok((None, Stats::default()));
@@ -172,6 +172,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
 
         let new_env_key = core::api_env_key(&pinfo);
         // Work on the entry inside the doc so mutations persist.
+        let effective_base_url: String;
         {
             let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
             if !new_env_key.is_empty()
@@ -183,6 +184,23 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             if !prov_obj.get("models").is_some_and(Value::is_object) {
                 prov_obj.insert("models".into(), Value::Object(Map::new()));
                 changed = true;
+            }
+            // Provider-level base_url override: a stored value wins over the
+            // catalog; a missing one is backfilled from the catalog so the
+            // config menu always has something to show.
+            let catalog_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
+            match prov_obj.get("base_url").and_then(Value::as_str) {
+                Some(v) if !v.is_empty() => effective_base_url = v.to_string(),
+                _ => {
+                    if !catalog_url.is_empty() {
+                        prov_obj.insert(
+                            "base_url".into(),
+                            Value::String(catalog_url.to_string()),
+                        );
+                        changed = true;
+                    }
+                    effective_base_url = catalog_url.to_string();
+                }
             }
         }
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
@@ -231,7 +249,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             changed = true;
         }
 
-        let base_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
+        let base_url = effective_base_url.as_str();
         let env_key = core::api_env_key(&pinfo);
         let pname = pinfo.get("name").and_then(Value::as_str).unwrap_or(&pid).to_string();
         if base_url.is_empty() {
@@ -309,7 +327,7 @@ tables will have an empty base_url",
     }
 
     if changed {
-        jsonio::dump_json(&providers_path, &doc)?;
+        jsonio::dump_providers(&providers_path, &doc)?;
     }
 
     let managed: Vec<String> = managed_ids.into_iter().collect();

@@ -11,6 +11,7 @@ pub struct Args {
     pub search: Option<String>,
     pub config: bool,
     pub disable_all: bool,
+    pub sync: bool,
     pub disable: Vec<String>,
     pub enable: Vec<String>,
     pub models: bool,
@@ -51,6 +52,7 @@ pub fn print_help() {
     println!("  --disable TARGET         Disable TARGET (provider or provider/model); repeatable");
     println!("  --enable TARGET          Enable TARGET (provider or provider/model); repeatable");
     println!("  --import                 Import providers/models from existing config.toml [model.*] tables");
+    println!("  --sync                   Sync providers.json with models.dev and rewrite config.toml");
     println!("  -h, --help               Show this help and exit");
     println!();
     println!("{EPILOG}");
@@ -111,6 +113,10 @@ pub fn parse(argv: &[String]) -> Res<Args> {
                 a.disable_all = true;
                 i += 1;
             }
+            "--sync" => {
+                a.sync = true;
+                i += 1;
+            }
             "--models" => {
                 a.models = true;
                 i += 1;
@@ -147,6 +153,9 @@ pub fn parse(argv: &[String]) -> Res<Args> {
     }
     if a.disable_all {
         group_flags.push("--disable-all");
+    }
+    if a.sync {
+        group_flags.push("--sync");
     }
     if a.providers {
         group_flags.push("--providers");

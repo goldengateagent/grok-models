@@ -28,7 +28,7 @@ pub const RED: (u8, u8, u8) = (247, 118, 142); // #f7768e
 
 /// Curses pair ids preserved from the Python `P` enum (1..=10, plus `Error`).
 #[allow(non_camel_case_types)]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum P {
     Text = 1,
     Muted = 2,
@@ -43,9 +43,25 @@ pub enum P {
     /// Red missing/error text on theme bg (Python `P.ERROR=11`): used for an
     /// unset env var name in the `--config` models preview box.
     Error = 11,
+    /// Code-block palette (Python pairs 14-19): borderless black panels.
+    CodeText = 14,
+    CodeComment = 15,
+    CodeError = 16,
+    CodeString = 17,
+    CodeSymbol = 18,
+    CodeVar = 19,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Homebrew-style code-block colors (macOS Terminal defaults): pure black
+/// background, green font, cyan comments, white strings. The gold symbol
+/// color is truecolor because ANSI yellow reads olive/brown.
+pub const CODE_BG: Rgb = Rgb { r: 0, g: 0, b: 0 };
+pub const CODE_TEXT: Rgb = Rgb { r: 0, g: 255, b: 0 };
+pub const CODE_COMMENT: Rgb = Rgb { r: 0, g: 255, b: 255 };
+pub const CODE_STRING: Rgb = Rgb { r: 255, g: 255, b: 255 };
+pub const CODE_SYMBOL_GOLD: Rgb = Rgb { r: 255, g: 204, b: 0 };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,

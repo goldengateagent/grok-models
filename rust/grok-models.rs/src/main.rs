@@ -52,7 +52,11 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     if !args.enable.is_empty() || !args.disable.is_empty() {
         return commands::cmd_toggle(&args.enable, &args.disable);
     }
-    commands::cmd_sync()
+    if args.sync {
+        return commands::cmd_sync();
+    }
+    // Default (no args): straight into the config TUI.
+    flow::cmd_config()
 }
 
 #[allow(dead_code)]

@@ -267,7 +267,7 @@ fn run_toggle_local(api: serde_json::Value, enable: Vec<String>, disable: Vec<St
     }
 
     let _ = api;
-    jsonio::dump_json(&providers_target, &doc).unwrap();
+    jsonio::dump_providers(&providers_target, &doc).unwrap();
     // Skip the inner fetch — just print changed providers.json for diff.
     let _ = jsonio::load_providers;
     0

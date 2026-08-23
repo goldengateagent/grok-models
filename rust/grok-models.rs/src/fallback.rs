@@ -222,7 +222,7 @@ pub fn config_models(selected_id: &str, doc: &mut Value, selected: &mut Map<Stri
         *slot = selected.clone();
     }
     if changed {
-        jsonio::dump_json(&paths::providers_path(), doc)?;
+        jsonio::dump_providers(&paths::providers_path(), doc)?;
     }
     let models_ref = selected.get("models").and_then(Value::as_object).unwrap();
     let enabled = ids
@@ -275,14 +275,13 @@ pub fn record_removed_provider(doc: &mut Value, pid: &str) {
 }
 
 fn provider_label_list(doc: &Value) -> Vec<(String, String)> {
-    // Returns (id, label) pairs sorted by id.
+    // Returns (id, label) pairs in loader order (name-sorted by load_providers).
     let mut entries: Vec<(String, String)> = Vec::new();
     for p in usable_provider_maps(doc) {
         let id = p.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
         let label = crate::provider_label_from(&p);
         entries.push((id, label));
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
 }
 
@@ -374,7 +373,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     let sel = find_by_id_mut(doc, &selected_id).unwrap();
                     let now_enabled = !was_enabled;
                     sel.insert("enabled".into(), Value::Bool(now_enabled));
-                    jsonio::dump_json(&paths::providers_path(), doc)?;
+                    jsonio::dump_providers(&paths::providers_path(), doc)?;
                     let verb = if was_enabled { "Disabled" } else { "Enabled" };
                     println!("{verb} provider {}.", core::py_repr(&selected_id));
                     changed = true;
@@ -383,7 +382,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     if confirm_delete(&selected_id)? {
                         remove_provider(doc, &selected_id);
                         record_removed_provider(doc, &selected_id);
-                        jsonio::dump_json(&paths::providers_path(), doc)?;
+                        jsonio::dump_providers(&paths::providers_path(), doc)?;
                         println!("Deleted provider {}.", core::py_repr(&selected_id));
                         changed = true;
                     }
