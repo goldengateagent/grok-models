@@ -77,7 +77,7 @@ def dump_json(path: Path, obj: object) -> None:
 # providers alphabetically by display name, models alphabetically by
 # display name.
 TOP_LEVEL_KEY_ORDER = ("providers", "removed_providers")
-PROVIDER_KEY_ORDER = ("id", "name", "env_key", "enabled", "models")
+PROVIDER_KEY_ORDER = ("id", "name", "env_key", "base_url", "enabled", "models")
 MODEL_KEY_ORDER = ("name", "enabled")
 
 # Code-panel padding. Horizontal padding is char-exact; vertical granularity
@@ -781,8 +781,15 @@ def _curses_select_win(
     key_hint: str | None = None,
     preview: list | None = None,
     status: str | None = None,
+    inline_edit: dict | None = None,
 ) -> int | list[int] | None:
-    """curses selector drawn into an existing stdscr with color theme."""
+    """curses selector drawn into an existing stdscr with color theme.
+
+    inline_edit (optional): {"row": i, "get": fn, "set": fn} turns row i into
+    an in-place text field instead of a selectable action: Enter opens an
+    editor inside that row's [...] area (other rows stay visible), typing
+    appends, Backspace erases, Enter saves via set(value) and updates the
+    label, ESC cancels unchanged. Arrow-right on the row just moves on."""
     curses.set_escdelay(25)
     if not options:
         return None
@@ -997,6 +1004,67 @@ def _curses_select_win(
                 state.discard(current)
             else:
                 state.add(current)
+        elif (
+            inline_edit is not None
+            and not multi
+            and current == inline_edit["row"]
+            and ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT)
+        ):
+            if ch == curses.KEY_RIGHT:
+                continue  # arrows navigate; only Enter activates editing
+            # In-place edit of the row's [...] area: no screen erase, so the
+            # other rows stay visible. The cursor is an inverted space drawn
+            # between the buffer and the closing bracket (terminal-independent).
+            buf = list(inline_edit["get"]())
+            _, edit_w = stdscr.getmaxyx()
+            row_y = 2 + (current - top)
+            prefix = options[current].split("[", 1)[0]
+            _curses_draw_legend(stdscr, [("Enter", "save"), ("ESC", "cancel")])
+            while True:
+                open_text = f"{prefix}[{''.join(buf)}"[: max(1, edit_w - 3)]
+                try:
+                    stdscr.addstr(
+                        row_y, 0, " " * (edit_w - 1), curses.color_pair(P.SELECTED)
+                    )
+                    stdscr.addstr(
+                        row_y,
+                        0,
+                        open_text,
+                        curses.color_pair(P.SELECTED) | curses.A_BOLD,
+                    )
+                    cur_x = min(len(open_text), max(1, edit_w - 3))
+                    stdscr.addstr(
+                        row_y,
+                        cur_x,
+                        " ",
+                        curses.color_pair(P.SELECTED) | curses.A_REVERSE,
+                    )
+                    close_x = min(len(open_text) + 1, max(1, edit_w - 2))
+                    stdscr.addstr(
+                        row_y,
+                        close_x,
+                        "]",
+                        curses.color_pair(P.SELECTED) | curses.A_BOLD,
+                    )
+                except curses.error:
+                    pass
+                stdscr.refresh()
+                _emit_sgr_bg()
+                e_ch = stdscr.getch()
+                if e_ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if buf:
+                        buf.pop()
+                elif 32 <= e_ch <= 126:
+                    buf.append(chr(e_ch))
+                elif e_ch in (curses.KEY_ENTER, 10, 13):
+                    value = "".join(buf).strip()
+                    inline_edit["set"](value)
+                    options[inline_edit["row"]] = f"{prefix}[{value}]"
+                    break
+                elif e_ch == 27:  # ESC cancels without changes
+                    break
+                # anything else (RESIZE etc.) just re-renders the row
+            continue
         elif ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT):
             return sorted(state) if multi else current
         elif back_on_left and ch == curses.KEY_LEFT:
@@ -1332,6 +1400,123 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
     return result["added"]
 
 
+def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str | None:
+    """Modal: type-to-filter every models.dev model across all providers and
+    enable the chosen one. Selecting a model of a provider that has not been
+    added yet adds that provider first (all its other models disabled), then
+    enables just the chosen model. Returns a confirmation status line for the
+    parent menu, or None. Fetch/add errors surface inline so the surrounding
+    TUI session survives."""
+    try:
+        api = fetch_models_dev()
+    except SyncError as exc:
+        _curses_inline_error_win(stdscr, f"Fetch failed: {exc}")
+        return None
+
+    # Index of combos already enabled in providers.json, so the catalog can
+    # skip them in one lookup (mirrors Add Provider excluding existing).
+    enabled_combos = set()
+    for p in providers_doc["providers"]:
+        if not isinstance(p, dict) or not p.get("id"):
+            continue
+        mm = p.get("models") if isinstance(p.get("models"), dict) else {}
+        for mid0, m0 in mm.items():
+            if isinstance(m0, dict) and bool(m0.get("enabled", True)):
+                enabled_combos.add((p.get("id"), mid0))
+
+    # Flatten the catalog across every provider; skip already-enabled combos.
+    catalog = []
+    for pid, pinfo in api.items():
+        if not isinstance(pinfo, dict):
+            continue
+        pname = pinfo.get("name") or pid
+        api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
+        for mid, minfo in api_models.items():
+            if (pid, mid) in enabled_combos:
+                continue
+            mname = minfo.get("name") if isinstance(minfo, dict) else None
+            catalog.append((pid, mid, mname or mid, str(pname)))
+    catalog.sort(key=lambda e: (e[2].lower(), e[0], e[1]))
+
+    result = {"status": None}
+
+    def compute_view(entries, query):
+        term_l = query.lower()
+
+        def matches(entry):
+            return (
+                not term_l
+                or term_l in entry[2].lower()  # model display name
+                or term_l in entry[1].lower()  # model id
+            )
+
+        return [e for e in entries if matches(e)], []
+
+    def render(entry, is_sel):
+        pid, mid, mname, pname = entry
+        return f"  {mname} ({pname}) - {pid}/{mid}", (
+            P.SELECTED if is_sel else P.TEXT
+        )
+
+    def enable(entry):
+        pid, mid, mname, pname = entry
+        existing = {
+            p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)
+        }
+        added = False
+        if pid not in existing:
+            before = len(providers_doc["providers"])
+            try:
+                add_provider_entry(providers_doc, api, pid, quiet=True)
+            except SyncError as exc:
+                _curses_inline_error_win(stdscr, f"Add failed: {exc}")
+                return True  # stay open
+            if len(providers_doc["providers"]) > before:
+                # Mirror the new entry into the live list so the parent menu
+                # refreshes, inserting at its sorted position by display name.
+                new_entry = providers_doc["providers"][-1]
+                keys = [_provider_sort_key(p) for p in providers]
+                providers.insert(
+                    bisect.bisect(keys, _provider_sort_key(new_entry)), new_entry
+                )
+                added = True
+        provider = next(
+            (
+                p
+                for p in providers_doc["providers"]
+                if isinstance(p, dict) and p.get("id") == pid
+            ),
+            None,
+        )
+        if provider is None:
+            _curses_inline_error_win(stdscr, f"Enable failed: provider {pid!r} missing")
+            return True  # stay open
+        models = provider.setdefault("models", {})
+        m = models.setdefault(mid, {})
+        if not isinstance(m, dict):
+            m = models[mid] = {}
+        m["enabled"] = True
+        dump_providers(PROVIDERS_PATH, providers_doc)
+        prefix = f"Added provider '{pid}'. " if added else ""
+        result["status"] = f"{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
+        return False  # close back to the main menu
+
+    _curses_filter_list_win(
+        catalog, stdscr,
+        title="Add model",
+        legend=[
+            ("↑/↓/←/→", "nav"),
+            ("ESC", "cancel"),
+            ("Enter", "enable"),
+            ("type", "filter"),
+        ],
+        compute_view=compute_view,
+        render=render,
+        on_enter=enable,
+    )
+    return result["status"]
+
+
 def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
     """Run the whole --config flow inside ONE curses session so there is no
     terminal-mode flash between menus. Returns True if providers.json
@@ -1346,6 +1531,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             ordered = providers
             labels = [_provider_label(p) for p in ordered]
             labels.append("➕ Add provider…")
+            labels.append("➕ Add model…")
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider",
                 status=status_msg,
@@ -1359,14 +1545,35 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     status_msg = added_msg
                     changed = True
                 continue
+            if pi == len(ordered) + 1:
+                enabled_msg = _curses_add_model_win(providers_doc, providers, stdscr)
+                if enabled_msg:
+                    status_msg = enabled_msg
+                    changed = True
+                continue
             status_msg = None
             selected = ordered[pi]
             action_cursor = 0
             while True:
                 enabled = bool(selected.get("enabled", True))
+
+                def _bu_get() -> str:
+                    v = selected.get("base_url")
+                    return v if isinstance(v, str) else ""
+
+                def _bu_set(v: str) -> None:
+                    # Empty input removes the override entirely.
+                    if v:
+                        selected["base_url"] = v
+                    else:
+                        selected.pop("base_url", None)
+                    dump_providers(PROVIDERS_PATH, providers_doc)
+
+                bu_before = _bu_get()
                 actions = [
                     "Configure models",
                     f"Provider [{'enabled' if enabled else 'disabled'}]",
+                    f"Base Url [{_bu_get()}]",
                     "Delete provider",
                     "Back",
                 ]
@@ -1377,6 +1584,12 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     f"Provider: {selected.get('name') or selected['id']}",
                     back_on_left=True,
                     initial=action_cursor,
+                    inline_edit={
+                        "row": 2,
+                        "get": _bu_get,
+                        "set": _bu_set,
+                        "label": lambda v: f"Base Url [{v}]",
+                    },
                     footer=(
                         _env_status_line(env_key)
                         if env_key
@@ -1390,6 +1603,10 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         else None
                     ),
                 )
+                # Detect an inline base_url edit before any early exit: the
+                # setter already persisted, this only flags the exit sync.
+                if _bu_get() != bu_before:
+                    changed = True
                 if ai is None or actions[ai] == "Back":
                     break
                 action_cursor = ai
@@ -1403,7 +1620,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     selected["enabled"] = not enabled
                     dump_providers(PROVIDERS_PATH, providers_doc)
                     changed = True
-                elif ai == 2:
+                elif ai == 3:
                     if _curses_confirm_win(stdscr, f"Delete provider {selected['id']!r}?"):
                         providers_doc["providers"] = [
                             p
@@ -1857,6 +2074,22 @@ def _record_removed_provider(providers_doc: dict, pid: str) -> None:
 
 def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
     providers_doc = load_providers()
+    # A 'provider/model' enable target whose provider was never added used to
+    # die in resolve_targets with "unknown provider". Add the provider first
+    # (all models disabled), then the resolution below flips just that model.
+    existing_ids = {
+        p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)
+    }
+    missing_providers: list[str] = []
+    for target in enable_targets:
+        pid, sep, _ = target.partition("/")
+        if sep and pid not in existing_ids and pid not in missing_providers:
+            missing_providers.append(pid)
+    if missing_providers:
+        api = fetch_models_dev()
+        for pid in missing_providers:
+            add_provider_entry(providers_doc, api, pid)
+
     resolved_enable = resolve_targets(providers_doc, enable_targets, True)
     resolved_disable = resolve_targets(providers_doc, disable_targets, False)
 
@@ -2167,7 +2400,18 @@ def run_sync() -> tuple[Path | None, dict]:
                 stats["models_removed"] += 1
                 changed = True
 
-        base_url = pinfo.get("api") or ""
+        # A stored non-empty base_url wins over the catalog; missing/empty
+        # backfills from the catalog and counts as a change (persisted by the
+        # trailing dump, and it rewrites config.toml with the effective URL).
+        stored = provider.get("base_url")
+        if not isinstance(stored, str):
+            stored = ""
+        catalog_api = pinfo.get("api") or ""
+        if not stored and catalog_api:
+            provider["base_url"] = catalog_api
+            stored = catalog_api
+            changed = True
+        base_url = stored
         env_key = api_env_key(pinfo)
         pname = pinfo.get("name") or pid
         if not base_url:
@@ -2256,6 +2500,9 @@ def add_provider_entry(
     env = api_env_key(pinfo)
     if env:
         entry["env_key"] = env
+    api_base = pinfo.get("api")
+    if isinstance(api_base, str) and api_base:
+        entry["base_url"] = api_base
     entry["enabled"] = True
     entry["models"] = models_map
     providers_doc["providers"].append(entry)
