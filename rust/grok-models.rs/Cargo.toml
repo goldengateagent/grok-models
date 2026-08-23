@@ -1,0 +1,32 @@
+[package]
+name = "grok-models"
+version = "1.0.0"
+edition = "2021"
+description = "Native port of grok-models.py: sync Grok Build [model.*] tables from models.dev"
+
+[lib]
+name = "grok_models"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grok-models"
+path = "src/main.rs"
+
+# Test-only driver used by dev/parity.py to run scenarios against the same
+# code paths as the real binary without network access.
+[[bin]]
+name = "gm-harness"
+path = "src/harness.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "2", default-features = true }
+libc = "0.2"
+once_cell = "1"
+# Used only to validate generated TOML, mirroring Python's tomllib check.
+toml = "0.8"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
