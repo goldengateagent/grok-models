@@ -225,6 +225,7 @@ _TN = {
     "blue": (122, 162, 247),       # #7aa2f7  values / accent
     "cyan": (125, 207, 255),       # #7dcfff  free tags / running
     "green": (158, 206, 106),      # #9ece6a  success / on
+    "red": (247, 118, 142),        # #f7768e  error / missing key
 }
 
 # Color pair ids used by the TUI. Backgrounds are pinned to the theme bg so
@@ -240,6 +241,9 @@ class P:
     CHEVRON = 8     # gray chevron on theme bg
     LEGEND_KEY = 9  # bold secondary key in legend
     LEGEND_DESC = 10  # gray description in legend
+    ERROR = 11       # red missing/error text on theme bg
+    ENABLED_SEL = 12  # green enabled text on selection bg
+    ERROR_SEL = 13    # red text on selection bg
 
 
 def _curses_init_colors() -> None:
@@ -287,6 +291,7 @@ def _curses_init_colors() -> None:
     blue = rgb(*_TN["blue"])
     cyan = rgb(*_TN["cyan"])
     green = rgb(*_TN["green"])
+    red = rgb(*_TN["red"])
     bg = rgb(*_TN["bg"])
     visual = rgb(*_TN["bg_visual"])
 
@@ -301,6 +306,9 @@ def _curses_init_colors() -> None:
         P.CHEVRON: (comment, bg),
         P.LEGEND_KEY: (fg_dark, bg),
         P.LEGEND_DESC: (comment, bg),
+        P.ERROR: (red, bg),
+        P.ENABLED_SEL: (green, visual),
+        P.ERROR_SEL: (red, visual),
     }
     for pid, (f, b) in pairs.items():
         try:
@@ -494,14 +502,19 @@ def _curses_draw_header(stdscr, text: str) -> None:
         pass
 
 
-def _curses_draw_legend(stdscr, entries: list[tuple[str, str]]) -> None:
+def _curses_draw_legend(
+    stdscr,
+    entries: list[tuple[str, str]],
+    right: list[tuple[str, str]] | None = None,
+) -> None:
     """Draw the bottom legend: bold keys (faded '/' separators), gray descriptions, │ separators.
 
     entries is a list of (key, description) pairs, e.g. [("←/→", "nav")].
-    The full row is painted with the theme background first so the line is
-    themed edge to edge, not just where text sits. It is drawn one line up
-    from the bottom so the bottom line of the screen stays a blank line of
-    padding beneath the menu.
+    `right` (optional) is drawn right-aligned at the lower-right corner,
+    e.g. [("Q", "quit")]. The full row is painted with the theme background
+    first so the line is themed edge to edge, not just where text sits. It is
+    drawn one line up from the bottom so the bottom line of the screen stays
+    a blank line of padding beneath the menu.
     """
     height, width = stdscr.getmaxyx()
     legend_y = height - 2
@@ -529,6 +542,43 @@ def _curses_draw_legend(stdscr, entries: list[tuple[str, str]]) -> None:
             x += 1
             stdscr.addstr(legend_y, x, desc, curses.color_pair(P.LEGEND_DESC))
             x += len(desc)
+
+        # Right-aligned block (e.g. "Q quit") in the lower-right corner.
+        if right:
+            SEP = "  │  "
+            widths = [len(k) + 1 + len(d) for k, d in right]
+            total = sum(widths) + len(SEP) * max(0, len(right) - 1)
+            rx = (width - 1) - total
+            if rx >= x + 1:
+                for k, d in right:
+                    for ch_k in k:
+                        if ch_k == "/":
+                            attr = curses.color_pair(P.MUTED)
+                        else:
+                            attr = curses.color_pair(P.LEGEND_KEY) | curses.A_BOLD
+                        stdscr.addstr(legend_y, rx, ch_k, attr)
+                        rx += 1
+                    stdscr.addstr(legend_y, rx, " ", curses.color_pair(P.LEGEND_DESC))
+                    rx += 1
+                    stdscr.addstr(legend_y, rx, d, curses.color_pair(P.LEGEND_DESC))
+                    rx += len(d)
+                    rx += len(SEP)
+    except curses.error:
+        pass
+
+
+def _draw_seg_line(stdscr, y, x, segments, max_w) -> None:
+    """Draw a line of (text, color_pair_id) segments, truncating at max_w."""
+    cx = x
+    try:
+        for text, pid in segments:
+            if cx >= x + max_w:
+                break
+            piece = text[: (x + max_w) - cx]
+            if not piece:
+                continue
+            stdscr.addstr(y, cx, piece, curses.color_pair(pid))
+            cx += len(piece)
     except curses.error:
         pass
 
@@ -543,6 +593,7 @@ def _curses_select_win(
     footer: str | None = None,
     initial: int = 0,
     key_hint: str | None = None,
+    preview: list | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme."""
     curses.set_escdelay(25)
@@ -593,7 +644,40 @@ def _curses_select_win(
                 row_bg = curses.color_pair(P.SELECTED if is_sel else P.TEXT)
                 stdscr.addstr(2 + row, 0, " " * (width - 1), row_bg)
                 label_attr = row_bg | curses.A_BOLD if is_sel and not multi else row_bg
-                stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), label_attr)
+                # Colorize a [enabled]/[disabled] token green/red. The token may
+                # be followed by a trailing decorative icon, so locate it by
+                # search rather than requiring it at the very end of the line.
+                token = None
+                tcolor = None
+                if "[enabled]" in line:
+                    token = "[enabled]"
+                    tcolor = P.ENABLED_SEL if is_sel else P.ENABLED
+                elif "[disabled]" in line:
+                    token = "[disabled]"
+                    tcolor = P.ERROR_SEL if is_sel else P.ERROR
+                if token:
+                    pos = line.index(token)
+                    head = line[:pos]
+                    tail = line[pos + len(token):]
+                    tok_attr = curses.color_pair(tcolor) | (
+                        curses.A_BOLD if is_sel else 0
+                    )
+                    stdscr.addstr(2 + row, 0, head[: width - 2], label_attr)
+                    stdscr.addstr(
+                        2 + row,
+                        len(head),
+                        token[: max(0, (width - 2) - len(head))],
+                        tok_attr,
+                    )
+                    if tail:
+                        stdscr.addstr(
+                            2 + row,
+                            len(head) + len(token),
+                            tail[: max(0, (width - 2) - len(head) - len(token))],
+                            label_attr,
+                        )
+                else:
+                    stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), label_attr)
                 if not multi:
                     chev_x = max(width - 4, len(line) + 2)
                     stdscr.addstr(
@@ -611,6 +695,32 @@ def _curses_select_win(
             stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
         except curses.error:
             pass
+
+        # Models preview: fill the empty space below the list (the --config
+        # main menu) with the enabled-models listing, styled like --models.
+        if preview:
+            avail_top = sep_y + 1
+            avail_bottom = height - 3
+            max_lines = avail_bottom - avail_top + 1
+            if max_lines > 0:
+                truncated = len(preview) > max_lines
+                draw_lines = preview[:max_lines]
+                if truncated:
+                    draw_lines = draw_lines[:-1] + [[("… (run --models for all)", P.MUTED)]]
+                for i, segs in enumerate(draw_lines):
+                    y = avail_top + i
+                    if isinstance(segs, tuple) and segs[0] == "heading":
+                        # Full-width blue background bar, like the title.
+                        try:
+                            stdscr.addstr(y, 0, " " * (width - 1), curses.color_pair(P.SELECTED))
+                            stdscr.addstr(
+                                y, 4, segs[1][:width - 4],
+                                curses.color_pair(P.SELECTED) | curses.A_BOLD,
+                            )
+                        except curses.error:
+                            pass
+                    else:
+                        _draw_seg_line(stdscr, y, 2, segs, width - 3)
 
         # Footer(s): blue boxes, left-aligned, stacked under the separator.
         # Box 1 (top) = key-setup commands; Box 2 (bottom) = env var status.
@@ -652,7 +762,10 @@ def _curses_select_win(
             legend.append(("Space", "toggle"))
         if back_on_left:
             legend.append(("←", "back"))
-        _curses_draw_legend(stdscr, legend)
+        # "Q quit" lives in the lower-right corner on the main menu (where q
+        # actually quits); submenus use ←/ESC to go back instead.
+        right = [("Q", "quit")] if not back_on_left else None
+        _curses_draw_legend(stdscr, legend, right=right)
         
         stdscr.refresh()
         _emit_sgr_bg()
@@ -913,7 +1026,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             ordered = sorted(providers, key=lambda p: p["id"])
             labels = [_provider_label(p) for p in ordered]
             pi = _curses_select_win(
-                stdscr, labels, "Select a provider  (q: quit)"
+                stdscr, labels, "Select Provider",
+                preview=_build_config_models_preview(providers_doc),
             )
             if pi is None:
                 return changed
@@ -922,9 +1036,9 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             while True:
                 enabled = bool(selected.get("enabled", True))
                 actions = [
-                    "Configure models",
-                    f"{'Disable' if enabled else 'Enable'} provider",
-                    "Delete provider",
+                    "Configure models 🛠",
+                    f"Provider [{'enabled' if enabled else 'disabled'}] 🔌",
+                    "Delete provider 🗑",
                     "Back",
                 ]
                 env_key = first_env_key(selected)
@@ -1212,25 +1326,28 @@ def render_models_text() -> int:
     print("Enabled models")
 
     total_enabled = 0
-    for provider in providers:
+    # Providers sorted alphabetically by name; models within each provider
+    # sorted alphabetically by display name.
+    for provider in sorted(
+        providers, key=lambda p: (p.get("name") or p["id"]).lower()
+    ):
         pid = provider["id"]
         penabled = bool(provider.get("enabled", True))
         mm = provider.get("models")
-        ids = list(mm.keys()) if isinstance(mm, dict) else []
-        enabled_ids = [
-            mid
-            for mid in ids
-            if penabled and isinstance(mm[mid], dict) and mm[mid].get("enabled", True)
-        ]
-        if not enabled_ids:
+        if not isinstance(mm, dict):
             continue
-        total_enabled += len(enabled_ids)
         pname = provider.get("name") or pid
-        order, _, _ = _sort_model_indices(enabled_ids, mm or {})
-        for idx in order:
-            mid = enabled_ids[idx]
-            m = mm[mid] if isinstance(mm[mid], dict) else {}
+        rows = []
+        for mid, m in mm.items():
+            if not isinstance(m, dict) or not m.get("enabled", True):
+                continue
+            if not penabled:
+                continue
             mname = m.get("name") or mid
+            rows.append((mname.lower(), mname, pid, mid))
+            total_enabled += 1
+        rows.sort(key=lambda r: (r[0], r[2], r[3]))
+        for _, mname, pid, mid in rows:
             print(f"● {mname} ({pname}) - {pid}/{mid}")
 
     if not total_enabled:
@@ -1249,6 +1366,86 @@ def render_models_text() -> int:
     return 0
     print(f"Summary: {total_enabled} models enabled")
     return 0
+
+
+def _build_config_models_preview(providers_doc: dict) -> list:
+    """Build the --models-style enabled-models listing as colored segment
+    lines, for rendering in the empty space under the --config main menu."""
+    providers = [
+        p for p in providers_doc.get("providers", [])
+        if isinstance(p, dict) and p.get("id")
+    ]
+    lines: list = []
+    # First element is a heading marker: ("heading", text) -> drawn as a
+    # full-width blue bar, like the screen title.
+    lines.append(("heading", "Enabled Models"))
+    lines.append([("", P.TEXT)])  # gap under the models header
+    total_enabled = 0
+    # Grouped by provider: providers sorted alphabetically by name, models
+    # within each provider sorted alphabetically by display name.
+    prov_sorted = sorted(
+        [p for p in providers if isinstance(p, dict) and p.get("id")],
+        key=lambda p: (p.get("name") or p["id"]).lower(),
+    )
+    for provider in prov_sorted:
+        pid = provider["id"]
+        penabled = bool(provider.get("enabled", True))
+        mm = provider.get("models")
+        if not isinstance(mm, dict):
+            continue
+        pname = provider.get("name") or pid
+        rows = []
+        for mid, m in mm.items():
+            if not isinstance(m, dict) or not m.get("enabled", True):
+                continue
+            if not penabled:
+                continue
+            mname = m.get("name") or mid
+            rows.append((mname.lower(), mname, pname, pid, mid))
+            total_enabled += 1
+        rows.sort(key=lambda r: (r[0], r[2], r[3]))
+        for _, mname, pname, pid, mid in rows:
+            lines.append([
+                ("● ", P.ENABLED),
+                (mname, P.VALUE),
+                (f" ({pname}) - {pid}/{mid}", P.TEXT),
+            ])
+    if not total_enabled:
+        lines.append([("No enabled models. Enable with --enable or --config", P.MUTED)])
+        return lines
+    lines.append([("", P.TEXT)])
+    # Env-var requirements in a blue box with aligned columns. The env var
+    # name is drawn red when its value is unset (missing key).
+    env_rows = []
+    for provider in prov_sorted:
+        env = first_env_key(provider)
+        if not env:
+            continue
+        val = _env_value(env)
+        pname = provider.get("name") or provider["id"]
+        env_rows.append((env, val, pname, val == '""'))
+    if env_rows:
+        w_env = max(len(e) for e, _, _, _ in env_rows)
+        w_val = max(len(v) for _, v, _, _ in env_rows)
+        inner_w = max(
+            len(e.ljust(w_env) + " = " + v.ljust(w_val) + "  (" + p + ")")
+            for e, v, p, _ in env_rows
+        )
+        w_tail = inner_w - w_env - 3 - w_val
+        lines.append([("┌" + "─" * inner_w + "┐", P.VALUE)])
+        for env, val, pname, missing in env_rows:
+            key_color = P.ERROR if missing else P.VALUE
+            lines.append([
+                ("│", P.VALUE),
+                (env.ljust(w_env), key_color),
+                (" = ", P.TEXT),
+                (val.ljust(w_val), P.TEXT),
+                (f"  ({pname})".ljust(w_tail), P.MUTED),
+                ("│", P.VALUE),
+            ])
+        lines.append([("└" + "─" * inner_w + "┘", P.VALUE)])
+    lines.append([(f"Summary: {total_enabled} models enabled", P.MUTED)])
+    return lines
 
 
 def cmd_disable_all() -> int:
@@ -1746,6 +1943,56 @@ def cmd_add_provider(provider_id: str) -> int:
     return 0
 
 
+def cmd_import() -> int:
+    """Seed providers.json from the [model.*] tables already in config.toml,
+    then enable those models. Reuses --add-provider and --enable, so no custom
+    reconcile code is needed."""
+    import tomllib
+
+    if not CONFIG_TOML_PATH.exists():
+        print("No config.toml found; nothing to import.")
+        return 0
+    try:
+        with open(CONFIG_TOML_PATH, "rb") as fh:
+            toml_data = tomllib.load(fh)
+    except Exception as exc:
+        fail(f"failed to read {CONFIG_TOML_PATH}: {exc}")
+
+    model_tables = toml_data.get("model")
+    if not isinstance(model_tables, dict):
+        print("No [model.*] tables in config.toml; nothing to import.")
+        return 0
+
+    provider_models: dict[str, list[str]] = {}
+    for table_key, table in model_tables.items():
+        if not isinstance(table, dict):
+            continue
+        model_id = table.get("model")
+        if not isinstance(model_id, str):
+            continue
+        safe_model_id = (
+            model_id.replace(".", "_").replace("/", "_").replace(":", "_")
+        )
+        provider_id = table_key.removesuffix("-" + safe_model_id)
+        provider_models.setdefault(provider_id, []).append(model_id)
+
+    if not provider_models:
+        print("No [model.*] tables in config.toml; nothing to import.")
+        return 0
+
+    for provider_id in provider_models:
+        cmd_add_provider(provider_id)
+
+    enable_models = [
+        f"{provider_id}/{model_id}"
+        for provider_id, model_ids in provider_models.items()
+        for model_id in model_ids
+    ]
+    disable_models: list[str] = []
+    cmd_toggle(enable_models, disable_models)
+    return 0
+
+
 def _config_models(selected: dict, providers_doc: dict) -> bool:
     """Configure which models are enabled via a realtime substring search
     (numbered fallback; the curses path is handled inside the single-session
@@ -1902,6 +2149,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add provider ID",
     )
     group.add_argument(
+        "--import",
+        dest="import_flag",
+        action="store_true",
+        help="Import providers/models from existing config.toml [model.*] tables",
+    )
+    group.add_argument(
         "--search",
         metavar="TERM",
         help="Search providers",
@@ -1954,6 +2207,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.add_provider:
             return cmd_add_provider(args.add_provider)
+        if args.import_flag:
+            return cmd_import()
         if args.search:
             return cmd_search(args.search)
         if args.config:
