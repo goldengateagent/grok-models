@@ -344,9 +344,44 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
 }
 
 /// `cmd_toggle --enable/--disable`. Returns exit code.
+/// `--enable pid/mid` targets whose provider is absent from the doc: these
+/// get auto-added (catalog-seeded) before resolution instead of failing.
+/// Bare provider targets and disable targets never appear here.
+fn missing_combo_providers(enable_targets: &[String], existing_ids: &[String]) -> Vec<String> {
+    let mut missing: Vec<String> = Vec::new();
+    for target in enable_targets {
+        if let Some((pid, _mid)) = target.split_once('/') {
+            let known = existing_ids.iter().any(|e| e == pid)
+                || missing.iter().any(|m| m == pid);
+            if !known {
+                missing.push(pid.to_string());
+            }
+        }
+    }
+    missing
+}
+
 pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<i32> {
     let providers_path = paths::providers_path();
     let mut doc = jsonio::load_providers()?;
+
+    // A 'provider/model' enable target whose provider was never added used to
+    // die in resolve_targets with "unknown provider". Add the provider first
+    // (all models disabled, catalog-seeded), then the resolution below flips
+    // just that model. Disable targets and bare provider ids keep the old
+    // behavior.
+    let existing_ids: Vec<String> = usable(&doc)
+        .iter()
+        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+        .collect();
+    let missing = missing_combo_providers(enable_targets, &existing_ids);
+    if !missing.is_empty() {
+        let api = sync::fetch_models_dev()?;
+        for pid in &missing {
+            add_provider_entry(&mut doc, &api, pid, false)?;
+        }
+    }
+
     let resolved_enable = resolve_targets(&doc, enable_targets)?;
     let resolved_disable = resolve_targets(&doc, disable_targets)?;
 
@@ -794,4 +829,33 @@ pub fn resolve_targets_local(doc: &Value, targets: &[String]) -> Res<Vec<Resolve
 
 impl ResolvedTarget {
     pub fn _none() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_combo_providers_dedupes_and_ignores_bare_and_known() {
+        let existing = vec!["opencode".to_string(), "grok".to_string()];
+        let targets: Vec<String> = vec![
+            "newprov/m1".into(),
+            "opencode/m2".into(),
+            "bareprovider".into(),
+            "newprov/m3".into(),
+            "grok".into(),
+            "other/m4".into(),
+        ];
+        assert_eq!(
+            missing_combo_providers(&targets, &existing),
+            vec!["newprov".to_string(), "other".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_combo_providers_empty_when_all_known() {
+        let existing = vec!["a".to_string()];
+        let targets: Vec<String> = vec!["a/x".into(), "a/y".into(), "a".into()];
+        assert!(missing_combo_providers(&targets, &existing).is_empty());
+    }
 }

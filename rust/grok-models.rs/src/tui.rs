@@ -1191,6 +1191,192 @@ pub fn edit_inline_row<S: Stdscr>(
 }
 
 // ---------------------------------------------------------------------------
+// Add-model modal: cross-provider catalog search
+// ---------------------------------------------------------------------------
+
+/// Flatten every models.dev model across all providers, skipping combos that
+/// are already enabled in the doc (default-enabled counts as enabled).
+/// Entries: (pid, mid, model display name, provider display name), sorted by
+/// (display name lower, pid, mid).
+fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, String, String)> {
+    let mut enabled_combos: std::collections::HashSet<(String, String)> = Default::default();
+    if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
+        for p in arr {
+            let Some(pid) = p.get("id").and_then(Value::as_str) else { continue };
+            let Some(mm) = p.get("models").and_then(Value::as_object) else { continue };
+            for (mid, m) in mm {
+                if m.is_object() && crate::get_bool_val(m, "enabled", true) {
+                    enabled_combos.insert((pid.to_string(), mid.clone()));
+                }
+            }
+        }
+    }
+
+    let mut catalog: Vec<(String, String, String, String)> = Vec::new();
+    let Some(api_obj) = api.as_object() else { return catalog };
+    for (pid, pinfo) in api_obj {
+        if !pinfo.is_object() {
+            continue;
+        }
+        let pname = pinfo.get("name").and_then(Value::as_str).filter(|s| !s.is_empty())
+            .unwrap_or(pid);
+        let api_models = pinfo.get("models").and_then(Value::as_object);
+        for (mid, minfo) in api_models.into_iter().flatten() {
+            if enabled_combos.contains(&(pid.clone(), mid.clone())) {
+                continue;
+            }
+            let mname = minfo
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(mid);
+            catalog.push((pid.clone(), mid.clone(), mname.to_string(), pname.to_string()));
+        }
+    }
+    catalog.sort_by(|a, b| {
+        (a.2.to_lowercase(), a.0.clone(), a.1.clone()).cmp(&(b.2.to_lowercase(), b.0.clone(), b.1.clone()))
+    });
+    catalog
+}
+
+struct AddModelPicker<'a> {
+    doc: &'a mut Value,
+    api: Value,
+    status: Option<String>,
+}
+
+impl<'a> FilterList for AddModelPicker<'a> {
+    type Entry = (String, String, String, String);
+
+    fn compute_view(
+        &self,
+        entries: &[(String, String, String, String)],
+        query: &str,
+    ) -> (Vec<(String, String, String, String)>, Vec<(usize, P)>) {
+        // Searchable: model display name and model id only.
+        let term_l = query.to_lowercase();
+        let ordered: Vec<_> = entries
+            .iter()
+            .filter(|(_, mid, mname, _)| {
+                term_l.is_empty()
+                    || mname.to_lowercase().contains(&term_l)
+                    || mid.to_lowercase().contains(&term_l)
+            })
+            .cloned()
+            .collect();
+        (ordered, Vec::new())
+    }
+
+    fn render(
+        &self,
+        entry: &(String, String, String, String),
+        is_sel: bool,
+    ) -> (String, P) {
+        let (pid, mid, mname, pname) = entry;
+        (
+            format!("  {mname} ({pname}) - {pid}/{mid}"),
+            if is_sel { P::Selected } else { P::Text },
+        )
+    }
+
+    fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String, String, String)) -> bool {
+        let (pid, mid, mname, pname) = entry;
+        let existing: Vec<String> = usable(self.doc)
+            .iter()
+            .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+            .collect();
+        let mut added = false;
+        if !existing.iter().any(|e| e == pid) {
+            match crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
+                Err(e) => {
+                    inline_error_win(stdscr, &format!("Add failed: {}", e.0));
+                    return true; // stay open
+                }
+                Ok(()) => {
+                    // Mirror the new entry into its sorted position so the
+                    // parent menu refreshes in order.
+                    if let Some(arr) =
+                        self.doc.get_mut("providers").and_then(Value::as_array_mut)
+                    {
+                        if arr.len() > existing.len() {
+                            let new_entry = arr.pop().unwrap();
+                            let key = jsonio::provider_sort_key(&new_entry);
+                            let pos = arr
+                                .iter()
+                                .map(jsonio::provider_sort_key)
+                                .collect::<Vec<_>>()
+                                .partition_point(|k| k.as_str() < key.as_str());
+                            arr.insert(pos, new_entry);
+                            added = true;
+                        }
+                    }
+                }
+            }
+        }
+        // Enable just this model on the target provider.
+        let Some(slot) = find_by_id_mut(self.doc, pid) else {
+            inline_error_win(stdscr, &format!("Enable failed: provider {pid:?} missing"));
+            return true; // stay open
+        };
+        let models = slot
+            .entry("models".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !models.is_object() {
+            *models = Value::Object(Map::new());
+        }
+        let m = models
+            .as_object_mut()
+            .unwrap()
+            .entry(mid.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !m.is_object() {
+            *m = Value::Object(Map::new());
+        }
+        m.as_object_mut()
+            .unwrap()
+            .insert("enabled".into(), Value::Bool(true));
+        let _ = jsonio::dump_providers(&crate::paths::providers_path(), self.doc);
+        let prefix = if added {
+            format!("Added provider '{pid}'. ")
+        } else {
+            String::new()
+        };
+        self.status = Some(format!(
+            "{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
+        ));
+        false // close back to the main menu
+    }
+}
+
+/// Modal: type-to-filter every models.dev model across all providers and
+/// enable the chosen one, auto-adding a missing provider first. Returns the
+/// confirmation status line for the parent menu, or None.
+pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<String> {
+    let api = match crate::sync::fetch_models_dev() {
+        Ok(a) => a,
+        Err(e) => {
+            inline_error_win(stdscr, &format!("Fetch failed: {}", e.0));
+            return None;
+        }
+    };
+    let catalog = build_add_model_catalog(&api, doc);
+    let mut picker = AddModelPicker { doc, api, status: None };
+    filter_list_win(
+        stdscr,
+        &catalog,
+        "Add model",
+        &[
+            ("↑/↓/←/→".to_string(), "nav".to_string()),
+            ("ESC".to_string(), "cancel".to_string()),
+            ("Enter".to_string(), "enable".to_string()),
+            ("type".to_string(), "filter".to_string()),
+        ],
+        &mut picker,
+    );
+    picker.status
+}
+
+// ---------------------------------------------------------------------------
 // Whole --config flow driver (real terminal)
 // ---------------------------------------------------------------------------
 
@@ -1349,6 +1535,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         // Zero providers is a valid state: ➕ Add provider… is reachable first.
         let mut labels: Vec<String> = ordered.iter().map(|p| crate::provider_label_from(p)).collect();
         labels.push("➕ Add provider…".to_string());
+        labels.push("➕ Add model…".to_string());
         let preview = build_config_models_preview(doc);
         let pi = match select_win(stdscr,
             &labels,
@@ -1369,6 +1556,15 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         if pi == ordered.len() {
             // "➕ Add provider…" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
+                status_msg = Some(msg);
+                changed = true;
+            }
+            continue;
+        }
+        if pi == ordered.len() + 1 {
+            // "➕ Add model…" — cross-provider modal; auto-adds a missing
+            // provider and enables just that model.
+            if let Some(msg) = add_model_win(stdscr, doc) {
                 status_msg = Some(msg);
                 changed = true;
             }
@@ -2132,6 +2328,36 @@ mod tests {
         // Bare operators outside quotes are gold symbols.
         let segs = code_line_segments("a >> b | c", None);
         assert!(segs.iter().any(|(t, p)| *p == P::CodeSymbol && t.contains('>')));
+    }
+
+    #[test]
+    fn build_add_model_catalog_flattens_sorts_and_skips_enabled() {
+        let api = serde_json::json!({
+            "zeta": {"name": "Zeta AI", "models": {
+                "alpha": {"name": "Alpha One"},
+                "beta": {}
+            }},
+            "aaa": {"name": "AAA", "models": {
+                "alpha": {"name": "Alpha Two"},
+                "zeta-mini": {"name": "Zeta Mini"}
+            }}
+        });
+        // zeta/alpha already enabled -> excluded.
+        let doc = serde_json::json!({"providers": [{
+            "id": "zeta", "name": "Zeta AI",
+            "models": {"alpha": {"enabled": true}}
+        }]});
+        let cat = build_add_model_catalog(&api, &doc);
+        let keys: Vec<(String, String)> = cat.iter().map(|(p, m, _, _)| (p.clone(), m.clone())).collect();
+        assert_eq!(
+            keys,
+            [("aaa", "alpha"), ("zeta", "beta"), ("aaa", "zeta-mini")]
+                .map(|(p, m)| (p.to_string(), m.to_string()))
+        );
+        // Sorted by display name lower: "Alpha Two" < "beta" < "Zeta Mini".
+        assert_eq!(cat[0].2, "Alpha Two");
+        assert_eq!(cat[1].2, "beta"); // name falls back to model id
+        assert_eq!(cat[2].2, "Zeta Mini");
     }
 
     #[test]
