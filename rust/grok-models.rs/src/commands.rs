@@ -131,9 +131,7 @@ pub fn render_list_text(
             println!("    (no models)");
             continue;
         }
-        let sorted = core::sort_model_indices(&ids, models_map, None);
-        for idx in sorted.filtered {
-            let mid = &ids[idx];
+        for mid in &ids {
             let m = models_map.get(mid);
             let menabled = m.map(|v| crate::get_bool_val(v, "enabled", true)).unwrap_or(false);
             let free_tag = if mid.to_lowercase().contains("free") {
@@ -182,16 +180,7 @@ pub fn render_models_text() -> Res<i32> {
     let mut total_enabled = 0usize;
     let mut lines_out: Vec<String> = Vec::new();
 
-    // Providers sorted alphabetically by name; models within each provider
-    // sorted alphabetically by display name (mirrors the new Python ordering).
-    let mut prov_sorted: Vec<&Map<String, Value>> = providers.iter().collect();
-    prov_sorted.sort_by(|a, b| {
-        crate::name_or(&Value::Object((*a).clone()), "")
-            .to_lowercase()
-            .cmp(&crate::name_or(&Value::Object((*b).clone()), "").to_lowercase())
-    });
-
-    for provider in &prov_sorted {
+    for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
         let penabled = crate::get_bool_obj(provider, "enabled", true);
         let empty = Map::new();
@@ -201,7 +190,6 @@ pub fn render_models_text() -> Res<i32> {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or(pid);
-        let mut rows: Vec<(String, String, String, String)> = Vec::new();
         for (mid, m) in mm {
             if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
                 continue;
@@ -210,14 +198,8 @@ pub fn render_models_text() -> Res<i32> {
                 continue;
             }
             let mname = crate::name_or(m, mid);
-            rows.push((mname.to_lowercase(), mname, pid.to_string(), mid.clone()));
-            total_enabled += 1;
-        }
-        rows.sort_by(|a, b| {
-            (a.0.clone(), a.2.clone(), a.3.clone()).cmp(&(b.0.clone(), b.2.clone(), b.3.clone()))
-        });
-        for (_, mname, pid, mid) in &rows {
             lines_out.push(format!("● {} ({}) - {}/{}", mname, pname, pid, mid));
+            total_enabled += 1;
         }
     }
     for l in lines_out {
@@ -492,7 +474,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         return Ok(0);
     }
 
-    jsonio::dump_providers(&providers_path, &doc)?;
+    jsonio::dump_providers(&providers_path, &mut doc)?;
     for pid in disabled_provider_ids {
         println!(
             "warning: provider {} is disabled; enable it too or its \
@@ -555,7 +537,7 @@ pub fn cmd_disable_all() -> Res<i32> {
         println!("All models already disabled.");
         return Ok(0);
     }
-    jsonio::dump_providers(&providers_path, &doc)?;
+    jsonio::dump_providers(&providers_path, &mut doc)?;
     let api = sync::fetch_models_dev()?;
     let (path, stats) = sync::run_sync(&api)?;
     if let Some(path) = path {
@@ -581,28 +563,11 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         Some(p) if p.is_object() => p.clone(),
         _ => return fail(format!("provider {} not found in models.dev", core::py_repr(provider_id))),
     };
-    let api_models: Map<String, Value> =
-        pinfo.get("models").and_then(Value::as_object).cloned().unwrap_or_default();
-    if api_models.is_empty() {
-        return fail(format!(
-            "provider {} has no models in models.dev",
-            core::py_repr(provider_id)
-        ));
-    }
-
-    let mut models_map = Map::new();
-    for (mid, minfo) in &api_models {
-        let mut entry = Map::new();
-        if minfo.is_object() {
-            if let Some(name) = minfo.get("name") {
-                if crate::truthy(Some(name)) {
-                    entry.insert("name".into(), name.clone());
-                }
-            }
-        }
-        entry.insert("enabled".into(), Value::Bool(false));
-        models_map.insert(mid.clone(), Value::Object(entry));
-    }
+    let catalog = pinfo
+        .get("models")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let mut entry = Map::new();
     entry.insert("id".into(), Value::String(provider_id.to_string()));
     let name_val = pinfo.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
@@ -622,6 +587,15 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !api_url.is_empty() {
         entry.insert("base_url".into(), Value::String(api_url.to_string()));
     }
+    let items = crate::sync::authority_items_for_provider(&pinfo, api_url, quiet);
+    if items.is_empty() {
+        return fail(format!(
+            "provider {} has no models in models.dev",
+            core::py_repr(provider_id)
+        ));
+    }
+    let models_map = crate::sync::seed_models_from_items(&items, &catalog);
+    let n_models = models_map.len();
     entry.insert("enabled".into(), Value::Bool(true));
     entry.insert("models".into(), Value::Object(models_map));
 
@@ -634,7 +608,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         println!(
             "Added provider {} with {} models (all disabled).",
             core::py_repr(provider_id),
-            api_models.len()
+            n_models
         );
     }
     Ok(())

@@ -9,7 +9,6 @@ https://models.dev/api.json so no separate model cache is needed.
 from __future__ import annotations
 
 import argparse
-import bisect
 import difflib
 import re
 import os
@@ -28,6 +27,9 @@ GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 PROVIDERS_PATH = GROK_HOME / "providers.json"
 CONFIG_TOML_PATH = GROK_HOME / "config.toml"
 MODELS_DEV_URL = "https://models.dev/api.json"
+# When True, add-provider and sync take model ids from GET {base_url}/models
+# (OpenAI list). When False, the models.dev provider `models` object is the list.
+USE_PROVIDER_MODELS_ENDPOINT = True
 
 TOML_SCALAR_FIELDS = (
     "model",
@@ -132,18 +134,25 @@ def order_provider_entry(provider: dict) -> dict:
 
 
 def dump_providers(path: Path, doc: dict) -> None:
-    """Single write path for providers.json: emits every provider/model entry
-    in canonical key order, providers alphabetically by id and models
-    alphabetically by display name, regardless of which code path produced
-    them."""
-    ordered = order_keys(doc, TOP_LEVEL_KEY_ORDER)
-    providers = [
-        order_provider_entry(pr) if isinstance(pr, dict) else pr
-        for pr in ordered.get("providers", [])
-    ]
+    """Single write path for providers.json: this is the only sort. Providers
+    A–Z by display name, models A–Z by display name, field key order. The
+    in-memory `doc` is updated to match the file so later reads of `doc` are
+    file order. Provider dict identities are kept so TUI `selected` stays live."""
+    providers = doc.get("providers")
+    if not isinstance(providers, list):
+        providers = []
+        doc["providers"] = providers
+    for pr in providers:
+        if not isinstance(pr, dict):
+            continue
+        canonical = order_provider_entry(pr)
+        pr.clear()
+        pr.update(canonical)
     providers.sort(key=_provider_sort_key)
-    ordered["providers"] = providers
+    ordered = order_keys(doc, TOP_LEVEL_KEY_ORDER)
     dump_json(path, ordered)
+    doc.clear()
+    doc.update(ordered)
 
 
 def _code_line_segments(
@@ -242,11 +251,6 @@ def load_json(path: Path, default: dict) -> dict:
 def load_providers() -> dict:
     data = load_json(PROVIDERS_PATH, {"providers": []})
     data.setdefault("providers", [])
-    data["providers"] = [
-        order_provider_entry(p) if isinstance(p, dict) else p
-        for p in data["providers"]
-    ]
-    data["providers"].sort(key=_provider_sort_key)
     if not isinstance(data["providers"], list):
         fail("providers.json: 'providers' must be a list")
     return data
@@ -279,6 +283,147 @@ def fetch_models_dev() -> dict:
             fail(f"expected object from {MODELS_DEV_URL}")
         _models_dev_api = payload
     return _models_dev_api
+
+
+def provider_models_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/models"
+
+
+def parse_openai_models_list(payload: object) -> list[tuple[str, str | None]] | None:
+    """OpenAI-style `{object, data: [{id, name?}]}`. None if unusable/empty."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    items: list[tuple[str, str | None]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        mid = row.get("id")
+        if not isinstance(mid, str) or not mid:
+            continue
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            name = None
+        items.append((mid, name))
+    return items or None
+
+
+def try_fetch_provider_models(
+    base_url: str, quiet: bool = False
+) -> list[tuple[str, str | None]] | None:
+    """GET {base_url}/models. Returns parsed (id, name) rows or None on failure."""
+    if not isinstance(base_url, str) or not base_url:
+        return None
+    url = provider_models_url(base_url)
+    try:
+        payload = http_get_json(url)
+    except SyncError as exc:
+        if not quiet:
+            print(f"  warning: {exc}")
+        return None
+    items = parse_openai_models_list(payload)
+    if items is None and not quiet:
+        print(f"  warning: no models list at {url}")
+    return items
+
+
+def catalog_models_dict(pinfo: dict) -> dict:
+    models = pinfo.get("models")
+    return models if isinstance(models, dict) else {}
+
+
+def items_from_catalog(catalog_models: dict) -> list[tuple[str, str | None]]:
+    items: list[tuple[str, str | None]] = []
+    for mid, minfo in catalog_models.items():
+        name = minfo.get("name") if isinstance(minfo, dict) else None
+        if not isinstance(name, str) or not name:
+            name = None
+        items.append((str(mid), name))
+    return items
+
+
+def resolve_model_name(
+    live_name: str | None,
+    stored_name: str | None,
+    catalog_models: dict,
+    mid: str,
+) -> str | None:
+    if isinstance(live_name, str) and live_name:
+        return live_name
+    if isinstance(stored_name, str) and stored_name:
+        return stored_name
+    minfo = catalog_models.get(mid)
+    if isinstance(minfo, dict):
+        name = minfo.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def seed_models_from_items(
+    items: list[tuple[str, str | None]], catalog_models: dict
+) -> dict:
+    models_map: dict = {}
+    for mid, live_name in items:
+        entry: dict = {}
+        name = resolve_model_name(live_name, None, catalog_models, mid)
+        if name:
+            entry["name"] = name
+        entry["enabled"] = False
+        models_map[mid] = entry
+    return models_map
+
+
+def reconcile_models_map(
+    models_map: dict,
+    items: list[tuple[str, str | None]],
+    catalog_models: dict,
+    stats: dict,
+) -> bool:
+    """Add/rename/remove models so keys match `items` (authority order)."""
+    authority = {mid for mid, _ in items}
+    changed = False
+    for mid, live_name in items:
+        if mid not in models_map:
+            entry: dict = {}
+            name = resolve_model_name(live_name, None, catalog_models, mid)
+            if name:
+                entry["name"] = name
+            entry["enabled"] = False
+            models_map[mid] = entry
+            stats["models_added"] = stats.get("models_added", 0) + 1
+            changed = True
+            continue
+        m = models_map[mid]
+        if not isinstance(m, dict):
+            m = {}
+            models_map[mid] = m
+            changed = True
+        stored = m.get("name") if isinstance(m.get("name"), str) else None
+        name = resolve_model_name(live_name, stored, catalog_models, mid)
+        if name and m.get("name") != name:
+            m["name"] = name
+            stats["models_renamed"] = stats.get("models_renamed", 0) + 1
+            changed = True
+    for mid in list(models_map):
+        if mid not in authority:
+            del models_map[mid]
+            stats["models_removed"] = stats.get("models_removed", 0) + 1
+            changed = True
+    return changed
+
+
+def authority_items_for_provider(
+    pinfo: dict, base_url: str, quiet: bool = False
+) -> list[tuple[str, str | None]]:
+    catalog = catalog_models_dict(pinfo)
+    if USE_PROVIDER_MODELS_ENDPOINT and base_url:
+        live = try_fetch_provider_models(base_url, quiet=quiet)
+        if live is not None:
+            return live
+    return items_from_catalog(catalog)
 
 
 def first_letter_cap(text: str) -> str:
@@ -1445,14 +1590,22 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             _curses_inline_error_win(stdscr, f"Add failed: {exc}")
             return True  # stay open
         if len(providers_doc["providers"]) > before:
-            # Mirror the new entry into the live list so the parent menu
-            # refreshes, inserting at its sorted position by display name.
-            new_entry = providers_doc["providers"][-1]
-            keys = [_provider_sort_key(p) for p in providers]
-            providers.insert(bisect.bisect(keys, _provider_sort_key(new_entry)), new_entry)
+            new_entry = next(
+                (
+                    p
+                    for p in providers_doc["providers"]
+                    if isinstance(p, dict) and p.get("id") == pid
+                ),
+                None,
+            )
+            providers[:] = [
+                p
+                for p in providers_doc["providers"]
+                if isinstance(p, dict) and p.get("id")
+            ]
+            n_models = len(new_entry.get("models", {})) if isinstance(new_entry, dict) else 0
             result["added"] = (
-                f"Added provider '{pid}' with "
-                f"{len(new_entry.get('models', {}))} models (all disabled)."
+                f"Added provider '{pid}' with {n_models} models (all disabled)."
             )
         return False  # close back to the provider menu
 
@@ -1539,13 +1692,11 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
                 _curses_inline_error_win(stdscr, f"Add failed: {exc}")
                 return True  # stay open
             if len(providers_doc["providers"]) > before:
-                # Mirror the new entry into the live list so the parent menu
-                # refreshes, inserting at its sorted position by display name.
-                new_entry = providers_doc["providers"][-1]
-                keys = [_provider_sort_key(p) for p in providers]
-                providers.insert(
-                    bisect.bisect(keys, _provider_sort_key(new_entry)), new_entry
-                )
+                providers[:] = [
+                    p
+                    for p in providers_doc["providers"]
+                    if isinstance(p, dict) and p.get("id")
+                ]
                 added = True
         provider = next(
             (
@@ -1594,7 +1745,12 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
         changed = False
         status_msg = None
         while True:
-            # providers is already name-sorted by load_providers(); keep it.
+            # Order is providers.json (sorted only on dump).
+            providers[:] = [
+                p
+                for p in providers_doc.get("providers", [])
+                if isinstance(p, dict) and p.get("id")
+            ]
             ordered = providers
             labels = [_provider_label(p) for p in ordered]
             labels.append("➕ Add provider…")
@@ -1852,7 +2008,6 @@ def render_list_text(
 
         models_map = provider.get("models")
         ids = list(models_map.keys()) if isinstance(models_map, dict) else []
-        order, _, _ = _sort_model_indices(ids, models_map or {})
         en_count = sum(
             1
             for mid in ids
@@ -1875,8 +2030,7 @@ def render_list_text(
         if not ids:
             print("    (no models)")
             continue
-        for idx in order:
-            mid = ids[idx]
+        for mid in ids:
             m = models_map.get(mid) if isinstance(models_map, dict) else None
             menabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
             free_tag = "  [free]" if "free" in mid.lower() else ""
@@ -1942,29 +2096,21 @@ def render_models_text() -> int:
     print("Enabled models")
 
     total_enabled = 0
-    # Providers sorted alphabetically by name; models within each provider
-    # sorted alphabetically by display name.
-    for provider in sorted(
-        providers, key=lambda p: (p.get("name") or p["id"]).lower()
-    ):
+    for provider in providers:
         pid = provider["id"]
         penabled = bool(provider.get("enabled", True))
         mm = provider.get("models")
         if not isinstance(mm, dict):
             continue
         pname = provider.get("name") or pid
-        rows = []
         for mid, m in mm.items():
             if not isinstance(m, dict) or not m.get("enabled", True):
                 continue
             if not penabled:
                 continue
             mname = m.get("name") or mid
-            rows.append((mname.lower(), mname, pid, mid))
-            total_enabled += 1
-        rows.sort(key=lambda r: (r[0], r[2], r[3]))
-        for _, mname, pid, mid in rows:
             print(f"● {mname} ({pname}) - {pid}/{mid}")
+            total_enabled += 1
 
     if not total_enabled:
         print("No enabled models. Enable with --enable or grok-models")
@@ -1978,8 +2124,6 @@ def render_models_text() -> int:
             marker = "●" if penabled else "○"
             pname = provider.get("name") or provider["id"]
             print(f"{marker} Required env var: {env} = {_env_value(env)}  ({pname})")
-    print(f"Summary: {total_enabled} models enabled")
-    return 0
     print(f"Summary: {total_enabled} models enabled")
     return 0
 
@@ -1997,30 +2141,20 @@ def _build_config_models_preview(providers_doc: dict) -> list:
     lines.append(("heading", "Enabled Models"))
     lines.append([("", P.TEXT)])  # gap under the models header
     total_enabled = 0
-    # Grouped by provider: providers sorted alphabetically by name, models
-    # within each provider sorted alphabetically by display name.
-    prov_sorted = sorted(
-        [p for p in providers if isinstance(p, dict) and p.get("id")],
-        key=lambda p: (p.get("name") or p["id"]).lower(),
-    )
-    for provider in prov_sorted:
+    for provider in providers:
         pid = provider["id"]
         penabled = bool(provider.get("enabled", True))
         mm = provider.get("models")
         if not isinstance(mm, dict):
             continue
         pname = provider.get("name") or pid
-        rows = []
         for mid, m in mm.items():
             if not isinstance(m, dict) or not m.get("enabled", True):
                 continue
             if not penabled:
                 continue
             mname = m.get("name") or mid
-            rows.append((mname.lower(), mname, pname, pid, mid))
             total_enabled += 1
-        rows.sort(key=lambda r: (r[0], r[2], r[3]))
-        for _, mname, pname, pid, mid in rows:
             lines.append([
                 ("● ", P.ENABLED),
                 (mname, P.VALUE),
@@ -2033,7 +2167,7 @@ def _build_config_models_preview(providers_doc: dict) -> list:
     # Env-var requirements rendered as a borderless black code panel with
     # padding: green text, gray provider-name annotations, red for unset keys.
     env_rows = []
-    for provider in prov_sorted:
+    for provider in providers:
         env = first_env_key(provider)
         if not env:
             continue
@@ -2250,12 +2384,18 @@ def build_fields(
     base_url: str,
     env_key: str,
     provider_name: str,
+    stored_name: str | None = None,
 ) -> dict:
     """Map a models.dev model entry to Grok Build [model.*] TOML fields."""
+    left = (
+        stored_name
+        if isinstance(stored_name, str) and stored_name
+        else (minfo.get("name") or first_letter_cap(model_id))
+    )
     fields: dict = {
         "model": model_id,
         "base_url": base_url,
-        "name": f"{minfo.get('name') or first_letter_cap(model_id)} ({provider_name})",
+        "name": f"{left} ({provider_name})",
         "env_key": env_key,
         "api_backend": "chat_completions",
     }
@@ -2430,7 +2570,7 @@ def run_sync() -> tuple[Path | None, dict]:
             print(f"  warning: provider {pid!r} not found in models.dev; skipping")
             stats["providers_missing"] += 1
             continue
-        api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
+        catalog_models = catalog_models_dict(pinfo)
 
         new_env_key = api_env_key(pinfo)
         if new_env_key and provider.get("env_key") != new_env_key:
@@ -2443,36 +2583,8 @@ def run_sync() -> tuple[Path | None, dict]:
             provider["models"] = models_map
             changed = True
 
-        for mid in api_models:
-            if mid not in models_map:
-                entry = {}
-                api_name = (
-                    api_models[mid].get("name")
-                    if isinstance(api_models[mid], dict) else None
-                )
-                if api_name:
-                    entry["name"] = api_name
-                entry["enabled"] = False
-                models_map[mid] = entry
-                stats["models_added"] += 1
-                changed = True
-            else:
-                m = models_map[mid]
-                if isinstance(m, dict):
-                    api_name = api_models[mid].get("name") if isinstance(api_models[mid], dict) else None
-                    if api_name and m.get("name") != api_name:
-                        m["name"] = api_name
-                        stats["models_renamed"] += 1
-                        changed = True
-        for mid in list(models_map):
-            if mid not in api_models:
-                del models_map[mid]
-                stats["models_removed"] += 1
-                changed = True
-
         # A stored non-empty base_url wins over the catalog; missing/empty
-        # backfills from the catalog and counts as a change (persisted by the
-        # trailing dump, and it rewrites config.toml with the effective URL).
+        # backfills from the catalog. /models is fetched from this stored URL.
         stored = provider.get("base_url")
         if not isinstance(stored, str):
             stored = ""
@@ -2482,6 +2594,11 @@ def run_sync() -> tuple[Path | None, dict]:
             stored = catalog_api
             changed = True
         base_url = stored
+
+        items = authority_items_for_provider(pinfo, base_url)
+        if reconcile_models_map(models_map, items, catalog_models, stats):
+            changed = True
+
         env_key = api_env_key(pinfo)
         pname = pinfo.get("name") or pid
         if not base_url:
@@ -2492,22 +2609,27 @@ def run_sync() -> tuple[Path | None, dict]:
 
         for mid, m in models_map.items():
             if not isinstance(m, dict):
-                api_name = (
-                    api_models.get(mid, {}).get("name")
-                    if isinstance(api_models.get(mid), dict) else None
-                )
-                entry = {"name": api_name} if api_name else {}
+                cat_name = catalog_models.get(mid, {}).get("name") if isinstance(
+                    catalog_models.get(mid), dict
+                ) else None
+                entry = {"name": cat_name} if cat_name else {}
                 entry["enabled"] = False
                 m = models_map[mid] = entry
                 changed = True
             if not m.get("enabled", True):
                 continue
-            minfo = api_models.get(mid)
+            minfo = catalog_models.get(mid)
+            stored_name = m.get("name") if isinstance(m.get("name"), str) else None
             if not isinstance(minfo, dict):
-                print(f"  warning: model {mid!r} not found in models.dev; skipping")
-                stats["models_missing"] += 1
-                continue
-            fields = build_fields(mid, minfo, base_url, env_key, pname)
+                if USE_PROVIDER_MODELS_ENDPOINT:
+                    minfo = {}
+                else:
+                    print(f"  warning: model {mid!r} not found in models.dev; skipping")
+                    stats["models_missing"] += 1
+                    continue
+            fields = build_fields(
+                mid, minfo, base_url, env_key, pname, stored_name=stored_name
+            )
             table_key = table_model_id(pid, mid)
             tables.append((table_key, fields))
             stats["tables_written"] += 1
@@ -2552,17 +2674,8 @@ def add_provider_entry(
     pinfo = api.get(provider_id)
     if not isinstance(pinfo, dict):
         fail(f"provider {provider_id!r} not found in models.dev")
-    api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
-    if not api_models:
-        fail(f"provider {provider_id!r} has no models in models.dev")
+    catalog_models = catalog_models_dict(pinfo)
 
-    models_map = {}
-    for mid, minfo in api_models.items():
-        entry = {}
-        if isinstance(minfo, dict) and minfo.get("name"):
-            entry["name"] = minfo["name"]
-        entry["enabled"] = False
-        models_map[mid] = entry
     entry = {
         "id": provider_id,
         "name": pinfo.get("name") or provider_id,
@@ -2573,6 +2686,11 @@ def add_provider_entry(
     api_base = pinfo.get("api")
     if isinstance(api_base, str) and api_base:
         entry["base_url"] = api_base
+    base_url = entry.get("base_url") if isinstance(entry.get("base_url"), str) else ""
+    items = authority_items_for_provider(pinfo, base_url, quiet=quiet)
+    if not items:
+        fail(f"provider {provider_id!r} has no models in models.dev")
+    models_map = seed_models_from_items(items, catalog_models)
     entry["enabled"] = True
     entry["models"] = models_map
     providers_doc["providers"].append(entry)
@@ -2697,7 +2815,12 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
     """Numbered (non-TTY) fallback for the entire --config flow."""
     changed = False
     while True:
-        # providers is already name-sorted by load_providers(); keep it.
+        # Order is providers.json (sorted only on dump).
+        providers[:] = [
+            p
+            for p in providers_doc.get("providers", [])
+            if isinstance(p, dict) and p.get("id")
+        ]
         ordered = providers
         labels = [_provider_label(p) for p in ordered]
         pi = _numbered_select(labels, "Select a provider  (q quits)")

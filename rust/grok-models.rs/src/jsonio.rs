@@ -150,7 +150,7 @@ pub fn order_provider_entry(
 }
 
 /// Canonicalize the `providers` array of a doc: ordered fields per entry,
-/// list sorted by provider sort key. Used on read and on write.
+/// list sorted by provider sort key. Used on write only.
 fn canonicalize_providers(data: &mut Value) {
     if let Some(Value::Array(providers)) = data.get_mut("providers") {
         let mut entries: Vec<Value> = providers
@@ -165,21 +165,21 @@ fn canonicalize_providers(data: &mut Value) {
     }
 }
 
-/// Single write path for providers.json: emits every provider/model entry
-/// in canonical key order, providers alphabetically by display name and
-/// models alphabetically by display name, regardless of which code path
-/// produced them.
-pub fn dump_providers(path: &Path, doc: &Value) -> Res<()> {
+/// Single write path for providers.json: this is the only sort. Providers
+/// A–Z by display name, models A–Z by display name. `doc` is replaced with
+/// the canonical form so memory matches the file.
+pub fn dump_providers(path: &Path, doc: &mut Value) -> Res<()> {
     let empty = serde_json::Map::new();
     let obj = doc.as_object().unwrap_or(&empty);
     let mut ordered = Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER));
     canonicalize_providers(&mut ordered);
-    dump_json(path, &ordered)
+    dump_json(path, &ordered)?;
+    *doc = ordered;
+    Ok(())
 }
 
 /// `load_providers()`: providers.json with the same validation and default
-/// creation as the Python tool. Entries are canonicalized and the list is
-/// sorted on read, so menus consume this order directly.
+/// creation as the Python tool. Order is file order; sorting happens on write.
 pub fn load_providers() -> Res<Value> {
     load_providers_from(&paths::providers_path())
 }
@@ -197,7 +197,6 @@ pub fn load_providers_from(path: &Path) -> Res<Value> {
             return fail("providers.json: 'providers' must be a list");
         }
     }
-    canonicalize_providers(&mut data);
     Ok(data)
 }
 
@@ -243,7 +242,7 @@ mod tests {
 
     #[test]
     fn dump_providers_sorts_by_display_name_and_canonicalizes() {
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "removed_providers": ["old"],
             "providers": [
                 {"id": "b", "name": "Beta", "enabled": false,
@@ -254,15 +253,22 @@ mod tests {
             ]
         });
         let path = std::env::temp_dir().join(format!("gm-dumpproviders-{}.json", std::process::id()));
-        dump_providers(&path, &doc).expect("dump");
+        dump_providers(&path, &mut doc).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let expected = "{\n  \"providers\": [\n    {\n      \"id\": \"a\",\n      \"enabled\": true,\n      \"models\": {\n        \"m1\": {\n          \"enabled\": true\n        }\n      }\n    },\n    {\n      \"id\": \"b\",\n      \"name\": \"Beta\",\n      \"enabled\": false,\n      \"models\": {\n        \"m2\": {\n          \"name\": \"M Two\",\n          \"enabled\": false\n        }\n      },\n      \"extra\": 7\n    }\n  ],\n  \"removed_providers\": [\n    \"old\"\n  ]\n}\n";
         assert_eq!(out, expected);
+        let ids: Vec<&str> = doc["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a", "b"], "dump must write sorted order back into doc");
     }
 
     #[test]
-    fn load_providers_canonicalizes_on_read() {
+    fn load_providers_preserves_file_order() {
         let raw = "{\n  \"providers\": [\n    {\"name\": \"Zed\", \"id\": \"z\", \"models\": {}},\n    {\"id\": \"a\", \"name\": \"Ay\", \"models\": {\"m\": {\"enabled\": true}}}\n  ]\n}";
         let path = std::env::temp_dir().join(format!("gm-loadprov-{}.json", std::process::id()));
         std::fs::write(&path, raw).unwrap();
@@ -274,9 +280,6 @@ mod tests {
             .iter()
             .map(|p| p["id"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(ids, ["a", "z"], "read must sort providers by display name");
-        // Entry field order is canonical on read as well.
-        let keys: Vec<String> = doc["providers"][0].as_object().unwrap().keys().cloned().collect();
-        assert_eq!(keys, ["id", "name", "models"]);
+        assert_eq!(ids, ["z", "a"], "read must keep file order");
     }
 }

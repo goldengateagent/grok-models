@@ -1100,24 +1100,15 @@ impl<'a> FilterList for AddProviderPicker<'a> {
             inline_error_win(stdscr, &format!("Add failed: {}", e.0));
             return true; // stay open
         }
-        // Mirror the new entry into its sorted position in the live doc so
-        // the parent menu refreshes in order.
+        // dump_providers already wrote name-sorted order back into doc.
         let mut model_count = 0usize;
-        if let Some(arr) = self.doc.get_mut("providers").and_then(Value::as_array_mut) {
-            let new_entry = arr.pop();
-            if let Some(new_entry) = new_entry {
+        if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
+            if let Some(new_entry) = arr.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(pid)) {
                 model_count = new_entry
                     .get("models")
                     .and_then(Value::as_object)
                     .map(|m| m.len())
                     .unwrap_or(0);
-                let key = jsonio::provider_sort_key(&new_entry);
-                let pos = arr
-                    .iter()
-                    .map(jsonio::provider_sort_key)
-                    .collect::<Vec<_>>()
-                    .partition_point(|k| k.as_str() < key.as_str());
-                arr.insert(pos, new_entry);
             }
         }
         self.added = Some(format!(
@@ -1359,20 +1350,8 @@ impl<'a> FilterList for AddModelPicker<'a> {
                     return true; // stay open
                 }
                 Ok(()) => {
-                    // Mirror the new entry into its sorted position so the
-                    // parent menu refreshes in order.
-                    if let Some(arr) =
-                        self.doc.get_mut("providers").and_then(Value::as_array_mut)
-                    {
+                    if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
                         if arr.len() > existing.len() {
-                            let new_entry = arr.pop().unwrap();
-                            let key = jsonio::provider_sort_key(&new_entry);
-                            let pos = arr
-                                .iter()
-                                .map(jsonio::provider_sort_key)
-                                .collect::<Vec<_>>()
-                                .partition_point(|k| k.as_str() < key.as_str());
-                            arr.insert(pos, new_entry);
                             added = true;
                         }
                     }
@@ -1448,8 +1427,8 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
 
 /// Build the `--models`-style enabled-models listing as `PreviewLine`s, for
 /// rendering in the empty space under the `--config` main menu. Mirrors
-/// Python's `_build_config_models_preview`: enabled models grouped by provider
-/// (both sorted by name), then an env-var status box and a summary line.
+/// Python's `_build_config_models_preview`: enabled models in providers.json
+/// order, then an env-var status box and a summary line.
 pub fn build_config_models_preview(doc: &Value) -> Vec<PreviewLine> {
     let providers: Vec<&Map<String, Value>> = doc
         .get("providers")
@@ -1468,26 +1447,14 @@ pub fn build_config_models_preview(doc: &Value) -> Vec<PreviewLine> {
     lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
 
     let mut total_enabled = 0usize;
-    let mut prov_sorted: Vec<Map<String, Value>> = providers
-        .iter()
-        .filter(|p| p.get("id").is_some())
-        .map(|p| (*p).clone())
-        .collect();
-    prov_sorted.sort_by(|a, b| {
-        crate::name_or(&Value::Object(a.clone()), "")
-            .to_lowercase()
-            .cmp(&crate::name_or(&Value::Object(b.clone()), "").to_lowercase())
-    });
-
-    for provider in &prov_sorted {
+    for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
         let penabled = crate::get_bool_obj(provider, "enabled", true);
         let mm = provider.get("models").and_then(Value::as_object);
         let Some(mm) = mm else {
             continue;
         };
-        let pname = crate::name_or(&Value::Object(provider.clone()), pid);
-        let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
+        let pname = crate::name_or(&Value::Object((*provider).clone()), pid);
         for (mid, m) in mm {
             if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
                 continue;
@@ -1496,14 +1463,10 @@ pub fn build_config_models_preview(doc: &Value) -> Vec<PreviewLine> {
                 continue;
             }
             let mname = crate::name_or(m, mid);
-            rows.push((mname.to_lowercase(), mname, pname.clone(), pid.to_string(), mid.clone()));
             total_enabled += 1;
-        }
-        rows.sort_by(|a, b| (a.0.clone(), a.2.clone(), a.3.clone()).cmp(&(b.0.clone(), b.2.clone(), b.3.clone())));
-        for (_, mname, pname, pid, mid) in &rows {
             lines.push(PreviewLine::Segs(vec![
                 ("● ".to_string(), P::Enabled),
-                (mname.clone(), P::Value),
+                (mname, P::Value),
                 (format!(" ({pname}) - {pid}/{mid}"), P::Text),
             ]));
         }
@@ -1522,13 +1485,13 @@ pub fn build_config_models_preview(doc: &Value) -> Vec<PreviewLine> {
     // Env-var requirements rendered as a borderless black code panel with
     // padding: green text, gray provider-name annotations, red for unset keys.
     let mut env_rows: Vec<(String, String, String, bool)> = Vec::new();
-    for provider in &prov_sorted {
+    for provider in &providers {
         let env = crate::first_env_key_from(provider);
         if env.is_empty() {
             continue;
         }
         let val = crate::core::env_value(&env);
-        let pname = crate::name_or(&Value::Object(provider.clone()), provider.get("id").and_then(Value::as_str).unwrap_or_default());
+        let pname = crate::name_or(&Value::Object((*provider).clone()), provider.get("id").and_then(Value::as_str).unwrap_or_default());
         let missing = val == "\"\"";
         env_rows.push((env, val, pname, missing));
     }
@@ -1596,7 +1559,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     let mut changed = false;
     let mut status_msg: Option<String> = None;
     loop {
-        // providers arrive name-sorted from load_providers(); keep that order.
+        // Order is providers.json (sorted only on dump).
         let ordered: Vec<Map<String, Value>> = usable(doc);
         // Zero providers is a valid state: ➕ Add provider… is reachable first.
         let mut labels: Vec<String> = ordered.iter().map(|p| crate::provider_label_from(p)).collect();

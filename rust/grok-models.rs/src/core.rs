@@ -199,13 +199,17 @@ pub fn build_fields(
     base_url: &str,
     env_key: &str,
     provider_name: &str,
+    stored_name: Option<&str>,
 ) -> Res<Map<String, Value>> {
     let mut fields = Map::new();
     fields.insert("model".into(), Value::String(model_id.to_string()));
     fields.insert("base_url".into(), Value::String(base_url.to_string()));
-    let name = match minfo.get("name") {
-        Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        _ => first_letter_cap(model_id),
+    let name = match stored_name {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match minfo.get("name") {
+            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+            _ => first_letter_cap(model_id),
+        },
     };
     fields.insert(
         "name".into(),

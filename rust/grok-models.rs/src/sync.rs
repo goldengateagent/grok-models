@@ -9,6 +9,9 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 
 pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+/// When true, add-provider and sync take model ids from GET {base_url}/models
+/// (OpenAI list). When false, the models.dev provider `models` object is the list.
+pub const USE_PROVIDER_MODELS_ENDPOINT: bool = true;
 
 #[derive(Default)]
 pub struct Stats {
@@ -76,6 +79,204 @@ fn fetch_json_url(url: &str) -> Res<Value> {
     http_get_json(url)
 }
 
+pub fn provider_models_url(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+/// OpenAI-style `{ data: [{ id, name? }] }`. None if unusable/empty.
+pub fn parse_openai_models_list(payload: &Value) -> Option<Vec<(String, Option<String>)>> {
+    let data = payload.get("data")?.as_array()?;
+    if data.is_empty() {
+        return None;
+    }
+    let mut items = Vec::new();
+    for row in data {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        let Some(Value::String(mid)) = obj.get("id") else {
+            continue;
+        };
+        if mid.is_empty() {
+            continue;
+        }
+        let name = match obj.get("name") {
+            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        items.push((mid.clone(), name));
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+pub fn try_fetch_provider_models(
+    base_url: &str,
+    quiet: bool,
+) -> Option<Vec<(String, Option<String>)>> {
+    if base_url.is_empty() {
+        return None;
+    }
+    let url = provider_models_url(base_url);
+    match http_get_json(&url) {
+        Err(e) => {
+            if !quiet {
+                println!("  warning: {}", e.0);
+            }
+            None
+        }
+        Ok(payload) => match parse_openai_models_list(&payload) {
+            None => {
+                if !quiet {
+                    println!("  warning: no models list at {url}");
+                }
+                None
+            }
+            Some(items) => Some(items),
+        },
+    }
+}
+
+fn catalog_models_map(pinfo: &Value) -> Map<String, Value> {
+    pinfo
+        .get("models")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn items_from_catalog(catalog: &Map<String, Value>) -> Vec<(String, Option<String>)> {
+    catalog
+        .iter()
+        .map(|(mid, minfo)| {
+            let name = minfo.get("name").and_then(Value::as_str).and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            });
+            (mid.clone(), name)
+        })
+        .collect()
+}
+
+fn catalog_name(catalog: &Map<String, Value>, mid: &str) -> Option<String> {
+    catalog
+        .get(mid)
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+}
+
+fn resolve_model_name(
+    live_name: Option<&str>,
+    stored_name: Option<&str>,
+    catalog: &Map<String, Value>,
+    mid: &str,
+) -> Option<String> {
+    if let Some(s) = live_name {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(s) = stored_name {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    catalog_name(catalog, mid)
+}
+
+pub fn seed_models_from_items(
+    items: &[(String, Option<String>)],
+    catalog: &Map<String, Value>,
+) -> Map<String, Value> {
+    let mut models_map = Map::new();
+    for (mid, live_name) in items {
+        let mut entry = Map::new();
+        if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
+            entry.insert("name".into(), Value::String(name));
+        }
+        entry.insert("enabled".into(), Value::Bool(false));
+        models_map.insert(mid.clone(), Value::Object(entry));
+    }
+    models_map
+}
+
+fn reconcile_models_map(
+    models_map: &mut Map<String, Value>,
+    items: &[(String, Option<String>)],
+    catalog: &Map<String, Value>,
+    stats: &mut Stats,
+) -> bool {
+    let authority: HashSet<&str> = items.iter().map(|(m, _)| m.as_str()).collect();
+    let mut changed = false;
+    for (mid, live_name) in items {
+        if !models_map.contains_key(mid) {
+            let mut entry = Map::new();
+            if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
+                entry.insert("name".into(), Value::String(name));
+            }
+            entry.insert("enabled".into(), Value::Bool(false));
+            models_map.insert(mid.clone(), Value::Object(entry));
+            stats.models_added += 1;
+            changed = true;
+            continue;
+        }
+        let m = models_map.get_mut(mid).unwrap();
+        if !m.is_object() {
+            *m = Value::Object(Map::new());
+            changed = true;
+        }
+        let obj = m.as_object_mut().unwrap();
+        let stored = obj.get("name").and_then(Value::as_str).map(str::to_string);
+        if let Some(name) =
+            resolve_model_name(live_name.as_deref(), stored.as_deref(), catalog, mid)
+        {
+            if obj.get("name") != Some(&Value::String(name.clone())) {
+                obj.insert("name".into(), Value::String(name));
+                stats.models_renamed += 1;
+                changed = true;
+            }
+        }
+    }
+    let stale: Vec<String> = models_map
+        .keys()
+        .filter(|mid| !authority.contains(mid.as_str()))
+        .cloned()
+        .collect();
+    for mid in stale {
+        models_map.remove(&mid);
+        stats.models_removed += 1;
+        changed = true;
+    }
+    changed
+}
+
+pub fn authority_items_for_provider(
+    pinfo: &Value,
+    base_url: &str,
+    quiet: bool,
+) -> Vec<(String, Option<String>)> {
+    let catalog = catalog_models_map(pinfo);
+    if USE_PROVIDER_MODELS_ENDPOINT && !base_url.is_empty() {
+        if let Some(live) = try_fetch_provider_models(base_url, quiet) {
+            return live;
+        }
+    }
+    items_from_catalog(&catalog)
+}
+
 fn providers_list(doc: &Value) -> Vec<Value> {
     doc.get("providers")
         .and_then(Value::as_array)
@@ -114,7 +315,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert("removed_providers".into(), Value::Array(Vec::new()));
             }
-            jsonio::dump_providers(&providers_path, &doc)?;
+            jsonio::dump_providers(&providers_path, &mut doc)?;
         }
         println!("No providers configured yet. Add with --add-provider");
         return Ok((None, Stats::default()));
@@ -167,8 +368,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             }
         };
 
-        let api_models: Map<String, Value> =
-            pinfo.get("models").and_then(Value::as_object).cloned().unwrap_or_default();
+        let catalog_models = catalog_models_map(&pinfo);
 
         let new_env_key = core::api_env_key(&pinfo);
         // Work on the entry inside the doc so mutations persist.
@@ -187,7 +387,7 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             }
             // Provider-level base_url override: a stored value wins over the
             // catalog; a missing one is backfilled from the catalog so the
-            // config menu always has something to show.
+            // config menu always has something to show. /models uses this URL.
             let catalog_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
             match prov_obj.get("base_url").and_then(Value::as_str) {
                 Some(v) if !v.is_empty() => effective_base_url = v.to_string(),
@@ -203,51 +403,26 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
                 }
             }
         }
+
+        let items = authority_items_for_provider(&pinfo, &effective_base_url, false);
+        {
+            let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
+            let models_map = prov_obj
+                .get_mut("models")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            if reconcile_models_map(models_map, &items, &catalog_models, &mut stats) {
+                changed = true;
+            }
+        }
+
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj
             .get_mut("models")
             .unwrap()
             .as_object_mut()
             .unwrap();
-
-        // Additions / renames, in API order.
-        for (mid, minfo) in &api_models {
-            if !models_map.contains_key(mid) {
-                let mut entry = Map::new();
-                if let Some(name) = minfo.get("name") {
-                    if !name.is_null() && crate::truthy(Some(name)) {
-                        entry.insert("name".into(), name.clone());
-                    }
-                }
-                entry.insert("enabled".into(), Value::Bool(false));
-                models_map.insert(mid.clone(), Value::Object(entry));
-                stats.models_added += 1;
-                changed = true;
-            } else {
-                let m = models_map.get_mut(mid).unwrap();
-                if m.is_object() {
-                    let obj = m.as_object_mut().unwrap();
-                    if let Some(api_name) = minfo.get("name") {
-                        if crate::truthy(Some(api_name)) && obj.get("name") != Some(api_name) {
-                            obj.insert("name".into(), api_name.clone());
-                            stats.models_renamed += 1;
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        // Removals of stale entries.
-        let stale: Vec<String> = models_map
-            .keys()
-            .filter(|mid| !api_models.contains_key(*mid))
-            .cloned()
-            .collect();
-        for mid in stale {
-            models_map.remove(&mid);
-            stats.models_removed += 1;
-            changed = true;
-        }
 
         let base_url = effective_base_url.as_str();
         let env_key = core::api_env_key(&pinfo);
@@ -261,16 +436,12 @@ tables will have an empty base_url",
         }
 
         // Table emission pass, in models-map insertion order.
+        // Extras come only from the cached models.dev payload (catalog_models).
         for (mid, m) in models_map.iter_mut() {
             if !m.is_object() {
-                let api_name = api_models
-                    .get(mid)
-                    .and_then(|v| v.get("name"))
-                    .filter(|n| crate::truthy(Some(n)))
-                    .cloned();
                 let mut entry = Map::new();
-                if let Some(n) = api_name {
-                    entry.insert("name".into(), n);
+                if let Some(n) = catalog_name(&catalog_models, mid) {
+                    entry.insert("name".into(), Value::String(n));
                 }
                 entry.insert("enabled".into(), Value::Bool(false));
                 *m = Value::Object(entry);
@@ -280,8 +451,11 @@ tables will have an empty base_url",
             if !menabled {
                 continue;
             }
-            let minfo = match api_models.get(mid) {
+            let stored_name = m.get("name").and_then(Value::as_str).map(str::to_string);
+            let empty = Value::Object(Map::new());
+            let minfo = match catalog_models.get(mid) {
                 Some(v) if v.is_object() => v,
+                _ if USE_PROVIDER_MODELS_ENDPOINT => &empty,
                 _ => {
                     println!(
                         "  warning: model {} not found in models.dev; skipping",
@@ -291,7 +465,14 @@ tables will have an empty base_url",
                     continue;
                 }
             };
-            let fields = core::build_fields(mid, minfo, base_url, &env_key, &pname)?;
+            let fields = core::build_fields(
+                mid,
+                minfo,
+                base_url,
+                &env_key,
+                &pname,
+                stored_name.as_deref(),
+            )?;
             let table_key = core::table_model_id(&pid, mid);
             tables.push((table_key, fields));
             stats.tables_written += 1;
@@ -327,7 +508,7 @@ tables will have an empty base_url",
     }
 
     if changed {
-        jsonio::dump_providers(&providers_path, &doc)?;
+        jsonio::dump_providers(&providers_path, &mut doc)?;
     }
 
     let managed: Vec<String> = managed_ids.into_iter().collect();
@@ -387,4 +568,81 @@ pub fn print_env_requirements(providers_doc: &Value) {
 pub fn print_sync_report(stats: &Stats, path: &std::path::Path, providers_doc: &Value) {
     print_summary(stats, path);
     print_env_requirements(providers_doc);
+}
+
+#[cfg(test)]
+mod live_endpoint_tests {
+    use super::*;
+    use crate::commands;
+    use crate::jsonio;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sandbox() {
+        let home = std::env::temp_dir().join(format!(
+            "gm-test-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("GROK_HOME", &home);
+    }
+
+    fn assert_add_provider_matches_live(provider_id: &str) {
+        let _guard = HOME_LOCK.lock().unwrap();
+        sandbox();
+        assert!(
+            USE_PROVIDER_MODELS_ENDPOINT,
+            "tests require USE_PROVIDER_MODELS_ENDPOINT"
+        );
+        commands::cmd_add_provider(provider_id).expect("add-provider");
+        let doc = jsonio::load_providers().expect("load providers.json");
+        let provider = doc
+            .get("providers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+            .expect("provider entry");
+        let base_url = provider
+            .get("base_url")
+            .and_then(Value::as_str)
+            .expect("base_url");
+        assert!(!base_url.is_empty(), "empty base_url for {provider_id}");
+        let live = try_fetch_provider_models(base_url, false)
+            .unwrap_or_else(|| panic!("GET {}/models failed", base_url.trim_end_matches('/')));
+        let live_ids: std::collections::HashSet<&str> =
+            live.iter().map(|(m, _)| m.as_str()).collect();
+        let stored = provider
+            .get("models")
+            .and_then(Value::as_object)
+            .expect("models map");
+        let stored_ids: std::collections::HashSet<&str> =
+            stored.keys().map(String::as_str).collect();
+        assert_eq!(
+            stored_ids.len(),
+            live_ids.len(),
+            "{provider_id}: count stored={} live={}",
+            stored_ids.len(),
+            live_ids.len()
+        );
+        assert_eq!(
+            stored_ids, live_ids,
+            "{provider_id}: stored ids != live /models ids"
+        );
+    }
+
+    #[test]
+    fn opencode_add_provider_matches_live_models() {
+        assert_add_provider_matches_live("opencode");
+    }
+
+    #[test]
+    fn openrouter_add_provider_matches_live_models() {
+        assert_add_provider_matches_live("openrouter");
+    }
 }
