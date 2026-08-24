@@ -58,16 +58,18 @@ Enabling a model adds the provider if it is not already.
 
 The Enabled Models list shows all currently enabled models across all providers
 with the model name, provider name and the `<provider-id>/<model-id>` which can be used
-on the command line to enable/disable as well. 
+on the command line to enable/disable as well. Press `S` to sort that list by
+model name; press `S` again to restore sort by provider name. 
 
 The required env var list shows the `env_key` entries required for the currently 
 enabled providers, green if the variable is set, red if you still need to export it. 
 Grok Build uses the `env_key` value for the API key to connect to the provider.
 
 After you select a provider, select Configure models, then type to filter
-that provider’s models. Enter enables or disables a model. The count updates
-as the filter changes. Enabled models are pinned to the top, then free models, then the 
-remainder sorted by name. Required env var for the `env_key` and sample export are shown. 
+that provider’s models by model name or model id. Enter enables or disables a
+model. The count updates as the filter changes. Enabled models are pinned to
+the top, then free models, then the remainder sorted by name. Required env var
+for the `env_key` and sample export are shown. 
 
 `providers.json` is written on each edit. `config.toml` is rewritten when you
 quit, if anything changed.

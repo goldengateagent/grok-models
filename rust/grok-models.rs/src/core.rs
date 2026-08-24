@@ -112,7 +112,15 @@ fn is_free(mid: &str) -> bool {
     mid.to_lowercase().contains("free")
 }
 
-/// Enabled first, then free models, then alphabetical; optional substring filter.
+fn model_display_name(models: &Map<String, Value>, mid: &str) -> String {
+    match models.get(mid) {
+        Some(v) => crate::name_or(v, mid),
+        None => mid.to_string(),
+    }
+}
+
+/// Enabled first, then free models, then alphabetical by display name
+/// (id as tiebreaker). Optional substring filter matches model id or display name.
 pub fn sort_model_indices(
     ids: &[String],
     models: &Map<String, Value>,
@@ -124,16 +132,19 @@ pub fn sort_model_indices(
         .enumerate()
         .filter(|(_, id)| match &filter_lower {
             None => true,
-            Some(q) => id.to_lowercase().contains(q),
+            Some(q) => {
+                id.to_lowercase().contains(q)
+                    || model_display_name(models, id).to_lowercase().contains(q)
+            }
         })
         .map(|(i, _)| i)
         .collect();
 
-    let key_of = |mid: &str| -> (u8, u8, String) {
-        let enabled = model_enabled(models, mid);
+    let key_of = |mid: &str| -> (u8, u8, String, String) {
         (
-            if enabled { 0 } else { 1 },
+            if model_enabled(models, mid) { 0 } else { 1 },
             if is_free(mid) { 0 } else { 1 },
+            model_display_name(models, mid).to_lowercase(),
             mid.to_lowercase(),
         )
     };
@@ -270,7 +281,7 @@ pub fn provider_label(p: &Value) -> String {
     };
     let pid = p["id"].as_str().unwrap_or_default();
     let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
-    format!("{pid} ({name}) [{state}]")
+    format!("({name}) - {pid} [{state}]")
 }
 
 /// `_env_value`: first 10 chars + ellipsis, quoted.
@@ -333,5 +344,48 @@ pub fn require_id(p: &Value) -> Res<&str> {
     match p.get("id").and_then(Value::as_str) {
         Some(s) => Ok(s),
         None => fail("providers.json entry missing 'id'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn provider_label_swaps_name_and_id() {
+        let p = json!({"id": "opencode-go", "name": "OpenCode Go", "enabled": true});
+        assert_eq!(
+            provider_label(&p),
+            "(OpenCode Go) - opencode-go [enabled]"
+        );
+        let p = json!({"id": "x", "name": "X", "enabled": false});
+        assert_eq!(provider_label(&p), "(X) - x [disabled]");
+    }
+
+    #[test]
+    fn sort_model_indices_enabled_first_alpha_by_name_filters_name_or_id() {
+        let ids = vec!["z-id".into(), "a-free".into(), "m-mid".into()];
+        let models = json!({
+            "z-id": {"name": "Alpha", "enabled": true},
+            "a-free": {"name": "Zeta Free", "enabled": false},
+            "m-mid": {"name": "Beta", "enabled": false},
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let sorted = sort_model_indices(&ids, &models, None);
+        let ordered: Vec<&str> = sorted.filtered.iter().map(|&i| ids[i].as_str()).collect();
+        assert_eq!(ordered, ["z-id", "a-free", "m-mid"]);
+        assert_eq!(sorted.enabled_count, 1);
+        assert_eq!(sorted.free_disabled_count, 1);
+
+        let by_name = sort_model_indices(&ids, &models, Some("alpha"));
+        assert_eq!(by_name.filtered.len(), 1);
+        assert_eq!(ids[by_name.filtered[0]], "z-id");
+
+        let by_id = sort_model_indices(&ids, &models, Some("a-free"));
+        assert_eq!(by_id.filtered.len(), 1);
+        assert_eq!(ids[by_id.filtered[0]], "a-free");
     }
 }

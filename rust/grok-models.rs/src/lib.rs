@@ -119,14 +119,7 @@ pub fn first_env_key_from(o: &serde_json::Map<String, Value>) -> String {
 }
 
 pub fn provider_label_from(o: &serde_json::Map<String, Value>) -> String {
-    let state = if get_bool(&Value::Object(o.clone()), "enabled", true) {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    let pid = o.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = o.get("name").and_then(Value::as_str).unwrap_or(pid);
-    format!("{pid} ({name}) [{state}]")
+    core::provider_label(&Value::Object(o.clone()))
 }
 
 /// Python `m.get("env_key")` where only strings count; empty string otherwise.

@@ -522,6 +522,7 @@ def search_providers(api: dict, term: str) -> str | None:
 
 
 _CURSES_FAILED = object()  # sentinel: curses couldn't run (not a tty, etc.)
+_SORT_TOGGLED = object()  # sentinel: main-menu S toggled Enabled Models sort
 
 
 # Tokyo Night (Night/Storm) palette — values mirror grok-build's tokyonight.rs.
@@ -556,6 +557,7 @@ class P:
     ERROR = 11       # red missing/error text on theme bg
     ENABLED_SEL = 12  # green enabled text on selection bg
     ERROR_SEL = 13    # red text on selection bg
+    VALUE_SEL = 20    # blue value text on selection bg
     CODE_TEXT = 14    # green on black — code-block body (Homebrew-style)
     CODE_COMMENT = 15  # gray on black — code-block comments
     CODE_ERROR = 16   # red on black — unset env var in code block
@@ -691,6 +693,7 @@ def _curses_init_colors() -> None:
         P.ERROR: (red, bg),
         P.ENABLED_SEL: (green, visual),
         P.ERROR_SEL: (red, visual),
+        P.VALUE_SEL: (blue, visual),
         P.CODE_TEXT: (code_text, code_bg),
         P.CODE_COMMENT: (code_comment, code_bg),
         P.CODE_ERROR: (_code_error, code_bg),
@@ -949,6 +952,19 @@ def _curses_draw_legend(
         pass
 
 
+def _pair_on_selection_bg(pid: int) -> int:
+    """Keep segment fg, swap theme bg for the selection highlight bg."""
+    if pid == P.ENABLED:
+        return P.ENABLED_SEL
+    if pid == P.VALUE:
+        return P.VALUE_SEL
+    if pid == P.TEXT:
+        return P.SELECTED
+    if pid == P.ERROR:
+        return P.ERROR_SEL
+    return pid
+
+
 def _draw_seg_line(stdscr, y, x, segments, max_w) -> None:
     """Draw a line of (text, color_pair_id) segments, truncating at max_w."""
     cx = x
@@ -1189,7 +1205,8 @@ def _curses_select_win(
             legend.append(("←", "back"))
         else:
             # Menus without a back binding (main menu) quit via q instead;
-            # render it inline like the other bindings.
+            # render it inline like the other bindings. S sort sits left of Q.
+            legend.append(("S", "sort"))
             legend.append(("Q", "quit"))
         _curses_draw_legend(stdscr, legend)
         
@@ -1279,6 +1296,8 @@ def _curses_select_win(
         elif ch == ord("q") and not back_on_left:
             # q quits the tool; only bound at the main menu
             return None
+        elif ch in (ord("s"), ord("S")) and not back_on_left:
+            return (_SORT_TOGGLED, current)
 
 
 def _numbered_select(
@@ -1309,23 +1328,53 @@ def _numbered_select(
 
 
 def _sort_model_indices(ids: list[str], models: dict, filter_query: str | None = None):
-    """Return model indices sorted: enabled first, then free models, then alphabetical.
+    """Return model indices sorted: enabled first, then free models, then
+    alphabetical by display name (model id as tiebreaker). Optional substring
+    filter matches model id or model display name (case-insensitive).
     Returns (filtered_indices, enabled_count, free_disabled_count)."""
     def is_free(mid: str) -> bool:
         return "free" in mid.lower()
     def is_enabled(mid: str) -> bool:
         m = models.get(mid)
         return bool(m.get("enabled", True)) if isinstance(m, dict) else False
+    def display_name(mid: str) -> str:
+        m = models.get(mid)
+        if isinstance(m, dict):
+            n = m.get("name")
+            if isinstance(n, str) and n:
+                return n
+        return mid
+    def matches(mid: str) -> bool:
+        if filter_query is None:
+            return True
+        q = filter_query.lower()
+        return q in mid.lower() or q in display_name(mid).lower()
     def sort_key(idx: int):
         mid = ids[idx]
-        if is_enabled(mid):
-            return (0, 0 if is_free(mid) else 1, mid.lower())
-        return (1, 0 if is_free(mid) else 1, mid.lower())
-    base = [i for i in range(len(ids)) if filter_query is None or filter_query.lower() in ids[i].lower()]
+        return (
+            0 if is_enabled(mid) else 1,
+            0 if is_free(mid) else 1,
+            display_name(mid).lower(),
+            mid.lower(),
+        )
+    base = [i for i in range(len(ids)) if matches(ids[i])]
     base.sort(key=sort_key)
     enabled_count = sum(1 for i in base if is_enabled(ids[i]))
     free_disabled_count = sum(1 for i in base[enabled_count:] if is_free(ids[i]))
     return base, enabled_count, free_disabled_count
+
+
+def _filter_list_view_rows(filtered, separators):
+    """Visual rows for the filter list. Each separator occupies its own row
+    immediately before filtered[sep_idx]; model rows are never overdrawn.
+    Returns ('sep', pair) or ('item', model_idx)."""
+    sep_at = {idx: pair for idx, pair in separators if 0 < idx < len(filtered)}
+    view = []
+    for i in range(len(filtered)):
+        if i in sep_at:
+            view.append(("sep", sep_at[i]))
+        view.append(("item", i))
+    return view
 
 
 def _curses_filter_list_win(
@@ -1340,8 +1389,10 @@ def _curses_filter_list_win(
 ) -> None:
     """Generic type-to-filter list widget drawn into an existing stdscr.
     compute_view(entries, query) -> (ordered_entries, separators); separators
-    is [(row_index_after_which, color_pair)] drawn when that boundary row is
-    visible. render(entry, is_selected) -> (text, color_pair).
+    is [(index_before_which, color_pair)] and each rule occupies its own row.
+    Arrow keys move between models and skip separators. render(entry,
+    is_selected) -> (text, color_pair) or a list of (text, color_pair)
+    segments.
     on_enter(entry) -> bool: True keeps the window open, False closes it.
     ESC or Left-at-top always closes."""
     curses.set_escdelay(25)
@@ -1354,12 +1405,19 @@ def _curses_filter_list_win(
     query = ""
     current = 0
     top = 0
+    snap_to_current = False
     while True:
         filtered, separators = compute_view(entries, query)
         if not filtered:
             current = 0
         elif current >= len(filtered):
             current = len(filtered) - 1
+        view = _filter_list_view_rows(filtered, separators)
+        cur_vis = 0
+        for vi, row in enumerate(view):
+            if row[0] == "item" and row[1] == current:
+                cur_vis = vi
+                break
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         _curses_theme_bkgd(stdscr)
@@ -1371,10 +1429,17 @@ def _curses_filter_list_win(
 
         list_top = 2
         list_h = max(1, height - list_top - 2)
-        if current < top:
-            top = current
-        elif current >= top + list_h:
-            top = current - list_h + 1
+        if snap_to_current:
+            top = cur_vis
+            if top + list_h > len(view):
+                top = max(0, len(view) - list_h)
+            snap_to_current = False
+        elif cur_vis < top:
+            top = cur_vis
+        elif cur_vis >= top + list_h:
+            top = cur_vis - list_h + 1
+        if top and top >= len(view):
+            top = max(0, len(view) - list_h)
 
         if not filtered:
             try:
@@ -1383,28 +1448,35 @@ def _curses_filter_list_win(
                 pass
 
         for row in range(list_h):
-            idx = top + row
-            if idx >= len(filtered):
+            vis_i = top + row
+            if vis_i >= len(view):
                 break
-            entry = filtered[idx]
-            line, row_pair = render(entry, idx == current)
-            try:
-                stdscr.addstr(2 + row, 0, "\u00a0" * (width - 1), curses.color_pair(row_pair))
-                _addstr_cols(
-                    stdscr, 2 + row, 0,
-                    _pad_cols(_clip_cols(line, width - 2), width - 1),
-                    curses.color_pair(row_pair),
-                )
-            except curses.error:
-                pass
-
-        for sep_idx, sep_pair in separators:
-            if 0 < sep_idx < len(filtered) and top <= sep_idx - 1 < top + list_h:
-                y = 2 + sep_idx - top
+            y = 2 + row
+            kind = view[vis_i]
+            if kind[0] == "sep":
                 try:
-                    stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(sep_pair))
+                    stdscr.addstr(y, 0, "─" * (width - 1), curses.color_pair(kind[1]))
                 except curses.error:
                     pass
+                continue
+            idx = kind[1]
+            entry = filtered[idx]
+            raw = render(entry, idx == current)
+            is_sel = idx == current
+            if isinstance(raw, list):
+                segs = raw
+                fill_pair = P.SELECTED if is_sel else P.TEXT
+            else:
+                line, row_pair = raw
+                segs = [(line, row_pair)]
+                fill_pair = row_pair
+            if is_sel:
+                segs = [(t, _pair_on_selection_bg(p)) for t, p in segs]
+            try:
+                stdscr.addstr(y, 0, "\u00a0" * (width - 1), curses.color_pair(fill_pair))
+                _draw_seg_line(stdscr, y, 0, segs, max(1, width - 2))
+            except curses.error:
+                pass
 
         _curses_draw_legend(stdscr, legend)
 
@@ -1423,20 +1495,20 @@ def _curses_filter_list_win(
         elif ch == curses.KEY_RIGHT:
             # Page down: full next page, first row of that page selected
             if filtered:
-                top = min((current // list_h + 1) * list_h, max(0, len(filtered) - 1))
-                current = top
+                current = min((current // list_h + 1) * list_h, max(0, len(filtered) - 1))
+                snap_to_current = True
         elif ch == curses.KEY_LEFT:
             if current == 0:
                 # At the very top of the first page: left goes back
                 return
             if current < list_h:
                 # Already on the first page: left just goes to its top
-                top = 0
                 current = 0
+                snap_to_current = True
             else:
                 # Page up: full previous page, first row selected
-                top = ((current // list_h) - 1) * list_h
-                current = top
+                current = ((current // list_h) - 1) * list_h
+                snap_to_current = True
         elif ch in (curses.KEY_BACKSPACE, 127, 8):
             query = query[:-1]
             current = 0
@@ -1453,10 +1525,11 @@ def _curses_filter_list_win(
 
 def _curses_model_search_win(
     ids: list[str], models: dict, stdscr, provider_title: str,
+    pid: str, pname: str,
 ) -> bool:
     """Model picker built on _curses_filter_list_win: type to filter model ids
-    live, arrow to move, Enter toggles the selected model's enabled state,
-    q/ESC finishes. Left/Right arrows page.
+    or names live, arrow to move, Enter toggles the selected model's enabled
+    state, q/ESC finishes. Left/Right arrows page.
     Mutates models in place. Returns True if any toggle happened, False otherwise."""
     changed = False
 
@@ -1471,16 +1544,26 @@ def _curses_model_search_win(
             separators.append((free_sep_idx, P.FREE))
         return ordered, separators
 
-    def render(mid, is_sel):
+    def render(mid, _is_sel):
         m = models[mid]
         enabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
         is_free = "free" in mid.lower()
         mark = "●" if enabled else "○"
-        free_tag = "  [free]" if is_free and not enabled else ""
-        pair = P.SELECTED if is_sel else (
-            P.ENABLED if enabled else (P.FREE if is_free else P.DISABLED)
-        )
-        return f"  {mark}  {mid}{free_tag}", pair
+        mname = mid
+        if isinstance(m, dict):
+            n = m.get("name")
+            if isinstance(n, str) and n:
+                mname = n
+        rest = f" ({pname}) - {pid}/{mid}"
+        name_pair = P.VALUE if enabled else (P.ENABLED if is_free else P.TEXT)
+        mark_pair = P.ENABLED if enabled else P.TEXT
+        return [
+            ("  ", P.TEXT),
+            (mark, mark_pair),
+            ("  ", P.TEXT),
+            (mname, name_pair),
+            (rest, P.TEXT),
+        ]
 
     def toggle(mid):
         nonlocal changed
@@ -1744,6 +1827,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
     def main(stdscr) -> bool:
         changed = False
         status_msg = None
+        sort_by_name = False
+        menu_cursor = 0
         while True:
             # Order is providers.json (sorted only on dump).
             providers[:] = [
@@ -1758,8 +1843,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider",
                 status=status_msg,
-                preview=_build_config_models_preview(providers_doc),
+                preview=_build_config_models_preview(providers_doc, sort_by_name),
+                initial=menu_cursor,
             )
+            if isinstance(pi, tuple) and pi and pi[0] is _SORT_TOGGLED:
+                sort_by_name = not sort_by_name
+                menu_cursor = pi[1]
+                continue
+            menu_cursor = 0
             if pi is None:
                 return changed
             if pi == len(ordered):
@@ -1839,6 +1930,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         selected["models"],
                         stdscr,
                         f"Provider: {selected.get('name') or selected['id']}",
+                        selected["id"],
+                        selected.get("name") or selected["id"],
                     ):
                         dump_providers(PROVIDERS_PATH, providers_doc)
                         changed = True
@@ -1939,7 +2032,7 @@ def _config_models_numbered(ids: list[str], models: dict) -> bool:
 
 def _provider_label(p: dict) -> str:
     state = "enabled" if p.get("enabled", True) else "disabled"
-    return f"{p['id']} ({p.get('name') or p['id']}) [{state}]"
+    return f"({p.get('name') or p['id']}) - {p['id']} [{state}]"
 
 
 def _provider_state_line(p: dict) -> str:
@@ -2128,9 +2221,11 @@ def render_models_text() -> int:
     return 0
 
 
-def _build_config_models_preview(providers_doc: dict) -> list:
+def _build_config_models_preview(providers_doc: dict, sort_by_name: bool = False) -> list:
     """Build the --models-style enabled-models listing as colored segment
-    lines, for rendering in the empty space under the --config main menu."""
+    lines, for rendering in the empty space under the --config main menu.
+    Default order is providers.json (provider-name) order; sort_by_name
+    reorders the model rows by display name without writing anything."""
     providers = [
         p for p in providers_doc.get("providers", [])
         if isinstance(p, dict) and p.get("id")
@@ -2140,7 +2235,7 @@ def _build_config_models_preview(providers_doc: dict) -> list:
     # full-width blue bar, like the screen title.
     lines.append(("heading", "Enabled Models"))
     lines.append([("", P.TEXT)])  # gap under the models header
-    total_enabled = 0
+    model_rows: list = []
     for provider in providers:
         pid = provider["id"]
         penabled = bool(provider.get("enabled", True))
@@ -2154,12 +2249,16 @@ def _build_config_models_preview(providers_doc: dict) -> list:
             if not penabled:
                 continue
             mname = m.get("name") or mid
-            total_enabled += 1
-            lines.append([
-                ("● ", P.ENABLED),
-                (mname, P.VALUE),
-                (f" ({pname}) - {pid}/{mid}", P.TEXT),
-            ])
+            model_rows.append((mname, pname, pid, mid))
+    if sort_by_name:
+        model_rows.sort(key=lambda r: (r[0].lower(), r[1].lower(), r[2], r[3]))
+    total_enabled = len(model_rows)
+    for mname, pname, pid, mid in model_rows:
+        lines.append([
+            ("● ", P.ENABLED),
+            (mname, P.VALUE),
+            (f" ({pname}) - {pid}/{mid}", P.TEXT),
+        ])
     if not total_enabled:
         lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
         return lines
