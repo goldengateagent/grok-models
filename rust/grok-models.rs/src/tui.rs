@@ -71,7 +71,6 @@ pub enum Key {
     Left,
     Right,
     Enter,
-    Space,
     Backspace,
     Esc,
     Char(char),
@@ -748,7 +747,7 @@ pub fn select_win<S: Stdscr>(
             }
             Key::Up if current > 0 => current -= 1,
             Key::Down if current + 1 < n => current += 1,
-            Key::Space if multi => {
+            Key::Char(' ') if multi => {
                 state[current] = !state[current];
             }
             Key::Enter | Key::Right => {
@@ -2172,7 +2171,6 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
         0x03 => Key::Interrupt,
         0x7f | 0x08 => Key::Backspace,
         b'\r' | b'\n' => Key::Enter,
-        b' ' => Key::Space,
         c if c.is_ascii() => Key::Char((c as char).to_ascii_lowercase()),
         _ => Key::Eof,
     };
