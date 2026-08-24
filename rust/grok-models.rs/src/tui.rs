@@ -167,6 +167,62 @@ fn paint_for(p: P) -> Paint {
     Paint::plain(color_of(p).0, color_of(p).1)
 }
 
+/// Terminal columns for one scalar. `➕` (and similar emoji) are 2 columns
+/// even though East Asian Width is Neutral — treating them as 1 is what
+/// left `d`/`…` ghosts after `Add provider…` and ate the space in that label.
+fn char_cols(ch: char) -> usize {
+    if ch == '➕' {
+        return 2;
+    }
+    let u = ch as u32;
+    if (0x1F300..=0x1FAFF).contains(&u) {
+        return 2;
+    }
+    // Common fullwidth / CJK blocks (no extra crate).
+    if (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE19).contains(&u)
+        || (0xFE30..=0xFE6F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x3000..=0x303E).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn str_cols(s: &str) -> usize {
+    s.chars().map(char_cols).sum()
+}
+
+fn clip_cols(s: &str, max_cols: usize) -> String {
+    let mut out = String::new();
+    let mut n = 0usize;
+    for c in s.chars() {
+        let w = char_cols(c);
+        if n + w > max_cols {
+            break;
+        }
+        out.push(c);
+        n += w;
+    }
+    out
+}
+
+fn pad_cols(s: &str, width: usize, fill: char) -> String {
+    let s = clip_cols(s, width);
+    let n = str_cols(&s);
+    let mut out = s;
+    for _ in n..width {
+        out.push(fill);
+    }
+    out
+}
+
 /// Draw a line of `(text, color)` segments, truncating once `max_w` is
 /// exhausted. Mirrors Python's `_draw_seg_line`.
 fn draw_seg_line<S: Stdscr>(
@@ -182,12 +238,12 @@ fn draw_seg_line<S: Stdscr>(
             break;
         }
         let take = ((x as usize) + max_w).saturating_sub(cx as usize);
-        let piece: String = text.chars().take(take).collect();
+        let piece = clip_cols(text, take);
         if piece.is_empty() {
             continue;
         }
         stdscr.addstr(y, cx, &piece, paint_for(*pid));
-        cx += piece.chars().count() as i32;
+        cx += str_cols(&piece) as i32;
     }
 }
 
@@ -447,7 +503,7 @@ fn draw_legend<S: Stdscr>(
             x += 5;
         }
         let run = format!("{key} {desc}");
-        if x as usize + run.chars().count() >= w.max(1) as usize {
+        if x as usize + str_cols(&run) >= w.max(1) as usize {
             break;
         }
         for ch in key.chars() {
@@ -457,12 +513,12 @@ fn draw_legend<S: Stdscr>(
                 Paint::plain(tn_color(P::LegendKey), bg_color(P::LegendKey)).bold()
             };
             stdscr.addstr(legend_y, x, &ch.to_string(), attr);
-            x += 1;
+            x += char_cols(ch) as i32;
         }
         stdscr.addstr(legend_y, x, " ", Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)));
         x += 1;
         stdscr.addstr(legend_y, x, desc, Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)));
-        x += desc.chars().count() as i32;
+        x += str_cols(desc) as i32;
     }
 }
 
@@ -546,7 +602,7 @@ pub fn select_win<S: Stdscr>(
             } else {
                 format!("  ▸ {}", options[idx])
             };
-            let line = line.chars().take((w.max(1) as usize).saturating_sub(2)).collect::<String>();
+            let line = clip_cols(&line, (w.max(1) as usize).saturating_sub(2));
             let label = if !multi && is_sel {
                 row_paint
             } else {
@@ -572,22 +628,22 @@ pub fn select_win<S: Stdscr>(
                 };
                 let tok_paint = Paint::plain(tok_fg, tok_bg).bold_if(is_sel);
                 stdscr.addstr((2 + row) as i32, 0, &head, label);
-                let tok_x = head.chars().count() as i32;
+                let tok_x = str_cols(&head) as i32;
                 stdscr.addstr((2 + row) as i32, tok_x, &token, tok_paint);
                 if !tail.is_empty() {
-                    let tail_x = (head.chars().count() + token.chars().count()) as i32;
+                    let tail_x = (str_cols(&head) + str_cols(&token)) as i32;
                     stdscr.addstr((2 + row) as i32, tail_x, &tail, label);
                 }
             } else {
                 stdscr.addstr(
                     (2 + row) as i32,
                     0,
-                    &format!("{:<wid$}", line, wid = (w.max(1) as usize).saturating_sub(1)),
+                    &pad_cols(&line, (w.max(1) as usize).saturating_sub(1), ' '),
                     label,
                 );
             }
             if !multi {
-                let chev_x = (line.chars().count() as i32 + 2).max(w - 4);
+                let chev_x = (str_cols(&line) as i32 + 2).max(w - 4);
                 stdscr.addstr((2 + row) as i32, chev_x, "›", Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
             }
         }
@@ -764,7 +820,10 @@ pub fn filter_list_win<S: Stdscr, M: FilterList>(
         stdscr.erase();
         let (h, w) = stdscr.getmaxyx();
         paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-        draw_header(stdscr, &format!("  {title}  |  Filter: {query}"));
+        draw_header(
+            stdscr,
+            &format!("  {title}  ({})  |  Filter: {query}", filtered.len()),
+        );
 
         let list_top = 2usize;
         let list_h = ((h as usize).saturating_sub(list_top + 2)).max(1);
@@ -795,7 +854,7 @@ pub fn filter_list_win<S: Stdscr, M: FilterList>(
             stdscr.addstr(
                 (list_top + row) as i32,
                 0,
-                &format!("{:<w$}", line, w = (w.max(1) as usize).saturating_sub(1)),
+                &pad_cols(&clip_cols(&line, (w.max(1) as usize).saturating_sub(2)), (w.max(1) as usize).saturating_sub(1), ' '),
                 Paint::plain(tn_color(row_pair), bg_color(row_pair)),
             );
         }
@@ -913,12 +972,17 @@ impl<'a> FilterList for ModelPicker<'a> {
     }
 }
 
-pub fn model_search_win<S: Stdscr>(stdscr: &mut S, ids: &[String], models: &mut Map<String, Value>) -> bool {
+pub fn model_search_win<S: Stdscr>(
+    stdscr: &mut S,
+    ids: &[String],
+    models: &mut Map<String, Value>,
+    title: &str,
+) -> bool {
     let mut picker = ModelPicker { ids, models, changed: false };
     filter_list_win(
         stdscr,
         ids,
-        "Configure models",
+        title,
         &[
             ("↑/↓/←/→".to_string(), "nav".to_string()),
             ("ESC".to_string(), "back".to_string()),
@@ -1146,11 +1210,11 @@ pub fn edit_inline_row<S: Stdscr>(
                 stdscr.addstr(
                     y,
                     0,
-                    &format!("{:<w$}", line, w = (w.max(1) as usize).saturating_sub(1)),
+                    &pad_cols(&line, (w.max(1) as usize).saturating_sub(1), ' '),
                     Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold(),
                 );
                 let cur_x =
-                    (4 + label.chars().count() + 2 + buf.chars().count()) as i32;
+                    (4 + str_cols(label) + 2 + str_cols(&buf)) as i32;
                 stdscr.addstr(
                     y,
                     cur_x,
@@ -1159,12 +1223,14 @@ pub fn edit_inline_row<S: Stdscr>(
                 );
             } else {
                 stdscr.addstr(y, 0, &fill, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-                let line: String =
-                    format!("    {row}").chars().take((w.max(1) as usize).saturating_sub(2)).collect();
+                let line = clip_cols(
+                    &format!("    {row}"),
+                    (w.max(1) as usize).saturating_sub(2),
+                );
                 stdscr.addstr(
                     y,
                     0,
-                    &format!("{:<w$}", line, w = (w.max(1) as usize).saturating_sub(1)),
+                    &pad_cols(&line, (w.max(1) as usize).saturating_sub(1), ' '),
                     Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
                 );
             }
@@ -1445,7 +1511,7 @@ pub fn build_config_models_preview(doc: &Value) -> Vec<PreviewLine> {
 
     if total_enabled == 0 {
         lines.push(PreviewLine::Segs(vec![(
-            "No enabled models. Enable with --enable or --config".to_string(),
+            "No enabled models. Enable with --enable or grok-models".to_string(),
             P::Muted,
         )]));
         return lines;
@@ -1637,7 +1703,15 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                             .and_then(Value::as_object)
                             .cloned()
                             .unwrap_or_default();
-                        model_search_win(stdscr, &ids, &mut models);
+                        let provider_title = format!(
+                            "Provider: {} | Configure models",
+                            target
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(target["id"].as_str().unwrap_or_default())
+                        );
+                        model_search_win(stdscr, &ids, &mut models, &provider_title);
                         // Sync BOTH the live `target` copy and the doc: the
                         // action menu renders from `target`, so re-entering
                         // Configure models must reflect the toggles even
@@ -1918,6 +1992,12 @@ impl Stdscr for RealStdscr {
         for r in 0..rows {
             for c in 0..cols {
                 let cell = self.frame[r][c];
+                if cell.0 == '\0' {
+                    // Continuation of a 2-col glyph: the terminal already
+                    // advanced past this column when the glyph was emitted.
+                    self.committed[r][c] = cell;
+                    continue;
+                }
                 if self.committed[r][c] == cell {
                     continue;
                 }
@@ -1931,7 +2011,8 @@ impl Stdscr for RealStdscr {
                     last_paint = Some(cell.1);
                 }
                 out.push(cell.0);
-                cur_pos = Some((r, c + 1));
+                let adv = char_cols(cell.0);
+                cur_pos = Some((r, c + adv));
                 self.committed[r][c] = cell;
             }
         }
@@ -1948,13 +2029,17 @@ impl Stdscr for RealStdscr {
         if y < 0 || y as usize >= rows || x < 0 {
             return;
         }
-        let x = x as usize;
-        for (i, ch) in s.chars().enumerate() {
-            let cx = x + i;
-            if cx >= cols {
+        let mut cx = x as usize;
+        for ch in s.chars() {
+            let w = char_cols(ch);
+            if cx + w > cols {
                 break;
             }
             self.frame[y as usize][cx] = (ch, paint);
+            if w == 2 && cx + 1 < cols {
+                self.frame[y as usize][cx + 1] = ('\0', paint);
+            }
+            cx += w;
         }
     }
     fn getch(&mut self) -> Key {
@@ -2228,6 +2313,77 @@ mod tests {
     }
     fn is_red(c: theme::Rgb) -> bool {
         c.r > c.g && c.r > c.b
+    }
+
+    #[test]
+    fn plus_emoji_is_two_columns() {
+        assert_eq!(char_cols('➕'), 2);
+        assert_eq!(char_cols('A'), 1);
+        assert_eq!(char_cols('…'), 1);
+        let label = "➕ Add provider…";
+        assert_eq!(str_cols(label), label.chars().count() + 1);
+        let clipped = clip_cols("Back from Add provider…", 4);
+        assert_eq!(clipped, "Back");
+        let padded = pad_cols("Back", str_cols("➕ Add provider…"), ' ');
+        assert_eq!(str_cols(&padded), str_cols("➕ Add provider…"));
+        assert!(!padded.contains('d') || padded.starts_with("Back"));
+        assert!(!padded[4..].contains('d'));
+        assert!(!padded.contains('…'));
+    }
+
+    struct CountList {
+        entries: Vec<String>,
+    }
+    impl FilterList for CountList {
+        type Entry = String;
+        fn compute_view(&self, entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
+            let q = query.to_lowercase();
+            (
+                entries
+                    .iter()
+                    .filter(|e| q.is_empty() || e.to_lowercase().contains(&q))
+                    .cloned()
+                    .collect(),
+                vec![],
+            )
+        }
+        fn render(&self, entry: &String, _is_selected: bool) -> (String, P) {
+            (format!("  {entry}"), P::Text)
+        }
+        fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, _entry: &String) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn filter_list_header_shows_live_count() {
+        let mut model = CountList {
+            entries: vec!["alpha".into(), "beta".into(), "gamma".into()],
+        };
+        let mut f = FakeStdscr::new(20, 80);
+        f.script(Key::Char('b'));
+        f.script(Key::Esc);
+        filter_list_win(
+            &mut f,
+            &model.entries.clone(),
+            "Configure models",
+            &[("ESC".into(), "back".into())],
+            &mut model,
+        );
+        let calls = f.recorded();
+        let headers: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, t, _)| t.contains("Configure models"))
+            .map(|(_, _, t, _)| t.clone())
+            .collect();
+        assert!(
+            headers.iter().any(|t| t.contains("(3)")),
+            "unfiltered count missing: {headers:?}"
+        );
+        assert!(
+            headers.iter().any(|t| t.contains("(1)") && t.contains("Filter: b")),
+            "filtered count missing: {headers:?}"
+        );
     }
 
     #[test]

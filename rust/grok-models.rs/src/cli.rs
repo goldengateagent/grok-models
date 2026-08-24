@@ -9,7 +9,6 @@ pub struct Args {
     pub add_provider: Option<String>,
     pub import_flag: bool,
     pub search: Option<String>,
-    pub config: bool,
     pub disable_all: bool,
     pub sync: bool,
     pub disable: Vec<String>,
@@ -19,22 +18,32 @@ pub struct Args {
     pub provider: Option<String>,
 }
 
-const HELP: &str = "Grok Build config.toml [model.<provider-id>-<model-id>] tables will be added, \
-updated or deleted by this command for any matched pattern of <provider-id>-<model-id>. \
-Uniquely name your manually configured custom models to avoid modification.";
+const HELP: &str = "\
+Manage Grok Build [model.*] tables from models.dev.
+
+Writes [model.<provider-id>-<model-id>] into ~/.grok/config.toml (or $GROK_HOME).
+Matching tables are added, updated, or deleted on sync. Give custom models
+unique table names so they are not overwritten.
+
+No arguments opens the interactive TUI (numbered menus if stdout is not a TTY).";
 const EPILOG: &str = "\
+quick start:
+  grok-models --add-provider opencode-go
+  grok-models --enable opencode-go/glm-5.3
+  grok-models                              then: TUI, or just use the model
+
 examples:
-  grok-models                              sync to config.toml
-  grok-models --add-provider opencode      add OpenCode Zen provider
-  grok-models --search ollama              search and add a provider
-  grok-models --providers                  show configured providers
-  grok-models --config                     interactively configure providers/models
-  grok-models --models                     show currently enabled models
-  grok-models --provider opencode          show models for a provider
-  grok-models --enable opencode/hy3-free   enable model
-  grok-models --disable openrouter         disable a provider
-  grok-models --disable-all                disable all models
-  grok-models --import                     import providers/models from config.toml";
+  grok-models                              interactive TUI
+  grok-models --providers                  list configured providers
+  grok-models --provider opencode-go       list models for a provider
+  grok-models --models                     list enabled models
+  grok-models --add-provider opencode-go   add a provider (models start disabled)
+  grok-models --search glm                 search models.dev and add a provider
+  grok-models --enable opencode-go/glm-5.3 enable a model
+  grok-models --disable opencode-go/glm-5.3
+  grok-models --disable-all
+  grok-models --sync                       refresh from models.dev; rewrite config.toml
+  grok-models --import                     pull [model.*] from an existing config.toml";
 
 pub fn print_help() {
     println!("usage: grok-models [OPTION]...");
@@ -42,17 +51,16 @@ pub fn print_help() {
     println!("{HELP}");
     println!();
     println!("Options:");
-    println!("  --add-provider ID        Add provider ID");
-    println!("  --search TERM            Search providers");
-    println!("  --config                 Configure a provider or its models");
-    println!("  --models                 Show enabled models");
-    println!("  --providers              Show configured providers");
-    println!("  --provider ID            Show the models for this provider");
-    println!("  --disable-all            Disable all models in every provider");
-    println!("  --disable TARGET         Disable TARGET (provider or provider/model); repeatable");
-    println!("  --enable TARGET          Enable TARGET (provider or provider/model); repeatable");
-    println!("  --import                 Import providers/models from existing config.toml [model.*] tables");
-    println!("  --sync                   Sync providers.json with models.dev and rewrite config.toml");
+    println!("  --providers              List configured providers");
+    println!("  --provider ID            List models for this provider");
+    println!("  --models                 List enabled models");
+    println!("  --add-provider ID        Add provider ID from models.dev");
+    println!("  --search TERM            Search models.dev providers and add one");
+    println!("  --enable TARGET          Enable provider or provider/model (repeatable)");
+    println!("  --disable TARGET         Disable provider or provider/model (repeatable)");
+    println!("  --disable-all            Disable every model in every provider");
+    println!("  --sync                   Refresh providers.json from models.dev; rewrite config.toml");
+    println!("  --import                 Import providers/models from existing config.toml [model.*]");
     println!("  -h, --help               Show this help and exit");
     println!();
     println!("{EPILOG}");
@@ -101,10 +109,6 @@ pub fn parse(argv: &[String]) -> Res<Args> {
                 consume_value(&mut a, argv[i_next].clone(), arg)?;
                 i += 2;
             }
-            "--config" => {
-                a.config = true;
-                i += 1;
-            }
             "--import" => {
                 a.import_flag = true;
                 i += 1;
@@ -147,9 +151,6 @@ pub fn parse(argv: &[String]) -> Res<Args> {
     }
     if a.search.is_some() {
         group_flags.push("--search");
-    }
-    if a.config {
-        group_flags.push("--config");
     }
     if a.disable_all {
         group_flags.push("--disable-all");
@@ -206,5 +207,6 @@ mod tests {
     fn rejects_unknown() {
         let argv = a(&["--bogus"]);
         assert!(parse(&argv).is_err());
+        assert!(parse(&a(&["--config"])).is_err());
     }
 }

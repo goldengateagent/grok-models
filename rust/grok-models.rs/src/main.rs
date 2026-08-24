@@ -30,9 +30,6 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     if let Some(t) = args.search {
         return commands::cmd_search(&t);
     }
-    if args.config {
-        return flow::cmd_config();
-    }
     if args.providers {
         let doc = grok_models::jsonio::load_providers()?;
         commands::render_list_text(&doc, None, true)?;

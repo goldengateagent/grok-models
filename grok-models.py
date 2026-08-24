@@ -18,6 +18,7 @@ import curses
 import json
 import shutil
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -418,6 +419,53 @@ class P:
     CODE_VAR = 19     # green on black — variable names in code block
 
 
+def _char_cols(ch: str) -> int:
+    """Terminal columns for one Unicode scalar (emoji/CJK = 2)."""
+    if ch == "➕":
+        return 2
+    o = ord(ch)
+    if 0x1F300 <= o <= 0x1FAFF:
+        return 2
+    ea = unicodedata.east_asian_width(ch)
+    if ea in ("F", "W"):
+        return 2
+    return 1
+
+
+def _str_cols(s: str) -> int:
+    return sum(_char_cols(c) for c in s)
+
+
+def _clip_cols(s: str, max_cols: int) -> str:
+    out: list[str] = []
+    n = 0
+    for c in s:
+        w = _char_cols(c)
+        if n + w > max_cols:
+            break
+        out.append(c)
+        n += w
+    return "".join(out)
+
+
+def _pad_cols(s: str, width: int, fill: str = "\u00a0") -> str:
+    s = _clip_cols(s, width)
+    return s + fill * max(0, width - _str_cols(s))
+
+
+def _addstr_cols(stdscr, y: int, x: int, s: str, attr) -> int:
+    """addstr advancing x by display width so 2-col glyphs do not skew later cells."""
+    cx = x
+    for ch in s:
+        w = _char_cols(ch)
+        try:
+            stdscr.addstr(y, cx, ch, attr)
+        except curses.error:
+            break
+        cx += w
+    return cx
+
+
 def _curses_init_colors() -> None:
     """Initialize the Tokyo Night theme.
 
@@ -704,8 +752,11 @@ def _curses_draw_header(stdscr, text: str) -> None:
     """Draw the full-width title row on the theme background."""
     height, width = stdscr.getmaxyx()
     try:
-        stdscr.addstr(0, 0, " " * (width - 1), curses.color_pair(P.SELECTED))
-        stdscr.addstr(0, 2, text[:width - 4], curses.color_pair(P.SELECTED) | curses.A_BOLD)
+        stdscr.addstr(0, 0, "\u00a0" * (width - 1), curses.color_pair(P.SELECTED))
+        _addstr_cols(
+            stdscr, 0, 2, _clip_cols(text, max(0, width - 4)),
+            curses.color_pair(P.SELECTED) | curses.A_BOLD,
+        )
     except curses.error:
         pass
 
@@ -734,7 +785,7 @@ def _curses_draw_legend(
                 stdscr.addstr(legend_y, x, sep, curses.color_pair(P.MUTED))
                 x += len(sep)
             run = f"{key} {desc}"
-            if x + len(run) > width - 1:
+            if x + _str_cols(run) > width - 1:
                 break
             # Draw the key bold, but render '/' separators faded (muted
             # gray) so they recede against the bold key text (e.g. ↑/↓, Enter/→).
@@ -747,8 +798,8 @@ def _curses_draw_legend(
                 x += 1
             stdscr.addstr(legend_y, x, " ", curses.color_pair(P.LEGEND_DESC))
             x += 1
-            stdscr.addstr(legend_y, x, desc, curses.color_pair(P.LEGEND_DESC))
-            x += len(desc)
+            _addstr_cols(stdscr, legend_y, x, desc, curses.color_pair(P.LEGEND_DESC))
+            x += _str_cols(desc)
     except curses.error:
         pass
 
@@ -760,11 +811,11 @@ def _draw_seg_line(stdscr, y, x, segments, max_w) -> None:
         for text, pid in segments:
             if cx >= x + max_w:
                 break
-            piece = text[: (x + max_w) - cx]
+            piece = _clip_cols(text, (x + max_w) - cx)
             if not piece:
                 continue
-            stdscr.addstr(y, cx, piece, _cp(pid))
-            cx += len(piece)
+            _addstr_cols(stdscr, y, cx, piece, _cp(pid))
+            cx += _str_cols(piece)
     except curses.error:
         pass
 
@@ -830,14 +881,14 @@ def _curses_select_win(
                 line = f"  {mark}  {opt}"
             else:
                 line = f"  ▸ {opt}"
-            line = line[:width - 2]
+            line = _clip_cols(line, max(1, width - 2))
 
             is_sel = (idx == current)
             try:
                 # Row background first (theme bg, or selection bg for the cursor),
                 # then the label. A chevron sits right-aligned on expandable rows.
                 row_bg = curses.color_pair(P.SELECTED if is_sel else P.TEXT)
-                stdscr.addstr(2 + row, 0, " " * (width - 1), row_bg)
+                stdscr.addstr(2 + row, 0, "\u00a0" * (width - 1), row_bg)
                 label_attr = row_bg | curses.A_BOLD if is_sel and not multi else row_bg
                 # Colorize a [enabled]/[disabled] token green/red. The token may
                 # be followed by a trailing decorative icon, so locate it by
@@ -857,24 +908,32 @@ def _curses_select_win(
                     tok_attr = curses.color_pair(tcolor) | (
                         curses.A_BOLD if is_sel else 0
                     )
-                    stdscr.addstr(2 + row, 0, head[: width - 2], label_attr)
-                    stdscr.addstr(
+                    _addstr_cols(stdscr, 2 + row, 0, _clip_cols(head, width - 2), label_attr)
+                    hx = _str_cols(head)
+                    _addstr_cols(
+                        stdscr,
                         2 + row,
-                        len(head),
-                        token[: max(0, (width - 2) - len(head))],
+                        hx,
+                        _clip_cols(token, max(0, (width - 2) - hx)),
                         tok_attr,
                     )
                     if tail:
-                        stdscr.addstr(
+                        tx = hx + _str_cols(token)
+                        _addstr_cols(
+                            stdscr,
                             2 + row,
-                            len(head) + len(token),
-                            tail[: max(0, (width - 2) - len(head) - len(token))],
+                            tx,
+                            _clip_cols(tail, max(0, (width - 2) - tx)),
                             label_attr,
                         )
                 else:
-                    stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), label_attr)
+                    _addstr_cols(
+                        stdscr, 2 + row, 0,
+                        _pad_cols(line, width - 1),
+                        label_attr,
+                    )
                 if not multi:
-                    chev_x = max(width - 4, len(line) + 2)
+                    chev_x = max(width - 4, _str_cols(line) + 2)
                     stdscr.addstr(
                         2 + row,
                         chev_x,
@@ -1161,7 +1220,9 @@ def _curses_filter_list_win(
         _curses_theme_bkgd(stdscr)
 
         # Header with filter
-        _curses_draw_header(stdscr, f"  {title}  |  Filter: {query}")
+        _curses_draw_header(
+            stdscr, f"  {title}  ({len(filtered)})  |  Filter: {query}"
+        )
 
         list_top = 2
         list_h = max(1, height - list_top - 2)
@@ -1183,8 +1244,12 @@ def _curses_filter_list_win(
             entry = filtered[idx]
             line, row_pair = render(entry, idx == current)
             try:
-                stdscr.addstr(2 + row, 0, " " * (width - 1), curses.color_pair(row_pair))
-                stdscr.addstr(2 + row, 0, line[: width - 2].ljust(width - 1), curses.color_pair(row_pair))
+                stdscr.addstr(2 + row, 0, "\u00a0" * (width - 1), curses.color_pair(row_pair))
+                _addstr_cols(
+                    stdscr, 2 + row, 0,
+                    _pad_cols(_clip_cols(line, width - 2), width - 1),
+                    curses.color_pair(row_pair),
+                )
             except curses.error:
                 pass
 
@@ -1241,7 +1306,9 @@ def _curses_filter_list_win(
             top = 0
 
 
-def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
+def _curses_model_search_win(
+    ids: list[str], models: dict, stdscr, provider_title: str,
+) -> bool:
     """Model picker built on _curses_filter_list_win: type to filter model ids
     live, arrow to move, Enter toggles the selected model's enabled state,
     q/ESC finishes. Left/Right arrows page.
@@ -1281,7 +1348,7 @@ def _curses_model_search_win(ids: list[str], models: dict, stdscr) -> bool:
 
     _curses_filter_list_win(
         ids, stdscr,
-        title="Configure models",
+        title=f"{provider_title} | Configure models",
         legend=[("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")],
         compute_view=compute_view,
         render=render,
@@ -1612,7 +1679,10 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 action_cursor = ai
                 if ai == 0:
                     if _curses_model_search_win(
-                        list(selected["models"].keys()), selected["models"], stdscr
+                        list(selected["models"].keys()),
+                        selected["models"],
+                        stdscr,
+                        f"Provider: {selected.get('name') or selected['id']}",
                     ):
                         dump_providers(PROVIDERS_PATH, providers_doc)
                         changed = True
@@ -1897,7 +1967,7 @@ def render_models_text() -> int:
             print(f"● {mname} ({pname}) - {pid}/{mid}")
 
     if not total_enabled:
-        print("No enabled models. Enable with --enable or --config")
+        print("No enabled models. Enable with --enable or grok-models")
         return 0
 
     print()
@@ -1957,7 +2027,7 @@ def _build_config_models_preview(providers_doc: dict) -> list:
                 (f" ({pname}) - {pid}/{mid}", P.TEXT),
             ])
     if not total_enabled:
-        lines.append([("No enabled models. Enable with --enable or --config", P.MUTED)])
+        lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
         return lines
     lines.append([("", P.TEXT)])
     # Env-var requirements rendered as a borderless black code panel with
@@ -2732,80 +2802,89 @@ def cmd_sync() -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Grok Build config.toml [model.<provider-id>-<model-id>] tables will be added, updated or deleted by this command for any matched pattern of <provider-id>-<model-id>. Uniquely name your manually configured custom models to avoid modification.",
+        description=(
+            "Manage Grok Build [model.*] tables from models.dev.\n\n"
+            "Writes [model.<provider-id>-<model-id>] into ~/.grok/config.toml "
+            "(or $GROK_HOME). Matching tables are added, updated, or deleted on "
+            "sync. Give custom models unique table names so they are not overwritten.\n\n"
+            "No arguments opens the interactive TUI (numbered menus if stdout is not a TTY)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "quick start:\n"
+            "  grok-models.py --add-provider opencode-go\n"
+            "  grok-models.py --enable opencode-go/glm-5.3\n"
+            "  grok-models.py                              then: TUI, or just use the model\n"
+            "\n"
             "examples:\n"
-            "  grok-models.py                              sync to config.toml\n"
-            "  grok-models.py --providers                  show configured providers\n"
-            "  grok-models.py --provider opencode          show models for a provider\n"
-            "  grok-models.py --models                     show currently enabled models\n"
-            "  grok-models.py --enable opencode            enable providers\n"
-            "  grok-models.py --enable opencode/hy3-free   enable model\n"
-            "  grok-models.py --disable openrouter         disable a provider\n"
-            "  grok-models.py --disable-all                disable all models\n"
+            "  grok-models.py                              interactive TUI\n"
+            "  grok-models.py --providers                  list configured providers\n"
+            "  grok-models.py --provider opencode-go       list models for a provider\n"
+            "  grok-models.py --models                     list enabled models\n"
+            "  grok-models.py --add-provider opencode-go   add a provider (models start disabled)\n"
+            "  grok-models.py --search glm                 search models.dev and add a provider\n"
+            "  grok-models.py --enable opencode-go/glm-5.3 enable a model\n"
+            "  grok-models.py --disable opencode-go/glm-5.3\n"
+            "  grok-models.py --disable-all\n"
+            "  grok-models.py --sync                       refresh from models.dev; rewrite config.toml\n"
+            "  grok-models.py --import                     pull [model.*] from an existing config.toml\n"
         ),
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
-        "--add-provider",
-        metavar="ID",
-        help="Add provider ID",
+        "--providers",
+        action="store_true",
+        help="List configured providers",
     )
     group.add_argument(
-        "--import",
-        dest="import_flag",
+        "--provider",
+        metavar="ID",
+        help="List models for this provider",
+    )
+    group.add_argument(
+        "--models",
         action="store_true",
-        help="Import providers/models from existing config.toml [model.*] tables",
+        help="List enabled models",
+    )
+    group.add_argument(
+        "--add-provider",
+        metavar="ID",
+        help="Add provider ID from models.dev",
     )
     group.add_argument(
         "--search",
         metavar="TERM",
-        help="Search providers",
-    )
-    group.add_argument(
-        "--config",
-        action="store_true",
-        help="Configure a provider or its models",
-    )
-    group.add_argument(
-        "--sync",
-        action="store_true",
-        help="Sync providers.json with models.dev and rewrite config.toml",
-    )
-    group.add_argument(
-        "--disable-all",
-        action="store_true",
-        help="Disable all models in every provider",
-    )
-    group.add_argument(
-        "--disable",
-        action="append",
-        metavar="TARGET",
-        default=[],
-        help="Disable TARGET (provider or provider/model); repeatable",
+        help="Search models.dev providers and add one",
     )
     group.add_argument(
         "--enable",
         action="append",
         metavar="TARGET",
         default=[],
-        help="Enable TARGET (provider or provider/model); repeatable",
+        help="Enable provider or provider/model (repeatable)",
     )
     group.add_argument(
-        "--models",
+        "--disable",
+        action="append",
+        metavar="TARGET",
+        default=[],
+        help="Disable provider or provider/model (repeatable)",
+    )
+    group.add_argument(
+        "--disable-all",
         action="store_true",
-        help="Show enabled models",
+        help="Disable every model in every provider",
     )
     group.add_argument(
-        "--providers",
+        "--sync",
         action="store_true",
-        help="Show configured providers",
+        help="Refresh providers.json from models.dev; rewrite config.toml",
     )
     group.add_argument(
-        "--provider",
-        metavar="ID",
-        help="Show the models for this provider",
+        "--import",
+        dest="import_flag",
+        action="store_true",
+        help="Import providers/models from existing config.toml [model.*]",
     )
     return parser
 
@@ -2820,8 +2899,6 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_import()
         if args.search:
             return cmd_search(args.search)
-        if args.config:
-            return cmd_config()
         if args.providers:
             render_list_text(load_providers(), None, providers_only=True)
             return 0

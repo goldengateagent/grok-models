@@ -225,7 +225,7 @@ pub fn render_models_text() -> Res<i32> {
     }
 
     if total_enabled == 0 {
-        println!("No enabled models. Enable with --enable or --config");
+        println!("No enabled models. Enable with --enable or grok-models");
         return Ok(0);
     }
 
