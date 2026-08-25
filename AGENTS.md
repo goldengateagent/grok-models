@@ -15,3 +15,8 @@
 ## Project files
 
 - do not delete any files without authorization
+
+## Production isolation
+
+- The model and testing scripts must not use the default user grok home `~/.grok`, specifically `~/.grok/providers.json` or `~/.grok/config.toml`. This is a production directory and these files must not be altered by the model or by testing scripts.
+- The model must set `GROK_HOME` for its own use in testing, whether running coded scripts or working agentically.
