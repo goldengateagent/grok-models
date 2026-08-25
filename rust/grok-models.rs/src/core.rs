@@ -203,6 +203,28 @@ fn value_to_string(v: &Value) -> Option<String> {
     }
 }
 
+/// models.dev `limit.context` as an integer under Python `int(context)`
+/// semantics (bools excluded, floats truncated). None when absent/non-numeric.
+pub fn context_window_field(minfo: &Value) -> Option<Value> {
+    let limit = minfo.get("limit").and_then(Value::as_object)?;
+    let ctx = limit.get("context");
+    let is_number = matches!(ctx, Some(Value::Number(_)));
+    if !is_number {
+        return None;
+    }
+    let n = ctx.unwrap().as_number().unwrap();
+    let int_val: i64 = if let Some(i) = n.as_i64() {
+        i
+    } else if let Some(u) = n.as_u64() {
+        u.clamp(0, i64::MAX as u64) as i64
+    } else if let Some(f) = n.as_f64() {
+        f.trunc() as i64
+    } else {
+        0
+    };
+    Some(Value::Number(int_val.into()))
+}
+
 /// `build_fields`: map a models.dev model entry to Grok Build [model.*] fields.
 /// `include_descriptions` gates the trailing `description` field.
 pub fn build_fields(
@@ -231,24 +253,8 @@ pub fn build_fields(
     fields.insert("env_key".into(), Value::String(env_key.to_string()));
     fields.insert("api_backend".into(), Value::String("chat_completions".into()));
 
-    if let Some(limit) = minfo.get("limit").and_then(Value::as_object) {
-        // Python: isinstance(context, (int, float)) and not isinstance(bool),
-        // stored as int(context).
-        let ctx = limit.get("context");
-        let is_number = matches!(ctx, Some(Value::Number(_)));
-        if is_number {
-            let n = ctx.unwrap().as_number().unwrap();
-            let int_val: i64 = if let Some(i) = n.as_i64() {
-                i
-            } else if let Some(u) = n.as_u64() {
-                u.clamp(0, i64::MAX as u64) as i64
-            } else if let Some(f) = n.as_f64() {
-                f.trunc() as i64
-            } else {
-                0
-            };
-            fields.insert("context_window".into(), Value::Number(int_val.into()));
-        }
+    if let Some(ctx) = context_window_field(minfo) {
+        fields.insert("context_window".into(), ctx);
     }
 
     if crate::truthy(minfo.get("reasoning")) {

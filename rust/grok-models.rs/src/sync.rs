@@ -198,6 +198,36 @@ fn resolve_model_name(
     catalog_name(catalog, mid)
 }
 
+/// Set the model's context window and reasoning effort options in its
+/// providers.json entry, using the values from models.dev.
+fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
+    if let Some(ctx) = core::context_window_field(minfo) {
+        entry.insert("context_window".into(), ctx);
+    }
+    if crate::truthy(minfo.get("reasoning")) {
+        match core::efforts_from_models_dev(minfo) {
+            Some(efforts) => {
+                // Precompute the default effort (first row not named "none")
+                // so the config.toml writer never needs the catalog to pick.
+                let default_idx = efforts
+                    .iter()
+                    .position(|row| crate::get_bool_val(&Value::Object(row.clone()), "default", false))
+                    .unwrap_or(0);
+                let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
+                entry.insert("supports_reasoning_effort".into(), Value::Bool(true));
+                entry.insert(
+                    "reasoning_efforts".into(),
+                    Value::Array(efforts.into_iter().map(Value::Object).collect()),
+                );
+                entry.insert("reasoning_effort".into(), default_value);
+            }
+            None => {
+                entry.insert("supports_reasoning_effort".into(), Value::Bool(true));
+            }
+        }
+    }
+}
+
 pub fn seed_models_from_items(
     items: &[(String, Option<String>)],
     catalog: &Map<String, Value>,
@@ -210,6 +240,7 @@ pub fn seed_models_from_items(
         }
         if let Some(minfo) = catalog.get(mid) {
             crate::jsonio::seed_description(&mut entry, minfo);
+            enrich_model_entry(&mut entry, minfo);
         }
         entry.insert("enabled".into(), Value::Bool(false));
         models_map.insert(mid.clone(), Value::Object(entry));
@@ -233,6 +264,7 @@ fn reconcile_models_map(
             }
             if let Some(minfo) = catalog.get(mid) {
                 crate::jsonio::seed_description(&mut entry, minfo);
+                enrich_model_entry(&mut entry, minfo);
             }
             entry.insert("enabled".into(), Value::Bool(false));
             models_map.insert(mid.clone(), Value::Object(entry));
@@ -246,6 +278,23 @@ fn reconcile_models_map(
             changed = true;
         }
         let obj = m.as_object_mut().unwrap();
+        // Update this entry's stored attributes from the catalog. Delete
+        // before writing so attributes the catalog dropped disappear too.
+        for k in [
+            "context_window",
+            "supports_reasoning_effort",
+            "reasoning_efforts",
+            "reasoning_effort",
+        ] {
+            if obj.remove(k).is_some() {
+                changed = true;
+            }
+        }
+        if let Some(minfo) = catalog.get(mid) {
+            if minfo.is_object() {
+                enrich_model_entry(obj, minfo);
+            }
+        }
         let stored = obj.get("name").and_then(Value::as_str).map(str::to_string);
         if let Some(name) =
             resolve_model_name(live_name.as_deref(), stored.as_deref(), catalog, mid)
@@ -317,94 +366,47 @@ fn providers_list(doc: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// `run_sync()` — reconcile providers.json with a live API payload.
-///
-/// `api` is injected by callers (the binary fetches from models.dev; tests
-/// pass a fixture). Returns the config path written plus stats; `None` when
-/// there was nothing to do ("No providers configured yet").
-pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
-    let providers_path = paths::providers_path();
+fn ensure_obj(v: &Value) -> Value {
+    if v.is_object() {
+        v.clone()
+    } else {
+        Value::Object(Map::new())
+    }
+}
+
+/// Update phase (1 of 2): reconcile every configured provider's model list
+/// in providers.json against fresh data (live /models with catalog fallback)
+/// and backfill env_key/base_url. Reads and writes only providers.json —
+/// no config.toml involvement.
+fn update_providers_json(models_dev: &Value) -> Res<Stats> {
     let mut doc = jsonio::load_providers()?;
-    let empty_vec = Vec::new();
-
-    if providers_list(&doc).is_empty() {
-        let removed = doc
-            .get("removed_providers")
-            .and_then(Value::as_array)
-            .unwrap_or(&empty_vec)
-            .clone();
-        if !removed.is_empty() {
-            // Still strip tables left behind by deleted providers.
-            let ids: Vec<String> = removed
-                .iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect();
-            let _path = toml_out::write_config_toml(
-                &paths::config_toml_path(),
-                &ids,
-                &[],
-            )?;
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert("removed_providers".into(), Value::Array(Vec::new()));
-            }
-            jsonio::dump_providers(&providers_path, &mut doc)?;
-        }
-        println!("No providers configured yet. Add with --add-provider");
-        return Ok((None, Stats::default()));
-    }
-
-    let api = ensure_obj(api);
-
+    let models_dev = ensure_obj(models_dev);
     let mut stats = Stats::default();
-
-    let all_provider_ids: Vec<String> = providers_list(&doc)
-        .iter()
-        .filter(|p| p.is_object())
-        .filter_map(|p| p.get("id").and_then(Value::as_str))
-        .map(String::from)
-        .collect();
-    // This tool owns [model.*] tables only for providers it has configured.
-    // Deleted providers are remembered in "removed_providers" so the next
-    // sync strips their leftover tables.
-    let mut managed_ids: HashSet<String> = all_provider_ids.iter().cloned().collect();
-    for r in doc
-        .get("removed_providers")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty_vec)
-    {
-        if let Some(s) = r.as_str() {
-            managed_ids.insert(s.to_string());
-        }
-    }
-
-    let mut tables: Vec<(String, Map<String, Value>)> = Vec::new();
     let mut changed = false;
 
+    // Refresh every configured provider, enabled or not — a disabled
+    // provider's stored model list must stay current so re-enabling it
+    // doesn't surface stale data. (Only enabled providers reach config.toml;
+    // that filter lives in update_config_toml.)
     for provider in providers_list(&doc) {
         if !provider.is_object() || provider.get("id").is_none() {
             continue;
         }
-        if !provider.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
-            continue;
-        }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
-        let pinfo = match api.get(&pid) {
-            Some(p) if p.is_object() => p.clone(),
-            _ => {
-                println!(
-                    "  warning: provider {} not found in models.dev; skipping",
-                    core::py_repr(&pid)
-                );
-                stats.providers_missing += 1;
-                continue;
-            }
+        let Some(pinfo) = models_dev.get(&pid).filter(|p| p.is_object()).cloned() else {
+            println!(
+                "  warning: provider {} not found in models.dev; skipping",
+                core::py_repr(&pid)
+            );
+            stats.providers_missing += 1;
+            continue;
         };
 
         let catalog_models = catalog_models_map(&pinfo);
 
+        // Backfill provider-level fields from the catalog: env key and a
+        // missing base_url (a stored non-empty base_url override wins).
         let new_env_key = core::api_env_key(&pinfo);
-        // Work on the entry inside the doc so mutations persist.
         let effective_base_url: String;
         {
             let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
@@ -418,9 +420,6 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
                 prov_obj.insert("models".into(), Value::Object(Map::new()));
                 changed = true;
             }
-            // Provider-level base_url override: a stored value wins over the
-            // catalog; a missing one is backfilled from the catalog so the
-            // config menu always has something to show. /models uses this URL.
             let catalog_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
             match prov_obj.get("base_url").and_then(Value::as_str) {
                 Some(v) if !v.is_empty() => effective_base_url = v.to_string(),
@@ -437,92 +436,146 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             }
         }
 
+        // Bring the stored model list in line with the authoritative one:
+        // add/remove/rename entries, then update each entry's attributes
+        // from the current catalog.
         let items = authority_items_for_provider(&pinfo, &effective_base_url, false);
-        {
-            let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
-            let models_map = prov_obj
-                .get_mut("models")
-                .unwrap()
-                .as_object_mut()
-                .unwrap();
-            if reconcile_models_map(models_map, &items, &catalog_models, &mut stats) {
-                changed = true;
-            }
-            if reconcile_descriptions(models_map, &catalog_models, &mut stats) {
-                changed = true;
-            }
-        }
-
-        let include_descriptions = doc
-            .get("include_descriptions")
-            .and_then(Value::as_bool)
-            .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
-
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
-        let models_map = prov_obj
-            .get_mut("models")
-            .unwrap()
-            .as_object_mut()
-            .unwrap();
-
-        let base_url = effective_base_url.as_str();
-        let env_key = core::api_env_key(&pinfo);
-        let pname = pinfo.get("name").and_then(Value::as_str).unwrap_or(&pid).to_string();
-        if base_url.is_empty() {
-            println!(
-                "  warning: provider {} has no base URL (api) in models.dev; \
-tables will have an empty base_url",
-                core::py_repr(&pid)
-            );
+        let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
+        if reconcile_models_map(models_map, &items, &catalog_models, &mut stats) {
+            changed = true;
         }
-
-        // Table emission pass, in models-map insertion order.
-        // Extras come only from the cached models.dev payload (catalog_models).
-        for (mid, m) in models_map.iter_mut() {
-            if !m.is_object() {
-                let mut entry = Map::new();
-                if let Some(n) = catalog_name(&catalog_models, mid) {
-                    entry.insert("name".into(), Value::String(n));
-                }
-                entry.insert("enabled".into(), Value::Bool(false));
-                *m = Value::Object(entry);
-                changed = true;
-            }
-            let menabled = crate::get_bool(m, "enabled", true);
-            if !menabled {
-                continue;
-            }
-            let stored_name = m.get("name").and_then(Value::as_str).map(str::to_string);
-            let empty = Value::Object(Map::new());
-            let minfo = match catalog_models.get(mid) {
-                Some(v) if v.is_object() => v,
-                _ if USE_PROVIDER_MODELS_ENDPOINT => &empty,
-                _ => {
-                    println!(
-                        "  warning: model {} not found in models.dev; skipping",
-                        core::py_repr(mid)
-                    );
-                    stats.models_missing += 1;
-                    continue;
-                }
-            };
-            let fields = core::build_fields(
-                mid,
-                minfo,
-                base_url,
-                &env_key,
-                &pname,
-                stored_name.as_deref(),
-                include_descriptions,
-            )?;
-            let table_key = core::table_model_id(&pid, mid);
-            tables.push((table_key, fields));
-            stats.tables_written += 1;
+        if reconcile_descriptions(models_map, &catalog_models, &mut stats) {
+            changed = true;
         }
         stats.providers_synced += 1;
     }
 
-    // Strip tables for providers deleted since the last sync.
+    if changed {
+        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
+    }
+
+    Ok(stats)
+}
+
+/// Write phase (2 of 2): load providers.json from disk and render
+/// config.toml from it alone — enabled providers, table fields, table
+/// ownership, and pending deletions are all derived from the file.
+/// `models_dev` is used only by the deleted-provider key reconstruction.
+fn update_config_toml(models_dev: &Value) -> Res<std::path::PathBuf> {
+    let mut doc = jsonio::load_providers()?;
+    let empty_vec = Vec::new();
+
+    // Table ownership: configured providers plus remembered deletions.
+    let mut managed: HashSet<String> = providers_list(&doc)
+        .iter()
+        .filter(|p| p.is_object())
+        .filter_map(|p| p.get("id").and_then(Value::as_str))
+        .map(String::from)
+        .collect();
+    for r in doc
+        .get("removed_providers")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_vec)
+    {
+        if let Some(s) = r.as_str() {
+            managed.insert(s.to_string());
+        }
+    }
+
+    let mut tables: Vec<(String, Map<String, Value>)> = Vec::new();
+
+    let include_descriptions = doc
+        .get("include_descriptions")
+        .and_then(Value::as_bool)
+        .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
+
+    for provider in providers_list(&doc) {
+        if !provider.is_object() || provider.get("id").is_none() {
+            continue;
+        }
+        if !provider.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+            continue;
+        }
+        let pid = provider["id"].as_str().unwrap_or_default().to_string();
+        // base_url comes straight from providers.json; empty means the
+        // provider has none stored and the catalog had nothing to backfill.
+        let base_url = provider.get("base_url").and_then(Value::as_str).unwrap_or("");
+        if base_url.is_empty() {
+            println!(
+                "  warning: provider {} has no base URL; \
+tables will have an empty base_url",
+                core::py_repr(&pid)
+            );
+        }
+        let env_key = core::first_env_key(&provider);
+        let pname = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&pid)
+            .to_string();
+
+        let default_model_entry = Value::Object(Map::new());
+        let models = provider.get("models").and_then(Value::as_object).unwrap();
+        for (mid, m) in models {
+            let entry = m.as_object().unwrap_or_else(|| match &default_model_entry {
+                Value::Object(o) => o,
+                _ => unreachable!(),
+            });
+            let menabled = crate::get_bool_val(&Value::Object(entry.clone()), "enabled", true);
+            if !menabled {
+                continue;
+            }
+            // Assemble the table fields from stored values only. The name
+            // falls back to a title-cased model id exactly like build_fields.
+            let mut fields = Map::new();
+            fields.insert("model".into(), Value::String(mid.clone()));
+            fields.insert("base_url".into(), Value::String(base_url.to_string()));
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| core::first_letter_cap(mid));
+            fields.insert(
+                "name".into(),
+                Value::String(format!("{name} ({pname})")),
+            );
+            fields.insert("env_key".into(), Value::String(env_key.clone()));
+            fields.insert(
+                "api_backend".into(),
+                Value::String("chat_completions".into()),
+            );
+            if let Some(ctx) = entry.get("context_window") {
+                fields.insert("context_window".into(), ctx.clone());
+            }
+            if crate::truthy(entry.get("supports_reasoning_effort")) {
+                fields.insert(
+                    "supports_reasoning_effort".into(),
+                    Value::Bool(true),
+                );
+                if let Some(efforts) = entry.get("reasoning_efforts") {
+                    fields.insert("reasoning_efforts".into(), efforts.clone());
+                    // Default effort was precomputed when the entry was
+                    // last updated.
+                    if let Some(def) = entry.get("reasoning_effort") {
+                        fields.insert("reasoning_effort".into(), def.clone());
+                    }
+                }
+            }
+            if include_descriptions {
+                if let Some(desc) =
+                    crate::jsonio::catalog_description(&Value::Object(entry.clone()))
+                {
+                    fields.insert("description".into(), Value::String(desc.to_string()));
+                }
+            }
+            tables.push((core::table_model_id(&pid, mid), fields));
+        }
+    }
+
+    // Deleted-provider tables are stripped here, immediately before the
+    // write, using the same models.dev payload the sync used.
     let removed: Vec<String> = doc
         .get("removed_providers")
         .and_then(Value::as_array)
@@ -531,39 +584,42 @@ tables will have an empty base_url",
     if !removed.is_empty() {
         let mut removed_keys: HashSet<String> = HashSet::new();
         for pid in &removed {
-            let models = api
-                .get(pid)
-                .and_then(Value::as_object)
-                .and_then(|o| o.get("models"))
-                .and_then(Value::as_object);
-            if let Some(models) = models {
-                for mid in models.keys() {
-                    removed_keys.insert(core::table_model_id(pid, mid));
+            if let Some(models) = ensure_obj(models_dev).get(pid).and_then(|p| p.get("models")).cloned() {
+                for mid in models.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+                    removed_keys.insert(core::table_model_id(pid, &mid));
                 }
             }
         }
         tables.retain(|(k, _)| !removed_keys.contains(k));
+    }
+
+    let path = toml_out::write_config_toml(
+        &paths::config_toml_path(),
+        &managed.into_iter().collect::<Vec<String>>(),
+        &tables,
+    )?;
+
+    // The deleted-provider cleanup has consumed the list; clear it so the
+    // next sync doesn't redo the work, and persist that.
+    if !removed.is_empty() {
         if let Some(obj) = doc.as_object_mut() {
             obj.insert("removed_providers".into(), Value::Array(Vec::new()));
         }
-        changed = true;
+        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
     }
 
-    if changed {
-        jsonio::dump_providers(&providers_path, &mut doc)?;
-    }
-
-    let managed: Vec<String> = managed_ids.into_iter().collect();
-    let path = toml_out::write_config_toml(&paths::config_toml_path(), &managed, &tables)?;
-    Ok((Some(path), stats))
+    Ok(path)
 }
 
-fn ensure_obj(v: &Value) -> Value {
-    if v.is_object() {
-        v.clone()
-    } else {
-        Value::Object(Map::new())
-    }
+/// `run_sync()` — reconcile providers.json with a live API payload, then
+/// rewrite config.toml from it.
+pub fn run_sync(models_dev: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
+    // Phase 1: update the models in providers.json.
+    let stats = update_providers_json(models_dev)?;
+
+    // Phase 2: rewrite config.toml from providers.json.
+    let path = update_config_toml(models_dev)?;
+    Ok((Some(path), stats))
 }
 
 fn find_provider_mut<'a>(doc: &'a mut Value, pid: &str) -> Option<&'a mut Map<String, Value>> {
@@ -611,4 +667,150 @@ pub fn print_env_requirements(providers_doc: &Value) {
 pub fn print_sync_report(stats: &Stats, path: &std::path::Path, providers_doc: &Value) {
     print_summary(stats, path);
     print_env_requirements(providers_doc);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// These tests rewire the process-wide GROK_HOME, so they must not run
+    /// concurrently with each other.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Fixture models.dev payload exercising every model info field variant:
+    /// context window + reasoning efforts, reasoning without efforts, plain
+    /// model, and a model missing from the catalog (live /models id only).
+    fn fixture_api() -> Value {
+        serde_json::json!({
+            "prov": {
+                "name": "Prov",
+                "api": "https://api.prov.example/v1",
+                "env_key": "PROV_API_KEY",
+                "models": {
+                    "full": {
+                        "name": "Full Model",
+                        "description": "A full model.",
+                        "limit": { "context": 200000.0 },
+                        "reasoning": true,
+                        "reasoning_options": [
+                            { "type": "effort",
+                              "values": ["none", "low", "high"] }
+                        ]
+                    },
+                    "reason_no_opts": {
+                        "name": "Reason No Opts",
+                        "reasoning": true
+                    },
+                    "plain": {
+                        "name": "Plain Model",
+                        "limit": { "context": 8192 }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Seed providers.json with one enabled provider, run run_sync against
+    /// the fixture, then verify: for every enabled model, each field the
+    /// generated [model.*] table carries has a matching source in the
+    /// rewritten providers.json — proving phase 2 stores everything the
+    /// config.toml writer needs.
+    #[test]
+    fn providers_json_holds_every_config_table_field() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir()
+            .join(format!("gm-sync-test-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
+        std::env::set_var("GROK_HOME", &home);
+
+        let api = fixture_api();
+        // Enable all three catalog models up front so sync reconciles them
+        // through the existing-entries path, not just seeding.
+        let mut doc = serde_json::json!({ "providers": [] });
+        crate::commands::add_provider_entry(&mut doc, &api, "prov", true).expect("add provider");
+        if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
+            let p = arr.first_mut().unwrap().as_object_mut().unwrap();
+            p.insert("enabled".into(), Value::Bool(true));
+            let models = p.get_mut("models").unwrap().as_object_mut().unwrap();
+            for (_, m) in models.iter_mut() {
+                m.as_object_mut()
+                    .unwrap()
+                    .insert("enabled".into(), Value::Bool(true));
+            }
+        }
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump");
+
+        run_sync(&api).expect("run_sync");
+        let stored = jsonio::load_providers().expect("reload providers.json");
+
+        let prov = stored["providers"]
+            .as_array().unwrap().iter()
+            .find(|p| p["id"] == "prov")
+            .expect("provider present after sync");
+        let models = prov["models"].as_object().unwrap();
+
+        let include_descriptions = true;
+        for (mid, minfo) in api["prov"]["models"].as_object().unwrap() {
+            assert!(models.contains_key(mid), "{mid} missing from providers.json");
+            let entry = &models[mid];
+
+            let fields = core::build_fields(
+                mid,
+                minfo,
+                prov["base_url"].as_str().unwrap_or_default(),
+                &core::api_env_key(&prov),
+                prov["name"].as_str().unwrap(),
+                entry.get("name").and_then(Value::as_str),
+                include_descriptions,
+            )
+            .expect("build_fields");
+
+            for key in fields.keys() {
+                match key.as_str() {
+                    // Provider-level fields with homes outside the model
+                    // entry (base_url/env_key on the provider, api_backend
+                    // a constant); the model id itself is the map key.
+                    "model" => {}
+                    "base_url" | "env_key" | "api_backend" => {}
+                    "name" => assert!(
+                        entry.get("name").is_some_and(|v| v.is_string()),
+                        "{mid}: table name has no JSON source"
+                    ),
+                    "description" => assert_eq!(
+                        entry.get("description"),
+                        fields.get("description"),
+                        "{mid}: description mismatch"
+                    ),
+                    "context_window" => assert_eq!(
+                        entry.get("context_window"),
+                        fields.get("context_window"),
+                        "{mid}: context_window mismatch"
+                    ),
+                    "supports_reasoning_effort" => assert_eq!(
+                        entry.get("supports_reasoning_effort"),
+                        fields.get("supports_reasoning_effort"),
+                        "{mid}: supports_reasoning_effort mismatch"
+                    ),
+                    "reasoning_effort" => assert_eq!(
+                        entry.get("reasoning_effort"),
+                        fields.get("reasoning_effort"),
+                        "{mid}: reasoning_effort mismatch"
+                    ),
+                    // Handled by the dedicated rows comparison below.
+                    "reasoning_efforts" => {}
+                    other => panic!("{mid}: unaccounted table field {other}"),
+                }
+            }
+            // reasoning_efforts rows must match verbatim, including order.
+            match (fields.get("reasoning_efforts"), entry.get("reasoning_efforts")) {
+                (Some(tbl), Some(json)) => assert_eq!(tbl, json, "{mid}: reasoning_efforts mismatch"),
+                (None, None) => {}
+                (t, j) => panic!("{mid}: reasoning_efforts presence differs (table {t:?}, json {j:?})"),
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

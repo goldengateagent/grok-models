@@ -83,7 +83,15 @@ pub const TOP_LEVEL_KEY_ORDER: [&str; 3] =
     ["include_descriptions", "providers", "removed_providers"];
 pub const PROVIDER_KEY_ORDER: [&str; 6] =
     ["id", "name", "env_key", "base_url", "enabled", "models"];
-const MODEL_KEY_ORDER: [&str; 3] = ["name", "description", "enabled"];
+const MODEL_KEY_ORDER: [&str; 7] = [
+    "enabled",
+    "name",
+    "description",
+    "context_window",
+    "supports_reasoning_effort",
+    "reasoning_effort",
+    "reasoning_efforts",
+];
 
 /// Default for the top-level include_descriptions flag when providers.json
 /// does not carry it yet (off).
@@ -262,7 +270,7 @@ mod tests {
         assert_eq!(mids, ["alpha", "zeta"]);
         // Per-model canonical field order too.
         let alpha: Vec<String> = models["alpha"].as_object().unwrap().keys().cloned().collect();
-        assert_eq!(alpha, ["name", "enabled"]);
+        assert_eq!(alpha, ["enabled", "name"]);
     }
 
     #[test]
@@ -281,7 +289,7 @@ mod tests {
         dump_providers(&path, &mut doc).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        let expected = "{\n  \"providers\": [\n    {\n      \"id\": \"a\",\n      \"enabled\": true,\n      \"models\": {\n        \"m1\": {\n          \"enabled\": true\n        }\n      }\n    },\n    {\n      \"id\": \"b\",\n      \"name\": \"Beta\",\n      \"enabled\": false,\n      \"models\": {\n        \"m2\": {\n          \"name\": \"M Two\",\n          \"enabled\": false\n        }\n      },\n      \"extra\": 7\n    }\n  ],\n  \"removed_providers\": [\n    \"old\"\n  ]\n}\n";
+        let expected = "{\n  \"providers\": [\n    {\n      \"id\": \"a\",\n      \"enabled\": true,\n      \"models\": {\n        \"m1\": {\n          \"enabled\": true\n        }\n      }\n    },\n    {\n      \"id\": \"b\",\n      \"name\": \"Beta\",\n      \"enabled\": false,\n      \"models\": {\n        \"m2\": {\n          \"enabled\": false,\n          \"name\": \"M Two\"\n        }\n      },\n      \"extra\": 7\n    }\n  ],\n  \"removed_providers\": [\n    \"old\"\n  ]\n}\n";
         assert_eq!(out, expected);
         let ids: Vec<&str> = doc["providers"]
             .as_array()
