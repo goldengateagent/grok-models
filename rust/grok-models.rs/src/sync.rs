@@ -376,11 +376,17 @@ fn ensure_obj(v: &Value) -> Value {
 
 /// Update phase (1 of 2): reconcile every configured provider's model list
 /// in providers.json against fresh data (live /models with catalog fallback)
-/// and backfill env_key/base_url. Reads and writes only providers.json —
-/// no config.toml involvement.
-fn update_providers_json(models_dev: &Value) -> Res<Stats> {
+/// and backfill env_key/base_url. Fetches models.dev itself. Reads and
+/// writes only providers.json — no config.toml involvement.
+pub fn update_providers_json() -> Res<Stats> {
+    let models_dev = ensure_obj(&fetch_models_dev()?);
+    update_providers_json_with(&models_dev)
+}
+
+/// Same phase with the payload injected — the seam tests and the gm-harness
+/// driver use to run syncs against fixture data without network.
+pub fn update_providers_json_with(models_dev: &Value) -> Res<Stats> {
     let mut doc = jsonio::load_providers()?;
-    let models_dev = ensure_obj(models_dev);
     let mut stats = Stats::default();
     let mut changed = false;
 
@@ -629,9 +635,9 @@ tables will have an empty base_url",
 
 /// `run_sync()` — reconcile providers.json with a live API payload, then
 /// rewrite config.toml from it.
-pub fn run_sync(models_dev: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
+pub fn run_sync() -> Res<(Option<std::path::PathBuf>, Stats)> {
     // Phase 1: update the models in providers.json.
-    let stats = update_providers_json(models_dev)?;
+    let stats = update_providers_json()?;
 
     // Phase 2: rewrite config.toml from providers.json.
     let path = update_config_toml()?;
@@ -758,7 +764,7 @@ mod tests {
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump");
 
-        run_sync(&api).expect("run_sync");
+        update_providers_json_with(&api).expect("update providers.json");
         let stored = jsonio::load_providers().expect("reload providers.json");
 
         let prov = stored["providers"]
@@ -869,7 +875,8 @@ mod tests {
             }
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("seed");
-        run_sync(&api).expect("initial sync");
+        update_providers_json_with(&api).expect("initial update");
+        update_config_toml().expect("initial write");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
         assert!(
@@ -943,7 +950,8 @@ mod tests {
             }
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump re-add");
-        run_sync(&api).expect("sync after re-add");
+        update_providers_json_with(&api).expect("re-add update");
+        update_config_toml().expect("re-add write");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
         assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");

@@ -78,7 +78,11 @@ fn cmd_sync(argv: &[String]) -> i32 {
     std::fs::copy(providers_json, &providers_target).expect("copy providers.json");
 
     let api: serde_json::Value = serde_json::from_slice(&read(&api_path)).expect("parse api");
-    let (path, _stats) = match sync::run_sync(&api) {
+    if let Err(e) = sync::update_providers_json_with(&api) {
+        eprintln!("update error: {e}");
+        return 1;
+    }
+    let path = match sync::update_config_toml() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("sync error: {e}");
@@ -86,8 +90,8 @@ fn cmd_sync(argv: &[String]) -> i32 {
         }
     };
     // Copy the rewritten providers.json and config.toml to the output paths.
-    if let Some(p) = path {
-        let text = std::fs::read_to_string(&p).expect("read config.toml");
+    {
+        let text = std::fs::read_to_string(&path).expect("read config.toml");
         write_string(&config_out, &text);
     }
     let rewritten = std::fs::read(&providers_target).expect("read rewritten providers.json");

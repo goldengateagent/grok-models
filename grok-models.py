@@ -2795,11 +2795,12 @@ def write_config_toml(
     return path
 
 
-def update_providers_json(models_dev: dict) -> dict:
+def update_providers_json() -> dict:
     """Update phase (1 of 2): reconcile every configured provider's model list
     in providers.json against fresh data (live /models with catalog fallback)
-    and backfill env_key/base_url. Reads and writes only providers.json —
-    no config.toml involvement."""
+    and backfill env_key/base_url. Fetches models.dev itself. Reads and
+    writes only providers.json — no config.toml involvement."""
+    models_dev = fetch_models_dev()
     providers_doc = load_providers()
     stats = {
         "providers_synced": 0,
@@ -2958,10 +2959,8 @@ def update_config_toml() -> Path:
 def run_sync() -> tuple[Path | None, dict]:
     """Reconcile providers.json with the live API, then rewrite
     ~/.grok/config.toml from it."""
-    models_dev = fetch_models_dev()
-
     # Phase 1: update the models in providers.json.
-    stats = update_providers_json(models_dev)
+    stats = update_providers_json()
 
     # Phase 2: rewrite config.toml from providers.json.
     path = update_config_toml()

@@ -37,8 +37,7 @@ pub fn cmd_config() -> Res<i32> {
     let _ = providers; // silence unused
 
     if changed {
-        let api = sync::fetch_models_dev()?;
-        let (path, stats) = sync::run_sync(&api)?;
+        let (path, stats) = sync::run_sync()?;
         if let Some(path) = path {
             sync::print_sync_report(&stats, &path, &doc);
             sync::print_relaunch();
