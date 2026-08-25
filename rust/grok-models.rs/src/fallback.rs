@@ -260,7 +260,11 @@ pub fn confirm_delete(pid: &str) -> Res<bool> {
 }
 
 /// `_record_removed_provider`
-pub fn record_removed_provider(doc: &mut Value, pid: &str) {
+///
+/// Records a deletion as `{ "provider": ..., "models": [...] }` so the next
+/// write phase can target the provider's config.toml tables directly — no
+/// models.dev lookup. `models` holds the enabled model ids at delete time.
+pub fn record_removed_provider(doc: &mut Value, pid: &str, models: Vec<String>) {
     let obj = doc.as_object_mut().unwrap();
     let removed = obj
         .entry("removed_providers".to_string())
@@ -269,8 +273,14 @@ pub fn record_removed_provider(doc: &mut Value, pid: &str) {
         *removed = Value::Array(Vec::new());
     }
     let arr = removed.as_array_mut().unwrap();
-    if !arr.iter().any(|v| v.as_str() == Some(pid)) {
-        arr.push(Value::String(pid.to_string()));
+    if !arr.iter().any(|v| {
+        v.as_object().and_then(|o| o.get("provider")).and_then(Value::as_str) == Some(pid)
+            || v.as_str() == Some(pid)
+    }) {
+        arr.push(serde_json::json!({
+            "provider": pid,
+            "models": models,
+        }));
     }
 }
 
@@ -380,9 +390,16 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                 }
                 2 => {
                     if confirm_delete(&selected_id)? {
+                        // Grab the enabled model ids from providers.json
+                        // before the entry is removed, then flush the
+                        // deletion immediately.
+                        let enabled = find_by_id(doc, &selected_id)
+                            .map(|p| crate::core::enabled_model_ids(&Value::Object(p)))
+                            .unwrap_or_default();
                         remove_provider(doc, &selected_id);
-                        record_removed_provider(doc, &selected_id);
+                        record_removed_provider(doc, &selected_id, enabled);
                         jsonio::dump_providers(&paths::providers_path(), doc)?;
+                        crate::sync::update_config_toml()?;
                         println!("Deleted provider {}.", core::py_repr(&selected_id));
                         changed = true;
                     }

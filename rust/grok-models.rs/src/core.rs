@@ -285,6 +285,21 @@ pub fn build_fields(
     Ok(fields)
 }
 
+/// The enabled model ids of a provider entry from providers.json.
+pub fn enabled_model_ids(provider: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(models) = provider.get("models").and_then(Value::as_object) {
+        for (mid, m) in models {
+            let enabled =
+                crate::get_bool_val(&Value::Object(m.as_object().cloned().unwrap_or_default()), "enabled", true);
+            if enabled {
+                out.push(mid.clone());
+            }
+        }
+    }
+    out
+}
+
 /// `_provider_label`
 pub fn provider_label(p: &Value) -> String {
     let state = if p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {

@@ -1871,9 +1871,16 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 }
                 3 => {
                     if confirm_win(stdscr, &format!("Delete provider {}?", core::py_repr(&id_str))) {
+                        // Grab the enabled model ids from providers.json
+                        // before the entry is removed.
+                        let enabled = core::enabled_model_ids(&Value::Object(target.clone()));
                         remove_provider(doc, &id_str);
-                        fallback::record_removed_provider(doc, &id_str);
+                        fallback::record_removed_provider(doc, &id_str, enabled);
                         jsonio::dump_providers(&paths::providers_path(), doc)?;
+                        // Flush the deletion into config.toml now so a re-add
+                        // of the same provider this session can't collide
+                        // with a pending deletion record.
+                        crate::sync::update_config_toml()?;
                         changed = true;
                     }
                     break;

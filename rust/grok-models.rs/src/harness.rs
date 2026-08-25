@@ -313,6 +313,7 @@ fn cmd_toml_string(argv: &[String]) -> i32 {
         std::path::Path::new(&existing_path),
         &ids,
         std::slice::from_ref(&(table_key, fields_map)),
+        &Default::default(),
     ) {
         Ok(s) => s,
         Err(e) => {

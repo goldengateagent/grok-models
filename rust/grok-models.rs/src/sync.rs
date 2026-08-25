@@ -461,27 +461,22 @@ fn update_providers_json(models_dev: &Value) -> Res<Stats> {
 /// Write phase (2 of 2): load providers.json from disk and render
 /// config.toml from it alone — enabled providers, table fields, table
 /// ownership, and pending deletions are all derived from the file.
-/// `models_dev` is used only by the deleted-provider key reconstruction.
-fn update_config_toml(models_dev: &Value) -> Res<std::path::PathBuf> {
+pub fn update_config_toml() -> Res<std::path::PathBuf> {
     let mut doc = jsonio::load_providers()?;
-    let empty_vec = Vec::new();
 
     // Table ownership: configured providers plus remembered deletions.
-    let mut managed: HashSet<String> = providers_list(&doc)
+    // Only entries carrying explicit provider+model ids participate;
+    // nothing is ever stripped by provider id alone.
+    let managed: HashSet<String> = providers_list(&doc)
         .iter()
         .filter(|p| p.is_object())
         .filter_map(|p| p.get("id").and_then(Value::as_str))
         .map(String::from)
         .collect();
-    for r in doc
+    let has_pending_deletions = doc
         .get("removed_providers")
         .and_then(Value::as_array)
-        .unwrap_or(&empty_vec)
-    {
-        if let Some(s) = r.as_str() {
-            managed.insert(s.to_string());
-        }
-    }
+        .is_some_and(|a| !a.is_empty());
 
     let mut tables: Vec<(String, Map<String, Value>)> = Vec::new();
 
@@ -575,33 +570,54 @@ tables will have an empty base_url",
     }
 
     // Deleted-provider tables are stripped here, immediately before the
-    // write, using the same models.dev payload the sync used.
-    let removed: Vec<String> = doc
+    // write, using the model ids recorded at delete time — no models.dev
+    // lookup, and no provider-id-prefix matching. Entries without a model
+    // list cannot be targeted safely and are skipped.
+    let raw_removed: Vec<Value> = doc
         .get("removed_providers")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .cloned()
         .unwrap_or_default();
-    if !removed.is_empty() {
-        let mut removed_keys: HashSet<String> = HashSet::new();
-        for pid in &removed {
-            if let Some(models) = ensure_obj(models_dev).get(pid).and_then(|p| p.get("models")).cloned() {
-                for mid in models.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
-                    removed_keys.insert(core::table_model_id(pid, &mid));
-                }
+    let removed: Vec<(String, Vec<String>)> = raw_removed
+        .iter()
+        .filter_map(|r| match r.as_object() {
+            Some(o) => {
+                let pid = o.get("provider").and_then(Value::as_str)?.to_string();
+                let models = o
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((pid, models))
             }
+            None => None, // legacy string entry: no targeted keys
+        })
+        .collect();
+    // Exact table keys to remove from the existing config.toml, computed
+    // from the model ids recorded at delete time. Entries without a model
+    // list contribute nothing — nothing is ever removed by provider id alone.
+    let mut removed_keys: HashSet<String> = HashSet::new();
+    for (pid, models) in &removed {
+        for mid in models {
+            removed_keys.insert(core::table_model_id(pid, mid));
         }
-        tables.retain(|(k, _)| !removed_keys.contains(k));
     }
 
     let path = toml_out::write_config_toml(
         &paths::config_toml_path(),
         &managed.into_iter().collect::<Vec<String>>(),
         &tables,
+        &removed_keys,
     )?;
 
-    // The deleted-provider cleanup has consumed the list; clear it so the
-    // next sync doesn't redo the work, and persist that.
-    if !removed.is_empty() {
+    // The deletion list has been consumed; clear it so it isn't reprocessed
+    // forever, and persist that.
+    if has_pending_deletions {
         if let Some(obj) = doc.as_object_mut() {
             obj.insert("removed_providers".into(), Value::Array(Vec::new()));
         }
@@ -618,7 +634,7 @@ pub fn run_sync(models_dev: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> 
     let stats = update_providers_json(models_dev)?;
 
     // Phase 2: rewrite config.toml from providers.json.
-    let path = update_config_toml(models_dev)?;
+    let path = update_config_toml()?;
     Ok((Some(path), stats))
 }
 
@@ -810,6 +826,166 @@ mod tests {
                 (t, j) => panic!("{mid}: reasoning_efforts presence differs (table {t:?}, json {j:?})"),
             }
         }
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Deletion flow: a provider is deleted and recorded with its enabled
+    /// model ids; update_config_toml must remove exactly those tables from
+    /// config.toml — including models that models.dev does not know about
+    /// (the case the old lookup-based approach missed) — then clear the
+    /// removed_providers list. Re-adding the provider afterwards must bring
+    /// its tables back.
+    #[test]
+    fn delete_flow_targets_recorded_models_and_recovers_on_readd() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir()
+            .join(format!("gm-delete-test-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
+        std::env::set_var("GROK_HOME", &home);
+
+        // Catalog knows only "plain"; "live_only" simulates a model that came
+        // from the provider /models endpoint.
+        let mut api = fixture_api();
+        api["prov"]["models"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reason_no_opts");
+
+        // Seed: provider with all catalog models enabled, synced into
+        // config.toml.
+        let mut doc = serde_json::json!({ "providers": [] });
+        crate::commands::add_provider_entry(&mut doc, &api, "prov", true).expect("add");
+        {
+            let p = doc["providers"][0].as_object_mut().unwrap();
+            p.insert("enabled".into(), Value::Bool(true));
+            let models = p.get_mut("models").unwrap().as_object_mut().unwrap();
+            // add_provider_entry seeds everything disabled; turn it all on.
+            for (_, m) in models.iter_mut() {
+                m.as_object_mut()
+                    .unwrap()
+                    .insert("enabled".into(), Value::Bool(true));
+            }
+        }
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("seed");
+        run_sync(&api).expect("initial sync");
+
+        let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
+        assert!(
+            config.contains("[model.prov-plain]"),
+            "initial sync missing prov-plain"
+        );
+
+        // Simulate a model that an earlier /models-based sync put into
+        // config.toml but which is gone from every current source: stored
+        // entry + table text, no catalog backing.
+        {
+            let p = doc["providers"][0].as_object_mut().unwrap();
+            let models = p.get_mut("models").unwrap().as_object_mut().unwrap();
+            models.insert(
+                "live_only".into(),
+                serde_json::json!({ "name": "Live Only", "enabled": true }),
+            );
+        }
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump live_only");
+        {
+            let mut config =
+                std::fs::read_to_string(paths::config_toml_path()).expect("config");
+            config.push_str("\n[model.prov-live_only]\nmodel = \"live_only\"\n");
+            std::fs::write(paths::config_toml_path(), config).expect("append live_only table");
+        }
+
+        // Delete the provider: entry gone, deletion recorded with its model ids.
+        let mut doc = jsonio::load_providers().expect("reload");
+        let enabled = core::enabled_model_ids(&doc["providers"][0]);
+        let enabled_set: std::collections::HashSet<String> =
+            enabled.iter().cloned().collect();
+        let expected: std::collections::HashSet<String> = [
+            "full".to_string(),
+            "plain".to_string(),
+            "live_only".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(enabled_set, expected);
+        // Simulate the TUI delete: drop the entry from the providers array.
+        if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
+            arr.retain(|p| p.get("id").and_then(Value::as_str) != Some("prov"));
+        }
+        crate::fallback::record_removed_provider(&mut doc, "prov", enabled);
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump post-delete");
+
+        // Flush phase 2 alone (what the TUI does on confirm).
+        update_config_toml().expect("flush delete");
+
+        let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
+        assert!(!config.contains("[model.prov-plain]"), "known-model table must be removed");
+        assert!(!config.contains("[model.prov-live_only]"), "/models-only table must be removed");
+
+        // The list is consumed after use.
+        let stored = jsonio::load_providers().expect("reload");
+        assert_eq!(
+            stored.get("removed_providers").and_then(Value::as_array),
+            Some(&Vec::new()),
+            "removed_providers must be cleared after cleanup"
+        );
+
+        // Re-add in-session: tables come back on next sync.
+        let mut doc = jsonio::load_providers().expect("reload");
+        crate::commands::add_provider_entry(&mut doc, &api, "prov", true).expect("re-add");
+        {
+            let p = doc["providers"][0].as_object_mut().unwrap();
+            p.insert("enabled".into(), Value::Bool(true));
+            let models = p.get_mut("models").unwrap().as_object_mut().unwrap();
+            for (_, m) in models.iter_mut() {
+                m.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(true));
+            }
+        }
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump re-add");
+        run_sync(&api).expect("sync after re-add");
+
+        let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
+        assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");
+    }
+
+    /// A legacy bare-string removed_providers entry carries no model ids, so
+    /// nothing may be stripped by provider id alone — the write phase leaves
+    /// config.toml untouched and just consumes the entry.
+    #[test]
+    fn legacy_string_removal_entry_does_not_strip_without_model_ids() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = std::env::temp_dir()
+            .join(format!("gm-legacy-del-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
+        std::env::set_var("GROK_HOME", &home);
+
+        // providers.json with no providers but a legacy pending deletion;
+        // a stale table left in config.toml.
+        let mut doc = serde_json::json!({
+            "providers": [],
+            "removed_providers": ["prov"]
+        });
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("seed");
+        std::fs::write(
+            paths::config_toml_path(),
+            "[model.prov-old]\nmodel = \"old\"\n",
+        )
+        .expect("write stale config");
+
+        update_config_toml().expect("flush legacy delete");
+
+        let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
+        assert!(
+            config.contains("[model.prov-old]"),
+            "no model ids recorded — nothing may be stripped; config was:\n{config}"
+        );
+        let stored = jsonio::load_providers().expect("reload");
+        assert_eq!(
+            stored.get("removed_providers").and_then(Value::as_array),
+            Some(&Vec::new())
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }

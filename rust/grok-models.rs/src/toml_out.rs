@@ -159,18 +159,21 @@ pub fn strip_owned_toml_sections(text: &str, provider_ids: &[String]) -> String 
     out.concat()
 }
 
-/// `write_toml_stdlib`: kept sections + regenerated tables.
+/// `write_toml_stdlib`: kept sections + regenerated tables. `removed_keys`
+/// holds full table keys (provider-modelid) to drop from the existing file —
+/// exact matches only, used for deleted-provider cleanup.
 pub fn write_toml_stdlib(
     path: &Path,
     provider_ids: &[String],
     tables: &[(String, serde_json::Map<String, Value>)],
+    removed_keys: &std::collections::HashSet<String>,
 ) -> Res<String> {
     let existing = if path.exists() {
         std::fs::read_to_string(path).unwrap_or_default()
     } else {
         String::new()
     };
-    let kept = strip_owned_toml_sections(&existing, provider_ids);
+    let kept = strip_removed_and_unowned_sections(&existing, provider_ids, removed_keys);
     let mut chunks: Vec<String> = vec![kept.trim_end().to_string()];
     for (table_key, fields) in tables {
         let t = emit_model_table(table_key, fields)?;
@@ -183,6 +186,39 @@ pub fn write_toml_stdlib(
     Ok(text)
 }
 
+/// Drop every `[model.*]` section whose full key is in `removed_keys`
+/// (exact match), plus sections owned by `provider_ids` (prefix match, the
+/// tool's own rebuildable tables).
+fn strip_removed_and_unowned_sections(
+    text: &str,
+    provider_ids: &[String],
+    removed_keys: &std::collections::HashSet<String>,
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let lines = split_lines_keepends(text);
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if is_table_header(lines[i]) {
+            let key = owned_table_key(lines[i]);
+            let is_removed = key.as_deref().is_some_and(|k| removed_keys.contains(k));
+            let is_owned = is_owned_header(lines[i], provider_ids);
+            if is_removed || is_owned {
+                i += 1;
+                while i < lines.len() && !is_table_header(lines[i]) {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        out.push(lines[i]);
+        i += 1;
+    }
+    out.concat()
+}
+
 /// `validate_toml_text` — parse with a real TOML parser like tomllib.
 pub fn validate_toml_text(text: &str) -> Res<()> {
     match text.parse::<toml::Value>() {
@@ -192,10 +228,13 @@ pub fn validate_toml_text(text: &str) -> Res<()> {
 }
 
 /// `write_config_toml`: backup then atomically rewrite config.toml.
+/// `removed_keys` are full table keys (provider-modelid) to drop from the
+/// existing file — exact matches only.
 pub fn write_config_toml(
     path: &Path,
     provider_ids: &[String],
     tables: &[(String, serde_json::Map<String, Value>)],
+    removed_keys: &std::collections::HashSet<String>,
 ) -> Res<std::path::PathBuf> {
     if path.exists() {
         let bak = path.with_file_name(format!(
@@ -206,7 +245,7 @@ pub fn write_config_toml(
             crate::SyncError(format!("failed to write {}: {}", bak.display(), e))
         })?;
     }
-    let text = write_toml_stdlib(path, provider_ids, tables)?;
+    let text = write_toml_stdlib(path, provider_ids, tables, removed_keys)?;
     validate_toml_text(&text)?;
     crate::jsonio::atomic_write(path, &text)?;
     Ok(path.to_path_buf())
