@@ -1672,6 +1672,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         let mut labels: Vec<String> = ordered.iter().map(|p| crate::provider_label_from(p)).collect();
         labels.push("➕ Add provider…".to_string());
         labels.push("➕ Add model…".to_string());
+        let descriptions_on = doc
+            .get("include_descriptions")
+            .and_then(Value::as_bool)
+            .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
+        labels.push(format!(
+            "Descriptions [{}]",
+            if descriptions_on { "enabled" } else { "disabled" }
+        ));
         let preview = build_config_models_preview(doc, sort_by_name);
         let pi = match select_win(stdscr,
             &labels,
@@ -1710,6 +1718,20 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 status_msg = Some(msg);
                 changed = true;
             }
+            continue;
+        }
+        if pi == ordered.len() + 2 {
+            // "Descriptions [enabled/disabled]" — global config.toml flag.
+            let new_val = !descriptions_on;
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("include_descriptions".into(), Value::Bool(new_val));
+            }
+            let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+            status_msg = Some(format!(
+                "Descriptions {}.",
+                if new_val { "enabled" } else { "disabled" }
+            ));
+            changed = true;
             continue;
         }
         status_msg = None;
@@ -3229,6 +3251,46 @@ mod tests {
         assert_eq!(parse_key_prefix(b"\x1b["), None);
         // Unknown CSI swallows through its final alpha byte as Esc.
         assert_eq!(parse_key_prefix(b"\x1b[?1049h"), Some((Key::Esc, 8)));
+    }
+
+    #[test]
+    fn config_flow_descriptions_menu_item_toggles_flag() {
+        isolate_grok_home();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {"alpha-1": {"name": "Alpha One", "description": "D.", "enabled": false}}
+            }]
+        });
+        // Main menu rows: provider, ➕ Add provider…, ➕ Add model…,
+        // Descriptions [...]. Down to the Descriptions row; Enter toggles
+        // the flag on. 'q' quits (ESC is a no-op on the main menu).
+        let mut f = FakeStdscr::new(30, 80);
+        f.script(Key::Down);
+        f.script(Key::Down);
+        f.script(Key::Down);
+        f.script(Key::Enter);
+        f.script(Key::Char('q'));
+        let _ = run_config_flow_with_backend(&mut f, &mut doc);
+        assert_eq!(
+            doc.get("include_descriptions").and_then(Value::as_bool),
+            Some(true),
+            "Enter on the Descriptions row must persist include_descriptions: true"
+        );
+        let mut f2 = FakeStdscr::new(30, 80);
+        f2.script(Key::Down);
+        f2.script(Key::Down);
+        f2.script(Key::Down);
+        f2.script(Key::Enter);
+        f2.script(Key::Char('q'));
+        let _ = run_config_flow_with_backend(&mut f2, &mut doc);
+        assert_eq!(
+            doc.get("include_descriptions").and_then(Value::as_bool),
+            Some(false),
+            "second toggle must set include_descriptions back off"
+        );
     }
 }
 

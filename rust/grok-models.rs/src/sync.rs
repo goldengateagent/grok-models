@@ -19,6 +19,7 @@ pub struct Stats {
     pub models_added: u64,
     pub models_removed: u64,
     pub models_renamed: u64,
+    pub descriptions_updated: u64,
     pub models_missing: u64,
     pub providers_missing: u64,
     pub tables_written: u64,
@@ -207,6 +208,9 @@ pub fn seed_models_from_items(
         if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
             entry.insert("name".into(), Value::String(name));
         }
+        if let Some(minfo) = catalog.get(mid) {
+            crate::jsonio::seed_description(&mut entry, minfo);
+        }
         entry.insert("enabled".into(), Value::Bool(false));
         models_map.insert(mid.clone(), Value::Object(entry));
     }
@@ -226,6 +230,9 @@ fn reconcile_models_map(
             let mut entry = Map::new();
             if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
                 entry.insert("name".into(), Value::String(name));
+            }
+            if let Some(minfo) = catalog.get(mid) {
+                crate::jsonio::seed_description(&mut entry, minfo);
             }
             entry.insert("enabled".into(), Value::Bool(false));
             models_map.insert(mid.clone(), Value::Object(entry));
@@ -259,6 +266,32 @@ fn reconcile_models_map(
         models_map.remove(&mid);
         stats.models_removed += 1;
         changed = true;
+    }
+    changed
+}
+
+/// Add missing / refresh changed model descriptions from the catalog
+/// (`reconcile_descriptions`). Descriptions removed upstream are left
+/// as-is (last known value wins).
+fn reconcile_descriptions(
+    models_map: &mut Map<String, Value>,
+    catalog: &Map<String, Value>,
+    stats: &mut Stats,
+) -> bool {
+    let mut changed = false;
+    for (mid, m) in models_map.iter_mut() {
+        let Some(desc) = catalog.get(mid).and_then(crate::jsonio::catalog_description)
+        else {
+            continue;
+        };
+        let Some(obj) = m.as_object_mut() else {
+            continue;
+        };
+        if obj.get("description").and_then(Value::as_str) != Some(desc) {
+            obj.insert("description".into(), Value::String(desc.to_string()));
+            stats.descriptions_updated += 1;
+            changed = true;
+        }
     }
     changed
 }
@@ -415,7 +448,15 @@ pub fn run_sync(api: &Value) -> Res<(Option<std::path::PathBuf>, Stats)> {
             if reconcile_models_map(models_map, &items, &catalog_models, &mut stats) {
                 changed = true;
             }
+            if reconcile_descriptions(models_map, &catalog_models, &mut stats) {
+                changed = true;
+            }
         }
+
+        let include_descriptions = doc
+            .get("include_descriptions")
+            .and_then(Value::as_bool)
+            .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
 
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj
@@ -472,6 +513,7 @@ tables will have an empty base_url",
                 &env_key,
                 &pname,
                 stored_name.as_deref(),
+                include_descriptions,
             )?;
             let table_key = core::table_model_id(&pid, mid);
             tables.push((table_key, fields));
@@ -541,6 +583,7 @@ pub fn print_summary(stats: &Stats, path: &std::path::Path) {
     println!("  models added: {}", stats.models_added);
     println!("  models removed: {}", stats.models_removed);
     println!("  models renamed: {}", stats.models_renamed);
+    println!("  descriptions updated: {}", stats.descriptions_updated);
     println!("  models missing (skipped): {}", stats.models_missing);
     println!("  providers missing (skipped): {}", stats.providers_missing);
     println!("  tables written: {}", stats.tables_written);

@@ -40,6 +40,7 @@ TOML_SCALAR_FIELDS = (
     "supports_reasoning_effort",
     "reasoning_effort",
     "context_window",
+    "description",
 )
 OPTIONAL_META_FIELDS = (
     "supports_reasoning_effort",
@@ -79,9 +80,57 @@ def dump_json(path: Path, obj: object) -> None:
 # (import, add-provider, sync) produced them: fields in canonical order,
 # providers alphabetically by display name, models alphabetically by
 # display name.
-TOP_LEVEL_KEY_ORDER = ("providers", "removed_providers")
+TOP_LEVEL_KEY_ORDER = ("include_descriptions", "providers", "removed_providers")
 PROVIDER_KEY_ORDER = ("id", "name", "env_key", "base_url", "enabled", "models")
-MODEL_KEY_ORDER = ("name", "enabled")
+MODEL_KEY_ORDER = ("name", "description", "enabled")
+
+INCLUDE_DESCRIPTIONS_DEFAULT = False
+
+
+def catalog_description(minfo: object) -> str | None:
+    """models.dev `description` for a model, or None when absent/empty."""
+    if not isinstance(minfo, dict):
+        return None
+    desc = minfo.get("description")
+    if isinstance(desc, str) and desc:
+        return desc
+    return None
+
+
+def resolve_model_description(
+    stored: str | None,
+    catalog_models: dict,
+    mid: str,
+) -> str | None:
+    """Live catalog description wins; otherwise keep the stored one."""
+    live = catalog_description(catalog_models.get(mid))
+    if live is not None:
+        return live
+    if isinstance(stored, str) and stored:
+        return stored
+    return None
+
+
+def reconcile_descriptions(
+    models_map: dict,
+    catalog_models: dict,
+    stats: dict,
+) -> bool:
+    """Add missing / refresh changed model descriptions from the catalog.
+    Descriptions removed upstream are left as-is (last known value wins)."""
+    changed = False
+    for mid, m in models_map.items():
+        desc = catalog_description(catalog_models.get(mid))
+        if desc is None:
+            continue
+        current = m.get("description") if isinstance(m, dict) else None
+        if not isinstance(m, dict):
+            continue
+        if current != desc:
+            m["description"] = desc
+            stats["descriptions_updated"] = stats.get("descriptions_updated", 0) + 1
+            changed = True
+    return changed
 
 # Code-panel padding. Horizontal padding is char-exact; vertical granularity
 # is whole terminal rows (a row is visually taller than a column, so keep
@@ -371,6 +420,9 @@ def seed_models_from_items(
         name = resolve_model_name(live_name, None, catalog_models, mid)
         if name:
             entry["name"] = name
+        desc = catalog_description(catalog_models.get(mid))
+        if desc is not None:
+            entry["description"] = desc
         entry["enabled"] = False
         models_map[mid] = entry
     return models_map
@@ -391,6 +443,9 @@ def reconcile_models_map(
             name = resolve_model_name(live_name, None, catalog_models, mid)
             if name:
                 entry["name"] = name
+            desc = catalog_description(catalog_models.get(mid))
+            if desc is not None:
+                entry["description"] = desc
             entry["enabled"] = False
             models_map[mid] = entry
             stats["models_added"] = stats.get("models_added", 0) + 1
@@ -1840,6 +1895,10 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             labels = [_provider_label(p) for p in ordered]
             labels.append("➕ Add provider…")
             labels.append("➕ Add model…")
+            descriptions_on = bool(
+                providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
+            )
+            labels.append(f"Descriptions [{('enabled' if descriptions_on else 'disabled')}]")
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider",
                 status=status_msg,
@@ -1864,6 +1923,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 if enabled_msg:
                     status_msg = enabled_msg
                     changed = True
+                continue
+            if pi == len(ordered) + 2:
+                # "Descriptions [enabled/disabled]" — global config.toml flag.
+                new_val = not descriptions_on
+                providers_doc["include_descriptions"] = new_val
+                dump_providers(PROVIDERS_PATH, providers_doc)
+                status_msg = f"Descriptions {'enabled' if new_val else 'disabled'}."
+                changed = True
                 continue
             status_msg = None
             selected = ordered[pi]
@@ -2484,6 +2551,7 @@ def build_fields(
     env_key: str,
     provider_name: str,
     stored_name: str | None = None,
+    include_descriptions: bool = INCLUDE_DESCRIPTIONS_DEFAULT,
 ) -> dict:
     """Map a models.dev model entry to Grok Build [model.*] TOML fields."""
     left = (
@@ -2512,6 +2580,9 @@ def build_fields(
             fields["reasoning_effort"] = default_row["value"]
         else:
             fields["supports_reasoning_effort"] = True
+    desc = catalog_description(minfo)
+    if include_descriptions and isinstance(desc, str) and desc:
+        fields["description"] = desc
     return fields
 
 
@@ -2643,6 +2714,7 @@ def run_sync() -> tuple[Path | None, dict]:
         "models_added": 0,
         "models_removed": 0,
         "models_renamed": 0,
+        "descriptions_updated": 0,
         "models_missing": 0,
         "providers_missing": 0,
         "tables_written": 0,
@@ -2697,6 +2769,11 @@ def run_sync() -> tuple[Path | None, dict]:
         items = authority_items_for_provider(pinfo, base_url)
         if reconcile_models_map(models_map, items, catalog_models, stats):
             changed = True
+        if reconcile_descriptions(models_map, catalog_models, stats):
+            changed = True
+        include_descriptions = bool(
+            providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
+        )
 
         env_key = api_env_key(pinfo)
         pname = pinfo.get("name") or pid
@@ -2727,7 +2804,13 @@ def run_sync() -> tuple[Path | None, dict]:
                     stats["models_missing"] += 1
                     continue
             fields = build_fields(
-                mid, minfo, base_url, env_key, pname, stored_name=stored_name
+                mid,
+                minfo,
+                base_url,
+                env_key,
+                pname,
+                stored_name=stored_name,
+                include_descriptions=include_descriptions,
             )
             table_key = table_model_id(pid, mid)
             tables.append((table_key, fields))
@@ -3003,6 +3086,7 @@ def print_summary(stats: dict, path: Path) -> None:
     print(f"  models added: {stats.get('models_added', 0)}")
     print(f"  models removed: {stats.get('models_removed', 0)}")
     print(f"  models renamed: {stats.get('models_renamed', 0)}")
+    print(f"  descriptions updated: {stats.get('descriptions_updated', 0)}")
     print(f"  models missing (skipped): {stats.get('models_missing', 0)}")
     print(f"  providers missing (skipped): {stats.get('providers_missing', 0)}")
     print(f"  tables written: {stats.get('tables_written', 0)}")

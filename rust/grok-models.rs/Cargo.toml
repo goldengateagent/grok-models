@@ -3,6 +3,7 @@ name = "grok-models"
 version = "1.0.0"
 edition = "2021"
 description = "Native port of grok-models.py: sync Grok Build [model.*] tables from models.dev"
+default-run = "grok-models"
 
 [lib]
 name = "grok_models"

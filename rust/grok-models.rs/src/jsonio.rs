@@ -16,10 +16,15 @@ pub fn atomic_write(path: &Path, text: &str) -> Res<()> {
             std::fs::create_dir_all(parent).map_err(io_err)?;
         }
     }
-    // Python: tmp = path.with_name(path.name + ".tmp"); tmp.replace(path)
+    // Python: tmp = path.with_name(path.name + ".tmp"). The counter keeps
+    // concurrent writes in one process from sharing (and racing on) a tmp
+    // name; Python needs no equivalent because of the GIL.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+        "{}.{}.tmp",
+        path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default(),
+        seq,
     ));
     std::fs::File::create(&tmp)
         .and_then(|mut f| f.write_all(text.as_bytes()))
@@ -74,10 +79,30 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 2] = ["providers", "removed_providers"];
+pub const TOP_LEVEL_KEY_ORDER: [&str; 3] =
+    ["include_descriptions", "providers", "removed_providers"];
 pub const PROVIDER_KEY_ORDER: [&str; 6] =
     ["id", "name", "env_key", "base_url", "enabled", "models"];
-const MODEL_KEY_ORDER: [&str; 2] = ["name", "enabled"];
+const MODEL_KEY_ORDER: [&str; 3] = ["name", "description", "enabled"];
+
+/// Default for the top-level include_descriptions flag when providers.json
+/// does not carry it yet (off).
+pub const INCLUDE_DESCRIPTIONS_DEFAULT: bool = false;
+
+/// models.dev `description` for one model entry, or None when absent/empty.
+pub fn catalog_description(minfo: &Value) -> Option<&str> {
+    minfo
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Insert the catalog description into a model entry map (seed path).
+pub fn seed_description(entry: &mut serde_json::Map<String, Value>, minfo: &Value) {
+    if let Some(desc) = catalog_description(minfo) {
+        entry.insert("description".into(), Value::String(desc.to_string()));
+    }
+}
 
 /// Rebuild an object with known keys first in canonical order; any unknown
 /// keys are preserved after them in their original order.

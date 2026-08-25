@@ -204,6 +204,7 @@ fn value_to_string(v: &Value) -> Option<String> {
 }
 
 /// `build_fields`: map a models.dev model entry to Grok Build [model.*] fields.
+/// `include_descriptions` gates the trailing `description` field.
 pub fn build_fields(
     model_id: &str,
     minfo: &Value,
@@ -211,6 +212,7 @@ pub fn build_fields(
     env_key: &str,
     provider_name: &str,
     stored_name: Option<&str>,
+    include_descriptions: bool,
 ) -> Res<Map<String, Value>> {
     let mut fields = Map::new();
     fields.insert("model".into(), Value::String(model_id.to_string()));
@@ -267,6 +269,11 @@ pub fn build_fields(
             None => {
                 fields.insert("supports_reasoning_effort".into(), Value::Bool(true));
             }
+        }
+    }
+    if include_descriptions {
+        if let Some(desc) = crate::jsonio::catalog_description(minfo) {
+            fields.insert("description".into(), Value::String(desc.to_string()));
         }
     }
     Ok(fields)

@@ -7,7 +7,7 @@ use crate::{core, fail, Res};
 use serde_json::Value;
 use std::path::Path;
 
-pub const TOML_SCALAR_FIELDS: [&str; 8] = [
+pub const TOML_SCALAR_FIELDS: [&str; 9] = [
     "model",
     "base_url",
     "name",
@@ -16,6 +16,7 @@ pub const TOML_SCALAR_FIELDS: [&str; 8] = [
     "supports_reasoning_effort",
     "reasoning_effort",
     "context_window",
+    "description",
 ];
 
 fn toml_escape(value: &Value) -> Res<String> {
