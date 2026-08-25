@@ -366,27 +366,13 @@ fn providers_list(doc: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn ensure_obj(v: &Value) -> Value {
-    if v.is_object() {
-        v.clone()
-    } else {
-        Value::Object(Map::new())
-    }
-}
-
 /// Update phase (1 of 2): reconcile every configured provider's model list
 /// in providers.json against fresh data (live /models with catalog fallback)
 /// and backfill env_key/base_url. Fetches models.dev itself. Reads and
 /// writes only providers.json — no config.toml involvement.
 pub fn update_providers_json() -> Res<Stats> {
-    let models_dev = ensure_obj(&fetch_models_dev()?);
-    update_providers_json_with(&models_dev)
-}
-
-/// Same phase with the payload injected — the seam tests and the gm-harness
-/// driver use to run syncs against fixture data without network.
-pub fn update_providers_json_with(models_dev: &Value) -> Res<Stats> {
     let mut doc = jsonio::load_providers()?;
+    let models_dev = fetch_models_dev()?;
     let mut stats = Stats::default();
     let mut changed = false;
 
@@ -764,7 +750,7 @@ mod tests {
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump");
 
-        update_providers_json_with(&api).expect("update providers.json");
+        update_providers_json().expect("update providers.json");
         let stored = jsonio::load_providers().expect("reload providers.json");
 
         let prov = stored["providers"]
@@ -875,7 +861,7 @@ mod tests {
             }
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("seed");
-        update_providers_json_with(&api).expect("initial update");
+        update_providers_json().expect("initial update");
         update_config_toml().expect("initial write");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
@@ -950,7 +936,7 @@ mod tests {
             }
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump re-add");
-        update_providers_json_with(&api).expect("re-add update");
+        update_providers_json().expect("re-add update");
         update_config_toml().expect("re-add write");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");

@@ -77,8 +77,10 @@ fn cmd_sync(argv: &[String]) -> i32 {
     let providers_target = paths::providers_path();
     std::fs::copy(providers_json, &providers_target).expect("copy providers.json");
 
-    let api: serde_json::Value = serde_json::from_slice(&read(&api_path)).expect("parse api");
-    if let Err(e) = sync::update_providers_json_with(&api) {
+    // The api.json fixture argument is retained for CLI compatibility but is
+    // no longer consumed: phase 1 fetches models.dev itself.
+    let _api: serde_json::Value = serde_json::from_slice(&read(&api_path)).expect("parse api");
+    if let Err(e) = sync::update_providers_json() {
         eprintln!("update error: {e}");
         return 1;
     }
