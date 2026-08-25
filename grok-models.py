@@ -119,34 +119,6 @@ def resolve_model_description(
     return None
 
 
-def reconcile_descriptions(
-    models_map: dict,
-    catalog_models: dict,
-    stats: dict,
-) -> bool:
-    """Add missing / refresh changed model descriptions from the catalog.
-    Descriptions removed upstream are left as-is (last known value wins)."""
-    changed = False
-    for mid, m in models_map.items():
-        desc = catalog_description(catalog_models.get(mid))
-        if desc is None:
-            continue
-        current = m.get("description") if isinstance(m, dict) else None
-        if not isinstance(m, dict):
-            continue
-        if current != desc:
-            m["description"] = desc
-            stats["descriptions_updated"] = stats.get("descriptions_updated", 0) + 1
-            changed = True
-    return changed
-
-# Code-panel padding. Horizontal padding is char-exact; vertical granularity
-# is whole terminal rows (a row is visually taller than a column, so keep
-# CODE_PANEL_PAD_Y low if you want it to feel even with the sides).
-CODE_PANEL_PAD_X = 1
-CODE_PANEL_PAD_Y = 1
-
-
 def order_keys(data: dict, key_order: tuple[str, ...]) -> dict:
     """Rebuild a dict with known keys first in canonical order; any unknown
     keys are preserved after them in their original order."""
@@ -444,57 +416,44 @@ def reconcile_models_map(
     items: list[tuple[str, str | None]],
     catalog_models: dict,
     stats: dict,
-) -> bool:
+) -> None:
     """Add/rename/remove models so keys match `items` (authority order)."""
     authority = {mid for mid, _ in items}
-    changed = False
     for mid, live_name in items:
-        if mid not in models_map:
-            entry: dict = {}
-            name = resolve_model_name(live_name, None, catalog_models, mid)
-            if name:
-                entry["name"] = name
-            minfo_new = catalog_models.get(mid)
-            desc = catalog_description(minfo_new)
-            if desc is not None:
-                entry["description"] = desc
-            if isinstance(minfo_new, dict):
-                enrich_model_entry(entry, minfo_new)
-            entry["enabled"] = False
-            models_map[mid] = entry
-            stats["models_added"] = stats.get("models_added", 0) + 1
-            changed = True
-            continue
-        m = models_map[mid]
+        is_new = mid not in models_map
+        m = models_map.setdefault(mid, {})
         if not isinstance(m, dict):
-            m = {}
-            models_map[mid] = m
-            changed = True
-        # Update the entry's stored attributes from the catalog. Delete
-        # before writing so attributes the catalog dropped disappear too.
-        for k in (
-            "context_window",
-            "supports_reasoning_effort",
-            "reasoning_efforts",
-            "reasoning_effort",
-        ):
-            if m.pop(k, None) is not None:
-                changed = True
-        minfo = catalog_models.get(mid)
-        if isinstance(minfo, dict):
-            enrich_model_entry(m, minfo)
+            m = models_map[mid] = {}
+
+        # Name: live /models wins, then the stored value, then the catalog.
         stored = m.get("name") if isinstance(m.get("name"), str) else None
         name = resolve_model_name(live_name, stored, catalog_models, mid)
         if name and m.get("name") != name:
             m["name"] = name
             stats["models_renamed"] = stats.get("models_renamed", 0) + 1
-            changed = True
+
+        # Fill missing attributes; refresh the description when the catalog
+        # carries a different one. User-set values are never overwritten.
+        minfo = catalog_models.get(mid)
+        if isinstance(minfo, dict):
+            enrich_model_entry(m, minfo)
+            desc = catalog_description(minfo)
+            if desc is not None and m.get("description") != desc:
+                m["description"] = desc
+                stats["descriptions_updated"] = (
+                    stats.get("descriptions_updated", 0) + 1
+                )
+
+        # New entries start disabled.
+        if is_new:
+            m["enabled"] = False
+            stats["models_added"] = stats.get("models_added", 0) + 1
+
+    # Remove entries the authority list no longer carries.
     for mid in list(models_map):
         if mid not in authority:
             del models_map[mid]
             stats["models_removed"] = stats.get("models_removed", 0) + 1
-            changed = True
-    return changed
 
 
 def authority_items_for_provider(
@@ -2578,23 +2537,31 @@ def context_window_field(minfo: dict) -> int | None:
     return None
 
 
-def enrich_model_entry(entry: dict, minfo: dict) -> None:
-    """Set the model's context window and reasoning effort options in its
-    providers.json entry, using the values from models.dev."""
-    ctx = context_window_field(minfo)
-    if ctx is not None:
-        entry["context_window"] = ctx
+def enrich_model_entry(entry: dict, minfo: dict) -> bool:
+    """Fill a model's missing attributes (context window, reasoning effort
+    options) from its models.dev catalog entry. Existing values are never
+    overwritten — user-set preferences win."""
+    added = False
+    if "context_window" not in entry:
+        ctx = context_window_field(minfo)
+        if ctx is not None:
+            entry["context_window"] = ctx
     if minfo.get("reasoning"):
         efforts = efforts_from_models_dev(minfo)
         if efforts:
             default_row = next(
                 (row for row in efforts if row.get("default")), efforts[0]
             )
+            for key, value in (
+                ("supports_reasoning_effort", True),
+                ("reasoning_efforts", efforts),
+                ("reasoning_effort", default_row["value"]),
+            ):
+                if key not in entry:
+                    entry[key] = value
+        elif "supports_reasoning_effort" not in entry:
             entry["supports_reasoning_effort"] = True
-            entry["reasoning_efforts"] = efforts
-            entry["reasoning_effort"] = default_row["value"]
-        else:
-            entry["supports_reasoning_effort"] = True
+
 
 
 def efforts_from_models_dev(minfo: dict) -> list[dict] | None:
@@ -2812,7 +2779,6 @@ def update_providers_json() -> dict:
         "providers_missing": 0,
         "tables_written": 0,
     }
-    changed = False
 
     # Refresh every configured provider, enabled or not — a disabled
     # provider's stored model list must stay current so re-enabling it
@@ -2832,13 +2798,11 @@ def update_providers_json() -> dict:
         new_env_key = api_env_key(pinfo)
         if new_env_key and provider.get("env_key") != new_env_key:
             provider["env_key"] = new_env_key
-            changed = True
 
         models_map = provider.get("models")
         if not isinstance(models_map, dict):
             models_map = {}
             provider["models"] = models_map
-            changed = True
 
         # A stored non-empty base_url wins over the catalog; missing/empty
         # backfills from the catalog. /models is fetched from this stored URL.
@@ -2848,18 +2812,13 @@ def update_providers_json() -> dict:
         catalog_api = pinfo.get("api") or ""
         if not stored and catalog_api:
             provider["base_url"] = catalog_api
-            changed = True
         base_url = stored or ""
 
         items = authority_items_for_provider(pinfo, base_url)
-        if reconcile_models_map(models_map, items, catalog_models, stats):
-            changed = True
-        if reconcile_descriptions(models_map, catalog_models, stats):
-            changed = True
+        reconcile_models_map(models_map, items, catalog_models, stats)
         stats["providers_synced"] += 1
 
-    if changed:
-        dump_providers(PROVIDERS_PATH, providers_doc)
+    dump_providers(PROVIDERS_PATH, providers_doc)
     return stats
 
 

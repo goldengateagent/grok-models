@@ -3087,7 +3087,8 @@ mod tests {
     #[test]
     fn config_flow_renders_fullscreen_layout() {
         isolate_grok_home();
-        use serde_json::json;
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -3138,7 +3139,8 @@ mod tests {
     #[test]
     fn config_flow_action_menu_enable_toggles_display() {
         isolate_grok_home();
-        use serde_json::json;
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -3182,7 +3184,8 @@ mod tests {
     #[test]
     fn config_flow_restores_terminal_on_exit() {
         isolate_grok_home();
-        use serde_json::json;
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -3263,7 +3266,8 @@ mod tests {
     #[test]
     fn config_flow_descriptions_menu_item_toggles_flag() {
         isolate_grok_home();
-        let mut doc = serde_json::json!({
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
                 "name": "Provider One",

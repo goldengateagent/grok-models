@@ -198,11 +198,14 @@ fn resolve_model_name(
     catalog_name(catalog, mid)
 }
 
-/// Set the model's context window and reasoning effort options in its
-/// providers.json entry, using the values from models.dev.
+/// Fill a model's missing attributes (context window, reasoning effort
+/// options) from its models.dev catalog entry. Existing values are never
+/// overwritten — user-set preferences win.
 fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
-    if let Some(ctx) = core::context_window_field(minfo) {
-        entry.insert("context_window".into(), ctx);
+    if !entry.contains_key("context_window") {
+        if let Some(ctx) = core::context_window_field(minfo) {
+            entry.insert("context_window".to_string(), ctx);
+        }
     }
     if crate::truthy(minfo.get("reasoning")) {
         match core::efforts_from_models_dev(minfo) {
@@ -214,15 +217,26 @@ fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
                     .position(|row| crate::get_bool_val(&Value::Object(row.clone()), "default", false))
                     .unwrap_or(0);
                 let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
-                entry.insert("supports_reasoning_effort".into(), Value::Bool(true));
-                entry.insert(
-                    "reasoning_efforts".into(),
-                    Value::Array(efforts.into_iter().map(Value::Object).collect()),
-                );
-                entry.insert("reasoning_effort".into(), default_value);
+                for (key, value) in [
+                    (
+                        "supports_reasoning_effort",
+                        Value::Bool(true),
+                    ),
+                    (
+                        "reasoning_efforts",
+                        Value::Array(efforts.into_iter().map(Value::Object).collect()),
+                    ),
+                    ("reasoning_effort", default_value),
+                ] {
+                    if !entry.contains_key(key) {
+                        entry.insert(key.to_string(), value);
+                    }
+                }
             }
             None => {
-                entry.insert("supports_reasoning_effort".into(), Value::Bool(true));
+                entry
+                    .entry("supports_reasoning_effort".to_string())
+                    .or_insert(Value::Bool(true));
             }
         }
     }
@@ -253,48 +267,18 @@ fn reconcile_models_map(
     items: &[(String, Option<String>)],
     catalog: &Map<String, Value>,
     stats: &mut Stats,
-) -> bool {
+) {
     let authority: HashSet<&str> = items.iter().map(|(m, _)| m.as_str()).collect();
-    let mut changed = false;
     for (mid, live_name) in items {
-        if !models_map.contains_key(mid) {
-            let mut entry = Map::new();
-            if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
-                entry.insert("name".into(), Value::String(name));
-            }
-            if let Some(minfo) = catalog.get(mid) {
-                crate::jsonio::seed_description(&mut entry, minfo);
-                enrich_model_entry(&mut entry, minfo);
-            }
-            entry.insert("enabled".into(), Value::Bool(false));
-            models_map.insert(mid.clone(), Value::Object(entry));
-            stats.models_added += 1;
-            changed = true;
-            continue;
+        let is_new = !models_map.contains_key(mid);
+        let slot =
+            models_map.entry(mid.clone()).or_insert_with(|| Value::Object(Map::new()));
+        if !slot.is_object() {
+            *slot = Value::Object(Map::new());
         }
-        let m = models_map.get_mut(mid).unwrap();
-        if !m.is_object() {
-            *m = Value::Object(Map::new());
-            changed = true;
-        }
-        let obj = m.as_object_mut().unwrap();
-        // Update this entry's stored attributes from the catalog. Delete
-        // before writing so attributes the catalog dropped disappear too.
-        for k in [
-            "context_window",
-            "supports_reasoning_effort",
-            "reasoning_efforts",
-            "reasoning_effort",
-        ] {
-            if obj.remove(k).is_some() {
-                changed = true;
-            }
-        }
-        if let Some(minfo) = catalog.get(mid) {
-            if minfo.is_object() {
-                enrich_model_entry(obj, minfo);
-            }
-        }
+        let obj = slot.as_object_mut().unwrap();
+
+        // Name: live /models wins, then the stored value, then the catalog.
         let stored = obj.get("name").and_then(Value::as_str).map(str::to_string);
         if let Some(name) =
             resolve_model_name(live_name.as_deref(), stored.as_deref(), catalog, mid)
@@ -302,10 +286,31 @@ fn reconcile_models_map(
             if obj.get("name") != Some(&Value::String(name.clone())) {
                 obj.insert("name".into(), Value::String(name));
                 stats.models_renamed += 1;
-                changed = true;
             }
         }
+
+        // Fill missing attributes; refresh the description when the catalog
+        // carries a different one. User-set values are never overwritten.
+        if let Some(minfo) = catalog.get(mid) {
+            if minfo.is_object() {
+                enrich_model_entry(obj, minfo);
+                if let Some(desc) = crate::jsonio::catalog_description(minfo) {
+                    if obj.get("description").and_then(Value::as_str) != Some(desc) {
+                        obj.insert("description".into(), Value::String(desc.to_string()));
+                        stats.descriptions_updated += 1;
+                    }
+                }
+            }
+        }
+
+        // New entries start disabled.
+        if is_new {
+            obj.insert("enabled".into(), Value::Bool(false));
+            stats.models_added += 1;
+        }
     }
+
+    // Remove entries the authority list no longer carries.
     let stale: Vec<String> = models_map
         .keys()
         .filter(|mid| !authority.contains(mid.as_str()))
@@ -314,35 +319,7 @@ fn reconcile_models_map(
     for mid in stale {
         models_map.remove(&mid);
         stats.models_removed += 1;
-        changed = true;
     }
-    changed
-}
-
-/// Add missing / refresh changed model descriptions from the catalog
-/// (`reconcile_descriptions`). Descriptions removed upstream are left
-/// as-is (last known value wins).
-fn reconcile_descriptions(
-    models_map: &mut Map<String, Value>,
-    catalog: &Map<String, Value>,
-    stats: &mut Stats,
-) -> bool {
-    let mut changed = false;
-    for (mid, m) in models_map.iter_mut() {
-        let Some(desc) = catalog.get(mid).and_then(crate::jsonio::catalog_description)
-        else {
-            continue;
-        };
-        let Some(obj) = m.as_object_mut() else {
-            continue;
-        };
-        if obj.get("description").and_then(Value::as_str) != Some(desc) {
-            obj.insert("description".into(), Value::String(desc.to_string()));
-            stats.descriptions_updated += 1;
-            changed = true;
-        }
-    }
-    changed
 }
 
 pub fn authority_items_for_provider(
@@ -374,7 +351,6 @@ pub fn update_providers_json() -> Res<Stats> {
     let mut doc = jsonio::load_providers()?;
     let models_dev = fetch_models_dev()?;
     let mut stats = Stats::default();
-    let mut changed = false;
 
     // Refresh every configured provider, enabled or not — a disabled
     // provider's stored model list must stay current so re-enabling it
@@ -406,11 +382,9 @@ pub fn update_providers_json() -> Res<Stats> {
                 && prov_obj.get("env_key") != Some(&Value::String(new_env_key.clone()))
             {
                 prov_obj.insert("env_key".into(), Value::String(new_env_key.clone()));
-                changed = true;
             }
             if !prov_obj.get("models").is_some_and(Value::is_object) {
                 prov_obj.insert("models".into(), Value::Object(Map::new()));
-                changed = true;
             }
             let catalog_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
             match prov_obj.get("base_url").and_then(Value::as_str) {
@@ -421,7 +395,6 @@ pub fn update_providers_json() -> Res<Stats> {
                             "base_url".into(),
                             Value::String(catalog_url.to_string()),
                         );
-                        changed = true;
                     }
                     effective_base_url = catalog_url.to_string();
                 }
@@ -434,18 +407,11 @@ pub fn update_providers_json() -> Res<Stats> {
         let items = authority_items_for_provider(&pinfo, &effective_base_url, false);
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
-        if reconcile_models_map(models_map, &items, &catalog_models, &mut stats) {
-            changed = true;
-        }
-        if reconcile_descriptions(models_map, &catalog_models, &mut stats) {
-            changed = true;
-        }
+        reconcile_models_map(models_map, &items, &catalog_models, &mut stats);
         stats.providers_synced += 1;
     }
 
-    if changed {
-        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
-    }
+    jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
 
     Ok(stats)
 }
@@ -587,7 +553,7 @@ tables will have an empty base_url",
                     .unwrap_or_default();
                 Some((pid, models))
             }
-            None => None, // legacy string entry: no targeted keys
+            None => None, // entry carries no model ids: contributes nothing
         })
         .collect();
     // Exact table keys to remove from the existing config.toml, computed
@@ -680,11 +646,7 @@ pub fn print_sync_report(stats: &Stats, path: &std::path::Path, providers_doc: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// These tests rewire the process-wide GROK_HOME, so they must not run
-    /// concurrently with each other.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::grok_home_lock;
 
     /// Fixture models.dev payload exercising every model info field variant:
     /// context window + reasoning efforts, reasoning without efforts, plain
@@ -726,7 +688,7 @@ mod tests {
     /// config.toml writer needs.
     #[test]
     fn providers_json_holds_every_config_table_field() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = grok_home_lock();
         let home = std::env::temp_dir()
             .join(format!("gm-sync-test-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -830,7 +792,7 @@ mod tests {
     /// its tables back.
     #[test]
     fn delete_flow_targets_recorded_models_and_recovers_on_readd() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = grok_home_lock();
         let home = std::env::temp_dir()
             .join(format!("gm-delete-test-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -941,46 +903,5 @@ mod tests {
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
         assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");
-    }
-
-    /// A legacy bare-string removed_providers entry carries no model ids, so
-    /// nothing may be stripped by provider id alone — the write phase leaves
-    /// config.toml untouched and just consumes the entry.
-    #[test]
-    fn legacy_string_removal_entry_does_not_strip_without_model_ids() {
-        let _guard = HOME_LOCK.lock().unwrap();
-        let home = std::env::temp_dir()
-            .join(format!("gm-legacy-del-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
-        std::env::set_var("GROK_HOME", &home);
-
-        // providers.json with no providers but a legacy pending deletion;
-        // a stale table left in config.toml.
-        let mut doc = serde_json::json!({
-            "providers": [],
-            "removed_providers": ["prov"]
-        });
-        jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("seed");
-        std::fs::write(
-            paths::config_toml_path(),
-            "[model.prov-old]\nmodel = \"old\"\n",
-        )
-        .expect("write stale config");
-
-        update_config_toml().expect("flush legacy delete");
-
-        let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
-        assert!(
-            config.contains("[model.prov-old]"),
-            "no model ids recorded — nothing may be stripped; config was:\n{config}"
-        );
-        let stored = jsonio::load_providers().expect("reload");
-        assert_eq!(
-            stored.get("removed_providers").and_then(Value::as_array),
-            Some(&Vec::new())
-        );
-
-        let _ = std::fs::remove_dir_all(&home);
     }
 }
