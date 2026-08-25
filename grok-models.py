@@ -82,7 +82,15 @@ def dump_json(path: Path, obj: object) -> None:
 # display name.
 TOP_LEVEL_KEY_ORDER = ("include_descriptions", "providers", "removed_providers")
 PROVIDER_KEY_ORDER = ("id", "name", "env_key", "base_url", "enabled", "models")
-MODEL_KEY_ORDER = ("name", "description", "enabled")
+MODEL_KEY_ORDER = (
+    "enabled",
+    "name",
+    "description",
+    "context_window",
+    "supports_reasoning_effort",
+    "reasoning_effort",
+    "reasoning_efforts",
+)
 
 INCLUDE_DESCRIPTIONS_DEFAULT = False
 
@@ -420,9 +428,12 @@ def seed_models_from_items(
         name = resolve_model_name(live_name, None, catalog_models, mid)
         if name:
             entry["name"] = name
-        desc = catalog_description(catalog_models.get(mid))
+        minfo = catalog_models.get(mid)
+        desc = catalog_description(minfo)
         if desc is not None:
             entry["description"] = desc
+        if isinstance(minfo, dict):
+            enrich_model_entry(entry, minfo)
         entry["enabled"] = False
         models_map[mid] = entry
     return models_map
@@ -443,9 +454,12 @@ def reconcile_models_map(
             name = resolve_model_name(live_name, None, catalog_models, mid)
             if name:
                 entry["name"] = name
-            desc = catalog_description(catalog_models.get(mid))
+            minfo_new = catalog_models.get(mid)
+            desc = catalog_description(minfo_new)
             if desc is not None:
                 entry["description"] = desc
+            if isinstance(minfo_new, dict):
+                enrich_model_entry(entry, minfo_new)
             entry["enabled"] = False
             models_map[mid] = entry
             stats["models_added"] = stats.get("models_added", 0) + 1
@@ -456,6 +470,19 @@ def reconcile_models_map(
             m = {}
             models_map[mid] = m
             changed = True
+        # Update the entry's stored attributes from the catalog. Delete
+        # before writing so attributes the catalog dropped disappear too.
+        for k in (
+            "context_window",
+            "supports_reasoning_effort",
+            "reasoning_efforts",
+            "reasoning_effort",
+        ):
+            if m.pop(k, None) is not None:
+                changed = True
+        minfo = catalog_models.get(mid)
+        if isinstance(minfo, dict):
+            enrich_model_entry(m, minfo)
         stored = m.get("name") if isinstance(m.get("name"), str) else None
         name = resolve_model_name(live_name, stored, catalog_models, mid)
         if name and m.get("name") != name:
@@ -543,11 +570,11 @@ def _provider_matches(pid: str, name: str, term_l: str) -> bool:
     return term_l in pid.lower() or term_l in name.lower()
 
 
-def search_providers(api: dict, term: str) -> str | None:
+def search_providers(models_dev: dict, term: str) -> str | None:
     """Search the models.dev provider list with term; return a chosen id."""
     term_l = term.lower()
     matches: list[tuple[str, str]] = []
-    for pid, pinfo in api.items():
+    for pid, pinfo in models_dev.items():
         if not isinstance(pinfo, dict):
             continue
         name = pinfo.get("name") or ""
@@ -1690,7 +1717,7 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
     Returns True if a provider was added. Fetch/add errors surface inline so
     the surrounding TUI session survives."""
     try:
-        api = fetch_models_dev()
+        models_dev = fetch_models_dev()
     except SyncError as exc:
         _curses_inline_error_win(stdscr, f"Fetch failed: {exc}")
         return False
@@ -1702,7 +1729,7 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
     }
     catalog = sorted(
         (pid, pinfo.get("name") or "")
-        for pid, pinfo in api.items()
+        for pid, pinfo in models_dev.items()
         if isinstance(pinfo, dict) and pid not in existing
     )
 
@@ -1723,7 +1750,7 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
         pid = entry[0]
         before = len(providers_doc["providers"])
         try:
-            add_provider_entry(providers_doc, api, pid, quiet=True)
+            add_provider_entry(providers_doc, models_dev, pid, quiet=True)
         except SyncError as exc:
             _curses_inline_error_win(stdscr, f"Add failed: {exc}")
             return True  # stay open
@@ -1766,7 +1793,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
     parent menu, or None. Fetch/add errors surface inline so the surrounding
     TUI session survives."""
     try:
-        api = fetch_models_dev()
+        models_dev = fetch_models_dev()
     except SyncError as exc:
         _curses_inline_error_win(stdscr, f"Fetch failed: {exc}")
         return None
@@ -1784,7 +1811,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
 
     # Flatten the catalog across every provider; skip already-enabled combos.
     catalog = []
-    for pid, pinfo in api.items():
+    for pid, pinfo in models_dev.items():
         if not isinstance(pinfo, dict):
             continue
         pname = pinfo.get("name") or pid
@@ -1825,7 +1852,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         if pid not in existing:
             before = len(providers_doc["providers"])
             try:
-                add_provider_entry(providers_doc, api, pid, quiet=True)
+                add_provider_entry(providers_doc, models_dev, pid, quiet=True)
             except SyncError as exc:
                 _curses_inline_error_win(stdscr, f"Add failed: {exc}")
                 return True  # stay open
@@ -2008,16 +2035,23 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     changed = True
                 elif ai == 3:
                     if _curses_confirm_win(stdscr, f"Delete provider {selected['id']!r}?"):
+                        # Grab the enabled model ids from providers.json
+                        # before the entry is removed.
+                        enabled = enabled_model_ids(selected)
                         providers_doc["providers"] = [
                             p
                             for p in providers_doc["providers"]
                             if p.get("id") != selected["id"]
                         ]
-                        _record_removed_provider(providers_doc, selected["id"])
+                        _record_removed_provider(providers_doc, selected["id"], enabled)
                         providers[:] = [
                             p for p in providers if p.get("id") != selected["id"]
                         ]
                         dump_providers(PROVIDERS_PATH, providers_doc)
+                        # Flush the deletion into config.toml now so a re-add
+                        # of the same provider this session can't collide
+                        # with a pending deletion record.
+                        update_config_toml()
                         changed = True
                     break
         return changed
@@ -2435,11 +2469,29 @@ def resolve_targets(
     return resolved
 
 
-def _record_removed_provider(providers_doc: dict, pid: str) -> None:
-    """Record a deleted provider id so sync strips its leftover tables."""
+def _record_removed_provider(
+    providers_doc: dict, pid: str, models: list[str] | None = None
+) -> None:
+    """Record a deleted provider with its enabled model ids so sync can
+    remove its config.toml tables by exact key."""
     removed = providers_doc.setdefault("removed_providers", [])
-    if pid not in removed:
-        removed.append(pid)
+    already = any(
+        (e.get("provider") == pid if isinstance(e, dict) else e == pid)
+        for e in removed
+    )
+    if not already:
+        removed.append({"provider": pid, "models": models or []})
+
+
+def enabled_model_ids(provider: dict) -> list[str]:
+    """The enabled model ids of a provider entry from providers.json."""
+    out: list[str] = []
+    models = provider.get("models")
+    if isinstance(models, dict):
+        for mid, m in models.items():
+            if bool(m.get("enabled", True)) if isinstance(m, dict) else True:
+                out.append(mid)
+    return out
 
 
 def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
@@ -2458,7 +2510,7 @@ def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
     if missing_providers:
         api = fetch_models_dev()
         for pid in missing_providers:
-            add_provider_entry(providers_doc, api, pid)
+            add_provider_entry(providers_doc, models_dev, pid)
 
     resolved_enable = resolve_targets(providers_doc, enable_targets, True)
     resolved_disable = resolve_targets(providers_doc, disable_targets, False)
@@ -2513,6 +2565,36 @@ def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
         print_sync_report(stats, path, providers_doc)
         print_relaunch()
     return 0
+
+
+def context_window_field(minfo: dict) -> int | None:
+    """models.dev limit.context as an int (bools excluded, floats truncated)."""
+    limit = minfo.get("limit")
+    if not isinstance(limit, dict):
+        return None
+    context = limit.get("context")
+    if isinstance(context, (int, float)) and not isinstance(context, bool):
+        return int(context)
+    return None
+
+
+def enrich_model_entry(entry: dict, minfo: dict) -> None:
+    """Set the model's context window and reasoning effort options in its
+    providers.json entry, using the values from models.dev."""
+    ctx = context_window_field(minfo)
+    if ctx is not None:
+        entry["context_window"] = ctx
+    if minfo.get("reasoning"):
+        efforts = efforts_from_models_dev(minfo)
+        if efforts:
+            default_row = next(
+                (row for row in efforts if row.get("default")), efforts[0]
+            )
+            entry["supports_reasoning_effort"] = True
+            entry["reasoning_efforts"] = efforts
+            entry["reasoning_effort"] = default_row["value"]
+        else:
+            entry["supports_reasoning_effort"] = True
 
 
 def efforts_from_models_dev(minfo: dict) -> list[dict] | None:
@@ -2612,18 +2694,26 @@ def is_owned_header(header: str, provider_ids: list[str]) -> bool:
     return any(key.startswith(pid + "-") for pid in provider_ids)
 
 
-def strip_owned_toml_sections(text: str, provider_ids: list[str]) -> str:
+def strip_removed_and_unowned_sections(
+    text: str, provider_ids: list[str], removed_keys: set[str]
+) -> str:
     if not text:
         return ""
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     i = 0
     while i < len(lines):
-        if is_table_header(lines[i]) and is_owned_header(lines[i], provider_ids):
-            i += 1
-            while i < len(lines) and not is_table_header(lines[i]):
+        if is_table_header(lines[i]):
+            key = owned_table_key(lines[i])
+            # Exact-key match for recorded deletions; prefix match only for
+            # the tool's own rebuildable tables.
+            is_removed = key is not None and key in removed_keys
+            is_owned = is_owned_header(lines[i], provider_ids)
+            if is_removed or is_owned:
                 i += 1
-            continue
+                while i < len(lines) and not is_table_header(lines[i]):
+                    i += 1
+                continue
         out.append(lines[i])
         i += 1
     return "".join(out)
@@ -2661,9 +2751,15 @@ def emit_model_table(table_key: str, fields: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_toml_stdlib(path: Path, provider_ids: list[str], tables: list[tuple[str, dict]]) -> str:
+def write_toml_stdlib(
+    path: Path,
+    provider_ids: list[str],
+    tables: list[tuple[str, dict]],
+    removed_keys: set[str] | None = None,
+) -> str:
+    removed_keys = removed_keys or set()
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    kept = strip_owned_toml_sections(existing, provider_ids)
+    kept = strip_removed_and_unowned_sections(existing, provider_ids, removed_keys)
     chunks = [kept.rstrip()]
     for table_key, fields in tables:
         chunks.append(emit_model_table(table_key, fields).rstrip())
@@ -2682,11 +2778,15 @@ def validate_toml_text(text: str) -> None:
         fail(f"invalid TOML write: {exc}")
 
 
-def write_config_toml(provider_ids: list[str], tables: list[tuple[str, dict]]) -> Path:
+def write_config_toml(
+    provider_ids: list[str],
+    tables: list[tuple[str, dict]],
+    removed_keys: set[str] | None = None,
+) -> Path:
     path = CONFIG_TOML_PATH
     if path.exists():
         shutil.copy2(path, path.with_name(path.name + ".bak"))
-    text = write_toml_stdlib(path, provider_ids, tables)
+    text = write_toml_stdlib(path, provider_ids, tables, removed_keys)
     validate_toml_text(text)
     try:
         atomic_write(path, text)
@@ -2695,20 +2795,12 @@ def write_config_toml(provider_ids: list[str], tables: list[tuple[str, dict]]) -
     return path
 
 
-def run_sync() -> tuple[Path | None, dict]:
-    """Reconcile providers.json with the live API and (re)write ~/.grok/config.toml."""
+def update_providers_json(models_dev: dict) -> dict:
+    """Update phase (1 of 2): reconcile every configured provider's model list
+    in providers.json against fresh data (live /models with catalog fallback)
+    and backfill env_key/base_url. Reads and writes only providers.json —
+    no config.toml involvement."""
     providers_doc = load_providers()
-    if not providers_doc["providers"]:
-        if providers_doc.get("removed_providers"):
-            # Still strip tables left behind by deleted providers.
-            api = fetch_models_dev()
-            write_config_toml(set(providers_doc["removed_providers"]), [])
-            providers_doc["removed_providers"] = []
-            dump_providers(PROVIDERS_PATH, providers_doc)
-        print("No providers configured yet. Add with --add-provider")
-        return None, {}
-    api = fetch_models_dev()
-
     stats = {
         "providers_synced": 0,
         "models_added": 0,
@@ -2719,24 +2811,17 @@ def run_sync() -> tuple[Path | None, dict]:
         "providers_missing": 0,
         "tables_written": 0,
     }
-
-    all_provider_ids = [
-        p["id"] for p in providers_doc["providers"] if isinstance(p, dict) and p.get("id")
-    ]
-    # This tool owns [model.*] tables only for providers it has configured.
-    # Deleted providers are remembered in "removed_providers" so the next
-    # sync strips their leftover tables.
-    managed_ids = set(all_provider_ids) | set(providers_doc.get("removed_providers", []))
-    tables: list[tuple[str, dict]] = []
     changed = False
 
+    # Refresh every configured provider, enabled or not — a disabled
+    # provider's stored model list must stay current so re-enabling it
+    # doesn't surface stale data. (Only enabled providers reach config.toml;
+    # that filter lives in update_config_toml.)
     for provider in providers_doc["providers"]:
         if not isinstance(provider, dict) or not provider.get("id"):
             continue
-        if not provider.get("enabled", True):
-            continue
         pid = provider["id"]
-        pinfo = api.get(pid)
+        pinfo = models_dev.get(pid)
         if not isinstance(pinfo, dict):
             print(f"  warning: provider {pid!r} not found in models.dev; skipping")
             stats["providers_missing"] += 1
@@ -2762,78 +2847,127 @@ def run_sync() -> tuple[Path | None, dict]:
         catalog_api = pinfo.get("api") or ""
         if not stored and catalog_api:
             provider["base_url"] = catalog_api
-            stored = catalog_api
             changed = True
-        base_url = stored
+        base_url = stored or ""
 
         items = authority_items_for_provider(pinfo, base_url)
         if reconcile_models_map(models_map, items, catalog_models, stats):
             changed = True
         if reconcile_descriptions(models_map, catalog_models, stats):
             changed = True
-        include_descriptions = bool(
-            providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
-        )
-
-        env_key = api_env_key(pinfo)
-        pname = pinfo.get("name") or pid
-        if not base_url:
-            print(
-                f"  warning: provider {pid!r} has no base URL (api) in models.dev; "
-                f"tables will have an empty base_url"
-            )
-
-        for mid, m in models_map.items():
-            if not isinstance(m, dict):
-                cat_name = catalog_models.get(mid, {}).get("name") if isinstance(
-                    catalog_models.get(mid), dict
-                ) else None
-                entry = {"name": cat_name} if cat_name else {}
-                entry["enabled"] = False
-                m = models_map[mid] = entry
-                changed = True
-            if not m.get("enabled", True):
-                continue
-            minfo = catalog_models.get(mid)
-            stored_name = m.get("name") if isinstance(m.get("name"), str) else None
-            if not isinstance(minfo, dict):
-                if USE_PROVIDER_MODELS_ENDPOINT:
-                    minfo = {}
-                else:
-                    print(f"  warning: model {mid!r} not found in models.dev; skipping")
-                    stats["models_missing"] += 1
-                    continue
-            fields = build_fields(
-                mid,
-                minfo,
-                base_url,
-                env_key,
-                pname,
-                stored_name=stored_name,
-                include_descriptions=include_descriptions,
-            )
-            table_key = table_model_id(pid, mid)
-            tables.append((table_key, fields))
-            stats["tables_written"] += 1
         stats["providers_synced"] += 1
-
-    # Strip tables for providers deleted since the last sync.
-    removed = providers_doc.get("removed_providers", [])
-    if removed:
-        removed_keys = {
-            table_model_id(pid, mid)
-            for pid in removed
-            for mid in api.get(pid, {}).get("models", {})
-        }
-        tables = [t for t in tables if t[0] not in removed_keys]
-        providers_doc["removed_providers"] = []
-        changed = True
 
     if changed:
         dump_providers(PROVIDERS_PATH, providers_doc)
+    return stats
 
-    path = write_config_toml(managed_ids, tables)
+
+def update_config_toml() -> Path:
+    """Write phase (2 of 2): load providers.json from disk and render
+    config.toml from it alone — enabled providers, table fields, table
+    ownership, and pending deletions are all derived from the file."""
+    providers_doc = load_providers()
+
+    managed = {
+        p["id"]
+        for p in providers_doc["providers"]
+        if isinstance(p, dict) and p.get("id")
+    }
+
+    removed_entries = providers_doc.get("removed_providers", [])
+    removed_keys: set[str] = set()
+    for entry in removed_entries:
+        # Only entries carrying explicit provider+model ids participate;
+        # nothing is ever removed by provider id alone.
+        if not isinstance(entry, dict):
+            continue
+        pid = entry.get("provider")
+        models = entry.get("models")
+        if not isinstance(pid, str) or not isinstance(models, list):
+            continue
+        managed.add(pid)
+        for mid in models:
+            if isinstance(mid, str):
+                removed_keys.add(table_model_id(pid, mid))
+
+    include_descriptions = bool(
+        providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
+    )
+
+    tables: list[tuple[str, dict]] = []
+    for provider in providers_doc["providers"]:
+        if not isinstance(provider, dict) or not provider.get("id"):
+            continue
+        if not bool(provider.get("enabled", True)):
+            continue
+        pid = provider["id"]
+        # base_url comes straight from providers.json; empty means the
+        # provider has none stored and the catalog had nothing to backfill.
+        base_url = (
+            provider.get("base_url")
+            if isinstance(provider.get("base_url"), str)
+            else ""
+        )
+        if not base_url:
+            print(
+                f"  warning: provider {pid!r} has no base URL; "
+                f"tables will have an empty base_url"
+            )
+        env_key = first_env_key(provider)
+        pname = provider.get("name") or pid
+
+        models = provider.get("models")
+        for mid, m in (models or {}).items():
+            entry = m if isinstance(m, dict) else {}
+            if not bool(entry.get("enabled", True)):
+                continue
+            # Assemble the table fields from stored values only.
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                name = first_letter_cap(mid)
+            fields: dict = {
+                "model": mid,
+                "base_url": base_url,
+                "name": f"{name} ({pname})",
+                "env_key": env_key,
+                "api_backend": "chat_completions",
+            }
+            if "context_window" in entry:
+                fields["context_window"] = entry["context_window"]
+            if entry.get("supports_reasoning_effort"):
+                fields["supports_reasoning_effort"] = True
+                if "reasoning_efforts" in entry:
+                    fields["reasoning_efforts"] = entry["reasoning_efforts"]
+                    if "reasoning_effort" in entry:
+                        fields["reasoning_effort"] = entry["reasoning_effort"]
+            desc = entry.get("description")
+            if include_descriptions and isinstance(desc, str) and desc:
+                fields["description"] = desc
+            tables.append((table_model_id(pid, mid), fields))
+
+    path = write_config_toml(managed, tables, removed_keys)
+
+    # The deletion list has been consumed; clear it so it isn't reprocessed
+    # forever, and persist that.
+    if removed_entries:
+        providers_doc["removed_providers"] = []
+        dump_providers(PROVIDERS_PATH, providers_doc)
+    return path
+
+
+def run_sync() -> tuple[Path | None, dict]:
+    """Reconcile providers.json with the live API, then rewrite
+    ~/.grok/config.toml from it."""
+    models_dev = fetch_models_dev()
+
+    # Phase 1: update the models in providers.json.
+    stats = update_providers_json(models_dev)
+
+    # Phase 2: rewrite config.toml from providers.json.
+    path = update_config_toml()
     return path, stats
+
+
 
 
 def print_sync_report(stats: dict, path: Path, providers_doc: dict) -> None:
@@ -2843,7 +2977,7 @@ def print_sync_report(stats: dict, path: Path, providers_doc: dict) -> None:
 
 
 def add_provider_entry(
-    providers_doc: dict, api: dict, provider_id: str, quiet: bool = False
+    providers_doc: dict, models_dev: dict, provider_id: str, quiet: bool = False
 ) -> None:
     """Add provider_id to providers_doc with all models disabled and persist.
     quiet suppresses stdout reports — required when called inside the curses
@@ -2853,7 +2987,7 @@ def add_provider_entry(
         if not quiet:
             print(f"Provider {provider_id!r} already exists.")
         return
-    pinfo = api.get(provider_id)
+    pinfo = models_dev.get(provider_id)
     if not isinstance(pinfo, dict):
         fail(f"provider {provider_id!r} not found in models.dev")
     catalog_models = catalog_models_dict(pinfo)
@@ -2884,18 +3018,18 @@ def add_provider_entry(
 def cmd_search(term: str) -> int:
     """Search the models.dev provider list; the selected provider is added."""
     api = fetch_models_dev()
-    provider_id = search_providers(api, term)
+    provider_id = search_providers(models_dev, term)
     if provider_id is None:
         return 0
     providers_doc = load_providers()
-    add_provider_entry(providers_doc, api, provider_id)
+    add_provider_entry(providers_doc, models_dev, provider_id)
     return 0
 
 
 def cmd_add_provider(provider_id: str) -> int:
     providers_doc = load_providers()
     api = fetch_models_dev()
-    add_provider_entry(providers_doc, api, provider_id)
+    add_provider_entry(providers_doc, models_dev, provider_id)
     return 0
 
 
@@ -3037,16 +3171,21 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                 changed = True
             elif ai == 2:
                 if _confirm_delete(selected["id"]):
+                    # Grab the enabled model ids from providers.json before
+                    # the entry is removed, then flush the deletion
+                    # immediately.
+                    enabled = enabled_model_ids(selected)
                     providers_doc["providers"] = [
                         p
                         for p in providers_doc["providers"]
                         if p.get("id") != selected["id"]
                     ]
-                    _record_removed_provider(providers_doc, selected["id"])
+                    _record_removed_provider(providers_doc, selected["id"], enabled)
                     providers[:] = [
                         p for p in providers if p.get("id") != selected["id"]
                     ]
                     dump_providers(PROVIDERS_PATH, providers_doc)
+                    update_config_toml()
                     print(f"Deleted provider {selected['id']!r}.")
                     changed = True
                 break
