@@ -76,8 +76,16 @@ pub enum Key {
     Char(char),
     Interrupt,
     Resize,
+    PageUp,
+    PageDown,
     Eof,
 }
+
+/// Provider ids highlighted in the Add Provider screen's "Suggested" section.
+/// Anything already configured lands in the "Added" section above it; the rest
+/// are listed unhighlighted below. Mirrors `SUGGESTED_PROVIDER_IDS` in Python.
+pub const SUGGESTED_PROVIDER_IDS: [&str; 4] =
+    ["opencode", "opencode-go", "openrouter", "ollama-cloud"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Paint {
@@ -548,6 +556,9 @@ pub enum SelectOutcome {
     Cancelled,
     /// Main-menu `S`: toggle Enabled Models sort; carries the current cursor.
     SortToggled(usize),
+    /// Main-menu `D` (or Enter on the toggle row in the preview): flip
+    /// include_descriptions.
+    DescriptionsToggled,
 }
 
 /// A line drawn in the `--config` main-menu preview panel beneath the provider
@@ -557,6 +568,32 @@ pub enum SelectOutcome {
 pub enum PreviewLine {
     Heading(String),
     Segs(Vec<(String, P)>),
+}
+
+/// Step the preview pane's scroll offset by one page (the visible preview
+/// height), clamped so the pane stays filled. The provider list above the
+/// pane is unaffected. Mirrors Python `_curses_select_win`'s PgUp/PgDn arm.
+fn page_preview(
+    preview: Option<&[PreviewLine]>,
+    sep_y: i32,
+    h: i32,
+    has_status: bool,
+    preview_scroll: &mut usize,
+    down: bool,
+) {
+    let Some(preview) = preview else { return };
+    let avail_top = sep_y + 1;
+    let avail_bottom = h - if has_status { 5 } else { 3 };
+    let max_lines = (avail_bottom - avail_top + 1).max(0) as usize;
+    if max_lines == 0 {
+        return;
+    }
+    let max_top = preview.len().saturating_sub(max_lines);
+    *preview_scroll = if down {
+        (*preview_scroll + max_lines).min(max_top)
+    } else {
+        preview_scroll.saturating_sub(max_lines)
+    };
 }
 
 pub fn select_win<S: Stdscr>(
@@ -583,6 +620,9 @@ pub fn select_win<S: Stdscr>(
     let n = options.len();
     let mut current = initial.min(n - 1);
     let mut top = 0usize;
+    // Scroll offset into the preview pane (the enabled-models listing under
+    // the provider list). The provider rows above never move.
+    let mut preview_scroll = 0usize;
 
     loop {
         stdscr.erase();
@@ -680,8 +720,14 @@ pub fn select_win<S: Stdscr>(
             let avail_bottom = h - if status.is_some() { 5 } else { 3 };
             let max_lines = (avail_bottom - avail_top + 1).max(0) as usize;
             if max_lines > 0 {
-                let mut draw_lines: Vec<PreviewLine> = preview.to_vec();
-                if draw_lines.len() > max_lines {
+                // Scroll window over the preview; provider rows above stay put.
+                let max_top = preview.len().saturating_sub(max_lines);
+                let preview_top = preview_scroll.min(max_top);
+                let hidden_below =
+                    preview.len().saturating_sub(preview_top + max_lines);
+                let mut draw_lines: Vec<PreviewLine> =
+                    preview[preview_top..].to_vec();
+                if hidden_below > 0 {
                     draw_lines.truncate(max_lines.saturating_sub(1));
                     draw_lines.push(PreviewLine::Segs(vec![(
                         "… (run --models for all)".to_string(),
@@ -754,6 +800,7 @@ pub fn select_win<S: Stdscr>(
         } else {
             // On the main menu (where q actually quits) "S sort" sits left of
             // "Q quit", separated by the legend's "│" separator.
+            legend.push(("D".to_string(), "desc".to_string()));
             legend.push(("S".to_string(), "sort".to_string()));
             legend.push(("Q".to_string(), "quit".to_string()));
         }
@@ -772,6 +819,21 @@ pub fn select_win<S: Stdscr>(
                 state[current] = !state[current];
             }
             Key::Enter | Key::Right => {
+                // Enter on the "Model Descriptions [..]" preview row toggles
+                // it. The toggle is preview line 1 (right under the heading);
+                // Enter only counts when the provider cursor sits just above
+                // the pane and that row is actually visible.
+                let toggle_visible = preview.is_some()
+                    && preview.unwrap().len() > 1
+                    && matches!(
+                        &preview.unwrap()[1],
+                        PreviewLine::Segs(segs)
+                            if segs.first().map(|(t, _)| t.as_str()) == Some("Model Descriptions ")
+                    )
+                    && sep_y + 2 <= h - 4;
+                if !multi && current == n - 1 && toggle_visible {
+                    return Some(SelectOutcome::DescriptionsToggled);
+                }
                 if multi {
                     let picked: Vec<usize> = (0..n).filter(|i| state[*i]).collect();
                     return Some(SelectOutcome::Picked(picked.first().copied().unwrap_or(0)));
@@ -781,9 +843,14 @@ pub fn select_win<S: Stdscr>(
             }
             Key::Left | Key::Esc if back_on_left => return Some(SelectOutcome::Cancelled),
             Key::Char('q') if !back_on_left => return Some(SelectOutcome::Cancelled),
+            Key::Char('d') | Key::Char('D') if !back_on_left => {
+                return Some(SelectOutcome::DescriptionsToggled);
+            }
             Key::Char('s') | Key::Char('S') if !back_on_left => {
                 return Some(SelectOutcome::SortToggled(current));
             }
+            Key::PageDown => page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, true),
+            Key::PageUp => page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, false),
             Key::Interrupt => return Some(SelectOutcome::Cancelled),
             _ => {}
         }
@@ -849,13 +916,30 @@ fn build_filter_view_rows(n: usize, separators: &[(usize, P)]) -> Vec<FilterView
 }
 
 /// Generic type-to-filter list widget drawn into an existing stdscr. ESC or
-/// Left-at-the-top always closes.
+/// Left-at-the-top always closes. `bottom_pad` reserves that many blank
+/// themed rows above the legend so a fully-scrolled list never touches the
+/// menu chrome. `status_fn` optionally supplies a transient confirmation
+/// line drawn a few rows above the legend.
 pub fn filter_list_win<S: Stdscr, M: FilterList>(
     stdscr: &mut S,
     entries: &[M::Entry],
     title: &str,
     legend: &[(String, String)],
     model: &mut M,
+) {
+    filter_list_win_with(
+        stdscr, entries, title, legend, model, 0, None,
+    )
+}
+
+pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
+    stdscr: &mut S,
+    entries: &[M::Entry],
+    title: &str,
+    legend: &[(String, String)],
+    model: &mut M,
+    bottom_pad: usize,
+    status_fn: Option<&dyn Fn() -> Option<String>>,
 ) {
     let mut query = String::new();
     let mut current = 0usize;
@@ -882,7 +966,9 @@ pub fn filter_list_win<S: Stdscr, M: FilterList>(
         );
 
         let list_top = 2usize;
-        let list_h = ((h as usize).saturating_sub(list_top + 2)).max(1);
+        let list_h = ((h as usize)
+            .saturating_sub(list_top + 2 + bottom_pad))
+        .max(1);
         if snap_to_current {
             top = cur_vis;
             if top + list_h > view.len() {
@@ -934,6 +1020,23 @@ pub fn filter_list_win<S: Stdscr, M: FilterList>(
                         bg_pair,
                     );
                 }
+            }
+        }
+
+        // Transient status line (e.g. post-add confirmation), a few rows
+        // above the legend so it never clobbers the list or the chrome.
+        if let Some(status_fn) = status_fn {
+            if let Some(status) = status_fn() {
+                let trunc: String = status
+                    .chars()
+                    .take((w.max(1) as usize).saturating_sub(4))
+                    .collect();
+                stdscr.addstr(
+                    h - 4,
+                    2,
+                    &trunc,
+                    Paint::plain(tn_color(P::Enabled), bg_color(P::Enabled)),
+                );
             }
         }
 
@@ -1136,18 +1239,33 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
     let _ = stdscr.getch();
 }
 
-/// Filter-list model for the add-provider modal: live-filter the models.dev
-/// catalog (existing providers already excluded), Enter adds quietly.
+/// Filter-list model for the add-provider modal: live-filter the FULL
+/// models.dev catalog (already-added providers stay listed, rendered inert),
+/// Enter adds quietly and keeps the modal open so several providers can be
+/// added in one visit.
 struct AddProviderPicker<'a> {
     doc: &'a mut Value,
     api: Value,
     added: Option<String>,
+    status: std::rc::Rc<RefCell<Option<String>>>,
 }
 
 fn provider_matches(pid: &str, name: &str, term_l: &str) -> bool {
     term_l.is_empty()
         || pid.to_lowercase().contains(term_l)
         || name.to_lowercase().contains(term_l)
+}
+
+impl<'a> AddProviderPicker<'a> {
+    /// Provider ids already configured — the Added section's membership,
+    /// regardless of each provider-level `enabled` bool.
+    fn added_ids(&self) -> std::collections::HashSet<String> {
+        usable(self.doc)
+            .iter()
+            .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+            .filter(|id| !id.is_empty())
+            .collect()
+    }
 }
 
 impl<'a> FilterList for AddProviderPicker<'a> {
@@ -1159,27 +1277,85 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         query: &str,
     ) -> (Vec<(String, String)>, Vec<(usize, P)>) {
         let term_l = query.to_lowercase();
-        let ordered: Vec<(String, String)> = entries
+        let matched: Vec<(String, String)> = entries
             .iter()
             .filter(|(pid, name)| provider_matches(pid, name, &term_l))
             .cloned()
             .collect();
-        (ordered, Vec::new())
+        let added = self.added_ids();
+        let suggested: Vec<&str> = SUGGESTED_PROVIDER_IDS.to_vec();
+        // 0 = Added, 1 = Suggested, 2 = everything else; alphabetical by id
+        // within a bucket.
+        let mut rows: Vec<(usize, &(String, String))> = matched
+            .iter()
+            .map(|entry| {
+                let b = if added.contains(&entry.0) {
+                    0
+                } else if suggested.contains(&entry.0.as_str()) {
+                    1
+                } else {
+                    2
+                };
+                (b, entry)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.0.cmp(&b.1.0)));
+        let ordered: Vec<(String, String)> =
+            rows.iter().map(|(_, e)| (*e).clone()).collect();
+        // Green divider before Suggested would be wrong: the first rule sits
+        // before the Suggested bucket (mirrors Configure Models' enabled |
+        // free-disabled | rest layout).
+        let n_added = ordered
+            .iter()
+            .filter(|(pid, _)| added.contains(pid))
+            .count();
+        let n_sugg = ordered
+            .iter()
+            .filter(|(pid, _)| !added.contains(pid) && suggested.contains(&pid.as_str()))
+            .count();
+        let mut separators: Vec<(usize, P)> = Vec::new();
+        if 0 < n_added && n_added < ordered.len() {
+            separators.push((n_added, P::Enabled));
+        }
+        let free_sep_idx = n_added + n_sugg;
+        if n_sugg > 0 && free_sep_idx < ordered.len() {
+            separators.push((free_sep_idx, P::Free));
+        }
+        (ordered, separators)
     }
 
     fn render(&self, entry: &(String, String), is_sel: bool) -> Vec<(String, P)> {
         let (pid, name) = entry;
+        let added = self.added_ids().contains(pid);
+        let suggested = SUGGESTED_PROVIDER_IDS.contains(&pid.as_str()) && !added;
         let label = if name.is_empty() {
             format!("  {pid}")
         } else {
             format!("  {pid} ({name})")
         };
-        let pair = if is_sel { P::Selected } else { P::Text };
-        vec![(label, pair)]
+        let pair = if is_sel {
+            P::Selected
+        } else if added {
+            P::Enabled
+        } else if suggested {
+            P::Free
+        } else {
+            P::Text
+        };
+        let mark_pair = if is_sel { P::Selected } else { P::Enabled };
+        vec![
+            ("  ".to_string(), P::Text),
+            ("●".to_string(), mark_pair),
+            ("  ".to_string(), P::Text),
+            (label, pair),
+        ]
     }
 
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String)) -> bool {
         let pid = &entry.0;
+        if self.added_ids().contains(pid) {
+            return true; // already configured; inert row (delete via its menu)
+        }
         if let Err(e) = crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
             // Add errors surface inline so the surrounding session survives.
             inline_error_win(stdscr, &format!("Add failed: {}", e.0));
@@ -1199,13 +1375,14 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         self.added = Some(format!(
             "Added provider '{pid}' with {model_count} models (all disabled)."
         ));
-        false // close back to the provider menu
+        *self.status.borrow_mut() = self.added.clone();
+        true // stay open so more providers can be added
     }
 }
-
-/// Modal: type-to-filter the models.dev catalog and add a provider. Returns
-/// the confirmation status line for the parent menu, or None. The fetch runs
-/// before the modal opens so a failure never leaves it on screen.
+/// Modal: type-to-filter the full models.dev catalog and add a provider.
+/// Returns the last confirmation status line for the parent menu, or None.
+/// The fetch runs before the modal opens so a failure never leaves it on
+/// screen. The modal stays open across adds; ESC or Left-at-top closes it.
 pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<String> {
     let api = match crate::sync::fetch_models_dev() {
         Ok(a) => a,
@@ -1214,16 +1391,13 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
             return None;
         }
     };
-    let existing: Vec<String> = usable(doc)
-        .iter()
-        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
-        .collect();
+    // Full catalog — already-added providers stay listed so the sections
+    // show what is configured; they are just rendered differently.
     let mut catalog: Vec<(String, String)> = api
         .as_object()
         .map(|o| {
             o.iter()
                 .filter(|(_, pinfo)| pinfo.is_object())
-                .filter(|(pid, _)| !existing.contains(&pid.to_string()))
                 .map(|(pid, pinfo)| {
                     (
                         pid.clone(),
@@ -1235,8 +1409,15 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
         .unwrap_or_default();
     catalog.sort();
 
-    let mut picker = AddProviderPicker { doc, api, added: None };
-    filter_list_win(
+    let status_cell = std::rc::Rc::new(RefCell::new(None::<String>));
+    let mut picker = AddProviderPicker {
+        doc,
+        api,
+        added: None,
+        status: std::rc::Rc::clone(&status_cell),
+    };
+    let status_for_fn = std::rc::Rc::clone(&status_cell);
+    filter_list_win_with(
         stdscr,
         &catalog,
         "Add provider",
@@ -1247,6 +1428,8 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
             ("type".to_string(), "filter".to_string()),
         ],
         &mut picker,
+        1,
+        Some(&move || status_for_fn.borrow().clone()),
     );
     picker.added
 }
@@ -1491,7 +1674,7 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
     };
     let catalog = build_add_model_catalog(&api, doc);
     let mut picker = AddModelPicker { doc, api, status: None };
-    filter_list_win(
+    filter_list_win_with(
         stdscr,
         &catalog,
         "Add model",
@@ -1502,6 +1685,8 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
             ("type".to_string(), "filter".to_string()),
         ],
         &mut picker,
+        1,
+        None,
     );
     picker.status
 }
@@ -1530,6 +1715,19 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
     let mut lines: Vec<PreviewLine> = Vec::new();
     // Heading marker -> full-width blue bar, like the screen title.
     lines.push(PreviewLine::Heading("Enabled Models".to_string()));
+    // The Model Descriptions toggle sits directly below the heading, styled
+    // like an enabled/disabled state token (green when on, muted when off).
+    let descriptions_on = doc
+        .get("include_descriptions")
+        .and_then(Value::as_bool)
+        .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
+    lines.push(PreviewLine::Segs(vec![
+        ("Model Descriptions ".to_string(), P::Text),
+        (
+            if descriptions_on { "[enabled]".to_string() } else { "[disabled]".to_string() },
+            if descriptions_on { P::Enabled } else { P::Disabled },
+        ),
+    ]));
     lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
 
     let mut model_rows: Vec<(String, String, String, String)> = Vec::new();
@@ -1676,10 +1874,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             .get("include_descriptions")
             .and_then(Value::as_bool)
             .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
-        labels.push(format!(
-            "Descriptions [{}]",
-            if descriptions_on { "enabled" } else { "disabled" }
-        ));
+        // "Model Descriptions [enabled/disabled]" now lives inside the
+        // Enabled Models preview (toggled via D or Enter on that row).
         let preview = build_config_models_preview(doc, sort_by_name);
         let pi = match select_win(stdscr,
             &labels,
@@ -1700,6 +1896,20 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 menu_cursor = i;
                 continue;
             }
+            Some(SelectOutcome::DescriptionsToggled) => {
+                // "Model Descriptions [enabled/disabled]" — global flag.
+                let new_val = !descriptions_on;
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("include_descriptions".into(), Value::Bool(new_val));
+                }
+                let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                status_msg = Some(format!(
+                    "Model Descriptions {}.",
+                    if new_val { "enabled" } else { "disabled" }
+                ));
+                changed = true;
+                continue;
+            }
             Some(SelectOutcome::Picked(i)) => i,
         };
         menu_cursor = 0;
@@ -1718,20 +1928,6 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 status_msg = Some(msg);
                 changed = true;
             }
-            continue;
-        }
-        if pi == ordered.len() + 2 {
-            // "Descriptions [enabled/disabled]" — global config.toml flag.
-            let new_val = !descriptions_on;
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert("include_descriptions".into(), Value::Bool(new_val));
-            }
-            let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-            status_msg = Some(format!(
-                "Descriptions {}.",
-                if new_val { "enabled" } else { "disabled" }
-            ));
-            changed = true;
             continue;
         }
         status_msg = None;
@@ -1778,6 +1974,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             ) {
                 None | Some(SelectOutcome::Cancelled) => break,
                 Some(SelectOutcome::SortToggled(_)) => continue,
+                // No preview on the action menu, so this cannot fire there.
+                Some(SelectOutcome::DescriptionsToggled) => continue,
                 Some(SelectOutcome::Picked(i)) => i,
             };
             action_cursor = ai;
@@ -2296,6 +2494,16 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
                 b'D' => return Some((Key::Left, 3)),
                 _ => {}
             }
+            // PageUp/PageDown: CSI 5~ / 6~ (numeric params, tilde final).
+            if buf.len() >= 3 && (buf[2] == b'5' || buf[2] == b'6') {
+                if buf.len() == 3 {
+                    return None; // wait for the tail
+                }
+                if buf[3] == b'~' {
+                    let key = if buf[2] == b'5' { Key::PageUp } else { Key::PageDown };
+                    return Some((key, 4));
+                }
+            }
             // Unknown CSI: swallow through its final alpha byte.
             let end = buf[2..]
                 .iter()
@@ -2668,8 +2876,180 @@ mod tests {
     }
 
     #[test]
-    fn build_add_model_catalog_flattens_sorts_and_skips_enabled() {
+    fn add_provider_picker_buckets_added_suggested_and_rest() {
+        // The full catalog stays listed (already-added providers included);
+        // sections: Added (green, ●) | Suggested (cyan) | rest (white).
+        for enabled_flag in [true, false] {
+            let mut doc = serde_json::json!({
+                "providers": [{
+                    "id": "opencode", "name": "OpenCode",
+                    "enabled": enabled_flag,
+                    "models": {}
+                }]
+            });
+            let api = serde_json::json!({
+                "zzz-last": {"name": "Zzz Last"},
+                "anthropic": {"name": "Anthropic"},
+                "opencode": {"name": "OpenCode"},
+                "openrouter": {"name": "OpenRouter"},
+                "ollama-cloud": {"name": "Ollama Cloud"},
+                "opencode-go": {"name": "OpenCode Go"}
+            });
+            let mut picker = AddProviderPicker {
+                doc: &mut doc,
+                api,
+                added: None,
+                status: std::rc::Rc::new(RefCell::new(None)),
+            };
+            let entries: Vec<(String, String)> = vec![
+                ("anthropic".into(), "Anthropic".into()),
+                ("ollama-cloud".into(), "Ollama Cloud".into()),
+                ("openrouter".into(), "OpenRouter".into()),
+                ("opencode".into(), "OpenCode".into()),
+                ("opencode-go".into(), "OpenCode Go".into()),
+                ("zzz-last".into(), "Zzz Last".into()),
+            ];
+            let (ordered, seps) = picker.compute_view(&entries, "");
+            // Added first, then Suggested, then the rest; alphabetical inside.
+        assert_eq!(
+                ordered.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+                ["opencode", "ollama-cloud", "opencode-go", "openrouter", "anthropic", "zzz-last"]
+            );
+            assert_eq!(
+                seps,
+                vec![(1, P::Enabled), (4, P::Free)],
+                "green rule after the Added bucket, cyan rule after Suggested"
+            );
+
+            // Added row renders green with a ● prefix.
+            let row = picker.render(&("opencode".to_string(), "OpenCode".to_string()), false);
+            assert_eq!(row[1], ("●".to_string(), P::Enabled));
+            assert!(row[3].0.contains("opencode"));
+            assert_eq!(row[3].1, P::Enabled);
+
+            // Suggested rows render cyan without a prefix glyph change
+            // (the space mark is invisible filler).
+            let srow = picker.render(&("openrouter".to_string(), "OpenRouter".to_string()), false);
+            assert_eq!(srow[3].1, P::Free);
+
+            // Other rows stay default white.
+            let orow = picker.render(&("anthropic".to_string(), "Anthropic".to_string()), false);
+            assert_eq!(orow[3].1, P::Text);
+
+            // Enter on an Added row must NOT call add_provider_entry.
+            let before = picker.doc["providers"].as_array().unwrap().len();
+            let keep = picker.on_enter(&mut FakeStdscr::new(20, 80), &("opencode".to_string(), "OpenCode".to_string()));
+            assert!(keep, "Enter on an Added row keeps the modal open");
+            assert_eq!(
+                picker.doc["providers"].as_array().unwrap().len(),
+                before,
+                "Added row is inert: no duplicate provider entry"
+            );
+        }
+    }
+
+    #[test]
+    fn add_provider_picker_stays_open_and_records_status_after_add() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        use crate::paths;
+        std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
+        let mut doc = serde_json::json!({"providers": []});
         let api = serde_json::json!({
+            "openrouter": {"name": "OpenRouter", "models": {
+                "or-1": {"name": "OR One"}
+            }}
+        });
+        let mut picker = AddProviderPicker {
+            doc: &mut doc,
+            api,
+            added: None,
+            status: std::rc::Rc::new(RefCell::new(None)),
+        };
+        let entry = ("openrouter".to_string(), "OpenRouter".to_string());
+        let keep = picker.on_enter(&mut FakeStdscr::new(20, 80), &entry);
+        assert!(keep, "modal must stay open after an add");
+        assert!(
+            picker.added.is_some(),
+            "a successful add records the confirmation message"
+        );
+        assert_eq!(picker.doc["providers"][0]["id"], "openrouter");
+
+        // After the add, the same provider now buckets into Added and its
+        // row goes inert (no duplicate on a second Enter).
+        let entries = vec![entry.clone()];
+        let (ordered, _) = picker.compute_view(&entries, "");
+        assert_eq!(ordered[0].0, "openrouter");
+        let before = picker.doc["providers"].as_array().unwrap().len();
+        let keep2 = picker.on_enter(&mut FakeStdscr::new(20, 80), &entry);
+        assert!(keep2);
+        assert_eq!(
+            picker.doc["providers"].as_array().unwrap().len(),
+            before,
+            "second Enter on a just-added provider adds nothing"
+        );
+    }
+
+    #[test]
+    fn select_win_preview_scrolls_with_pgup_pgdn() {
+        // A tall preview (more lines than the pane) plus PageDown/PageUp:
+        // after two PgDn presses the drawn window starts past the heading;
+        // PgUp walks back. The provider row above never moves.
+        let mut preview: Vec<PreviewLine> = vec![PreviewLine::Heading("Enabled Models".into())];
+        preview.push(PreviewLine::Segs(vec![("Model Descriptions [enabled]".into(), P::Text)]));
+        for i in 0..40 {
+            preview.push(PreviewLine::Segs(vec![(format!("model-{i}"), P::Value)]));
+        }
+        let options = vec!["one".to_string()];
+        let h = 30;
+
+        // Baseline frame (scroll 0).
+        let mut f0 = FakeStdscr::new(h, 80);
+        f0.script(Key::Char('q'));
+        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0);
+
+        // Two PageDowns, then quit.
+        let mut f1 = FakeStdscr::new(h, 80);
+        f1.script(Key::PageDown);
+        f1.script(Key::PageDown);
+        f1.script(Key::Char('q'));
+        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0);
+
+        let base_rows: Vec<i32> = f0
+            .recorded()
+            .iter()
+            .filter(|(_, _, t, _)| t.starts_with("model-"))
+            .map(|(y, _, _, _)| *y)
+            .collect();
+        let scrolled_rows: Vec<i32> = f1
+            .recorded()
+            .iter()
+            .filter(|(_, _, t, _)| t.starts_with("model-"))
+            .map(|(y, _, _, _)| *y)
+            .collect();
+        assert!(!base_rows.is_empty() && !scrolled_rows.is_empty());
+        let base_first_model = base_rows.iter().min().unwrap();
+        let scroll_first_model = scrolled_rows.iter().min().unwrap();
+        assert_ne!(
+            base_first_model, scroll_first_model,
+            "PageDown did not move the preview window"
+        );
+        // The provider list row is identical in both frames: pinned at top.
+        let base_prov_y = f0
+            .recorded()
+            .into_iter()
+            .find(|(_, _, t, _)| t == "one")
+            .map(|(y, _, _, _)| y);
+        let scroll_prov_y = f1
+            .recorded()
+            .into_iter()
+            .find(|(_, _, t, _)| t == "one")
+            .map(|(y, _, _, _)| y);
+        assert_eq!(base_prov_y, scroll_prov_y, "provider row moved while paging");
+    }
+
+    #[test]
+    fn build_add_model_catalog_flattens_sorts_and_skips_enabled() {        let api = serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {}
@@ -3261,6 +3641,10 @@ use serde_json::json;
         assert_eq!(parse_key_prefix(b"\x1b["), None);
         // Unknown CSI swallows through its final alpha byte as Esc.
         assert_eq!(parse_key_prefix(b"\x1b[?1049h"), Some((Key::Esc, 8)));
+        // PageUp/PageDown arrive as CSI 5~/6~.
+        assert_eq!(parse_key_prefix(b"\x1b[5~"), Some((Key::PageUp, 4)));
+        assert_eq!(parse_key_prefix(b"\x1b[6~"), Some((Key::PageDown, 4)));
+        assert_eq!(parse_key_prefix(b"\x1b[5"), None, "partial PageUp must wait for its tail");
     }
 
     #[test]
@@ -3275,32 +3659,53 @@ let mut doc = serde_json::json!({
                 "models": {"alpha-1": {"name": "Alpha One", "description": "D.", "enabled": false}}
             }]
         });
-        // Main menu rows: provider, ➕ Add provider…, ➕ Add model…,
-        // Descriptions [...]. Down to the Descriptions row; Enter toggles
-        // the flag on. 'q' quits (ESC is a no-op on the main menu).
+        // The toggle now lives inside the Enabled Models preview. Pressing
+        // 'd' on the main menu toggles the flag on; a second run toggles it
+        // back off. 'q' quits (ESC is a no-op on the main menu).
         let mut f = FakeStdscr::new(30, 80);
-        f.script(Key::Down);
-        f.script(Key::Down);
-        f.script(Key::Down);
-        f.script(Key::Enter);
+        f.script(Key::Char('d'));
         f.script(Key::Char('q'));
         let _ = run_config_flow_with_backend(&mut f, &mut doc);
         assert_eq!(
             doc.get("include_descriptions").and_then(Value::as_bool),
             Some(true),
-            "Enter on the Descriptions row must persist include_descriptions: true"
+            "'d' on the main menu must persist include_descriptions: true"
         );
         let mut f2 = FakeStdscr::new(30, 80);
-        f2.script(Key::Down);
-        f2.script(Key::Down);
-        f2.script(Key::Down);
-        f2.script(Key::Enter);
+        f2.script(Key::Char('d'));
         f2.script(Key::Char('q'));
         let _ = run_config_flow_with_backend(&mut f2, &mut doc);
         assert_eq!(
             doc.get("include_descriptions").and_then(Value::as_bool),
             Some(false),
             "second toggle must set include_descriptions back off"
+        );
+    }
+
+    #[test]
+    fn config_flow_d_key_is_ignored_on_action_menu() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {}
+            }]
+        });
+        // Enter the action menu and press 'd': it must be ignored there
+        // (no DescriptionsToggled), then Back exits to the main menu.
+        let mut f = FakeStdscr::new(30, 80);
+        f.script(Key::Enter); // open action menu (Back-on-left submenu)
+        f.script(Key::Esc);   // leave the action menu
+        f.script(Key::Char('q')); // quit the main menu
+        let out = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(out.is_ok());
+        assert_eq!(
+            doc.get("include_descriptions").and_then(Value::as_bool),
+            None,
+            "'d' must not toggle descriptions from the action menu"
         );
     }
 }

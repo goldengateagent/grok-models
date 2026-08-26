@@ -94,6 +94,13 @@ MODEL_KEY_ORDER = (
 
 INCLUDE_DESCRIPTIONS_DEFAULT = False
 
+CODE_PANEL_PAD_X = 1  # horizontal padding inside black code panels
+
+# Provider ids highlighted in the Add Provider screen's "Suggested" section.
+# Anything already configured lands in the "Added" section above it; the rest
+# are listed unhighlighted below. Single source of truth for both sections.
+SUGGESTED_PROVIDER_IDS = ("opencode", "opencode-go", "openrouter", "ollama-cloud")
+
 
 def catalog_description(minfo: object) -> str | None:
     """models.dev `description` for a model, or None when absent/empty."""
@@ -564,6 +571,7 @@ def search_providers(models_dev: dict, term: str) -> str | None:
 
 _CURSES_FAILED = object()  # sentinel: curses couldn't run (not a tty, etc.)
 _SORT_TOGGLED = object()  # sentinel: main-menu S toggled Enabled Models sort
+_DESCRIPTIONS_TOGGLED = object()  # sentinel: main-menu D / preview row toggled
 
 
 # Tokyo Night (Night/Storm) palette — values mirror grok-build's tokyonight.rs.
@@ -1057,6 +1065,9 @@ def _curses_select_win(
     n = len(options)
     current = max(0, min(initial, n - 1)) if n > 0 else 0
     top = 0
+    # Scroll offset into the preview pane (the enabled-models listing under
+    # the provider list). The provider rows above never move.
+    preview_scroll = 0
     while True:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
@@ -1160,9 +1171,12 @@ def _curses_select_win(
             avail_bottom = height - (5 if status else 3)
             max_lines = avail_bottom - avail_top + 1
             if max_lines > 0:
-                truncated = len(preview) > max_lines
-                draw_lines = preview[:max_lines]
-                if truncated:
+                # Scroll window over the preview; provider rows above stay put.
+                max_top = max(0, len(preview) - max_lines)
+                preview_top = min(preview_scroll, max_top)
+                hidden_below = len(preview) - (preview_top + max_lines)
+                draw_lines = preview[preview_top:preview_top + max_lines]
+                if hidden_below > 0:
                     draw_lines = draw_lines[:-1] + [[("… (run --models for all)", P.MUTED)]]
                 for i, segs in enumerate(draw_lines):
                     y = avail_top + i
@@ -1247,6 +1261,7 @@ def _curses_select_win(
         else:
             # Menus without a back binding (main menu) quit via q instead;
             # render it inline like the other bindings. S sort sits left of Q.
+            legend.append(("D", "desc"))
             legend.append(("S", "sort"))
             legend.append(("Q", "quit"))
         _curses_draw_legend(stdscr, legend)
@@ -1328,6 +1343,20 @@ def _curses_select_win(
                 # anything else (RESIZE etc.) just re-renders the row
             continue
         elif ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT):
+            # Enter on the "Model Descriptions [..]" preview row toggles it.
+            # The toggle is preview line 1 (right under the heading); Enter
+            # only counts when the provider cursor sits just above the pane
+            # and that row is actually visible.
+            toggle_visible = bool(
+                len(preview or []) > 1
+                and isinstance(preview[1], list)
+                and preview[1]
+                and isinstance(preview[1][0], tuple)
+                and preview[1][0][0] == "Model Descriptions "
+                and sep_y + 2 <= height - 4
+            )
+            if not multi and current == n - 1 and toggle_visible:
+                return _DESCRIPTIONS_TOGGLED
             return sorted(state) if multi else current
         elif back_on_left and ch == curses.KEY_LEFT:
             return None
@@ -1337,6 +1366,19 @@ def _curses_select_win(
         elif ch == ord("q") and not back_on_left:
             # q quits the tool; only bound at the main menu
             return None
+        elif ch == ord("d") and not back_on_left:
+            return _DESCRIPTIONS_TOGGLED
+        elif ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            # Page the preview pane; the provider list stays pinned above.
+            avail_top = sep_y + 1
+            avail_bottom = height - (5 if status else 3)
+            max_lines = avail_bottom - avail_top + 1
+            if max_lines > 0:
+                max_top = max(0, len(preview or []) - max_lines)
+                if ch == curses.KEY_NPAGE:
+                    preview_scroll = min(preview_scroll + max_lines, max_top)
+                else:
+                    preview_scroll = max(preview_scroll - max_lines, 0)
         elif ch in (ord("s"), ord("S")) and not back_on_left:
             return (_SORT_TOGGLED, current)
 
@@ -1427,6 +1469,8 @@ def _curses_filter_list_win(
     compute_view,
     render,
     on_enter=None,
+    bottom_padding: int = 0,
+    status_fn=None,
 ) -> None:
     """Generic type-to-filter list widget drawn into an existing stdscr.
     compute_view(entries, query) -> (ordered_entries, separators); separators
@@ -1435,7 +1479,10 @@ def _curses_filter_list_win(
     is_selected) -> (text, color_pair) or a list of (text, color_pair)
     segments.
     on_enter(entry) -> bool: True keeps the window open, False closes it.
-    ESC or Left-at-top always closes."""
+    ESC or Left-at-top always closes. bottom_padding reserves that many
+    blank themed rows above the legend so a fully-scrolled list never
+    touches the menu chrome. status_fn optionally supplies a transient
+    confirmation line drawn a few rows above the legend."""
     curses.set_escdelay(25)
     try:
         curses.curs_set(0)
@@ -1469,7 +1516,7 @@ def _curses_filter_list_win(
         )
 
         list_top = 2
-        list_h = max(1, height - list_top - 2)
+        list_h = max(1, height - list_top - 2 - bottom_padding)
         if snap_to_current:
             top = cur_vis
             if top + list_h > len(view):
@@ -1518,6 +1565,21 @@ def _curses_filter_list_win(
                 _draw_seg_line(stdscr, y, 0, segs, max(1, width - 2))
             except curses.error:
                 pass
+
+        # Transient status line (e.g. post-add confirmation), a few rows
+        # above the legend so it never clobbers the list or the chrome.
+        if status_fn:
+            status = status_fn()
+            if status:
+                try:
+                    stdscr.addstr(
+                        height - 4,
+                        2,
+                        status[: max(0, width - 4)],
+                        curses.color_pair(P.ENABLED),
+                    )
+                except curses.error:
+                    pass
 
         _curses_draw_legend(stdscr, legend)
 
@@ -1672,41 +1734,82 @@ def _curses_inline_error_win(stdscr, message: str) -> None:
 
 
 def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bool:
-    """Modal: type-to-filter the models.dev catalog and add a provider.
-    Returns True if a provider was added. Fetch/add errors surface inline so
-    the surrounding TUI session survives."""
+    """Modal: type-to-filter the full models.dev catalog and add a provider.
+
+    The catalog is bucketed into three sections like Configure Models:
+    Added (already in providers.json, enabled or disabled), Suggested
+    (ids in SUGGESTED_PROVIDER_IDS not yet added) and everything else.
+    Added rows are inert (Enter is ignored); adding any other provider
+    keeps the modal open so several can be added in one visit. The
+    modal closes via ESC or Left at the top of the first page.
+    Returns True if at least one provider was added. Fetch/add errors
+    surface inline so the surrounding TUI session survives."""
     try:
         models_dev = fetch_models_dev()
     except SyncError as exc:
         _curses_inline_error_win(stdscr, f"Fetch failed: {exc}")
         return False
 
-    existing = {
-        p.get("id")
-        for p in providers_doc["providers"]
-        if isinstance(p, dict)
-    }
+    # Full catalog — already-added providers stay listed so the sections
+    # show what is configured; they are just rendered differently.
     catalog = sorted(
         (pid, pinfo.get("name") or "")
         for pid, pinfo in models_dev.items()
-        if isinstance(pinfo, dict) and pid not in existing
+        if isinstance(pinfo, dict)
     )
+    suggested = set(SUGGESTED_PROVIDER_IDS)
 
     result = {"added": None}
+    status = {"msg": None}
+
+    def added_ids() -> set:
+        return {
+            p.get("id")
+            for p in providers_doc["providers"]
+            if isinstance(p, dict)
+        }
 
     def compute_view(entries, query):
-        return (
-            [e for e in entries if _provider_matches(e[0], e[1], query.lower())],
-            [],
-        )
+        term_l = query.lower()
+        matched = [e for e in entries if _provider_matches(e[0], e[1], term_l)]
+        current_added = added_ids()
+        bucket = []  # 0 = Added, 1 = Suggested, 2 = others
+        for entry in matched:
+            if entry[0] in current_added:
+                bucket.append(0)
+            elif entry[0] in suggested:
+                bucket.append(1)
+            else:
+                bucket.append(2)
+        ordered = [e for _, e in sorted(zip(bucket, matched), key=lambda p: (p[0], p[1][0]))]
+        separators = []
+        n_added = bucket.count(0)
+        n_sugg = bucket.count(1)
+        if 0 < n_added < len(ordered):
+            separators.append((n_added, P.ENABLED))
+        free_sep_idx = n_added + n_sugg
+        if n_sugg > 0 and free_sep_idx < len(ordered):
+            separators.append((free_sep_idx, P.FREE))
+        return ordered, separators
 
     def render(entry, is_sel):
         pid, name = entry
-        label = f"  {pid} ({name})" if name else f"  {pid}"
-        return label, (P.SELECTED if is_sel else P.TEXT)
+        is_added = pid in added_ids()
+        is_sugg = pid in suggested and not is_added
+        mark = "●" if is_added else " "
+        label = f"{pid} ({name})" if name else pid
+        pair = P.SELECTED if is_sel else (P.ENABLED if is_added else (P.FREE if is_sugg else P.TEXT))
+        return [
+            ("  ", P.TEXT),
+            (mark, P.ENABLED if is_added else P.TEXT),
+            ("  ", P.TEXT),
+            (label, pair),
+        ]
 
     def add(entry):
         pid = entry[0]
+        if pid in added_ids():
+            return True  # already configured here; inert row
         before = len(providers_doc["providers"])
         try:
             add_provider_entry(providers_doc, models_dev, pid, quiet=True)
@@ -1731,7 +1834,8 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             result["added"] = (
                 f"Added provider '{pid}' with {n_models} models (all disabled)."
             )
-        return False  # close back to the provider menu
+            status["msg"] = result["added"]
+        return True  # stay open so more providers can be added
 
     _curses_filter_list_win(
         catalog, stdscr,
@@ -1740,6 +1844,8 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
         compute_view=compute_view,
         render=render,
         on_enter=add,
+        bottom_padding=1,
+        status_fn=lambda: status["msg"],
     )
     return result["added"]
 
@@ -1855,6 +1961,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         compute_view=compute_view,
         render=render,
         on_enter=enable,
+        bottom_padding=1,
     )
     return result["status"]
 
@@ -1884,7 +1991,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             descriptions_on = bool(
                 providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
             )
-            labels.append(f"Descriptions [{('enabled' if descriptions_on else 'disabled')}]")
+            # "Model Descriptions [enabled/disabled]" now lives inside the
+            # Enabled Models preview (toggled via D or Enter on that row).
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider",
                 status=status_msg,
@@ -1894,6 +2002,13 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             if isinstance(pi, tuple) and pi and pi[0] is _SORT_TOGGLED:
                 sort_by_name = not sort_by_name
                 menu_cursor = pi[1]
+                continue
+            if pi is _DESCRIPTIONS_TOGGLED:
+                new_val = not descriptions_on
+                providers_doc["include_descriptions"] = new_val
+                dump_providers(PROVIDERS_PATH, providers_doc)
+                status_msg = f"Model Descriptions {'enabled' if new_val else 'disabled'}."
+                changed = True
                 continue
             menu_cursor = 0
             if pi is None:
@@ -1909,14 +2024,6 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 if enabled_msg:
                     status_msg = enabled_msg
                     changed = True
-                continue
-            if pi == len(ordered) + 2:
-                # "Descriptions [enabled/disabled]" — global config.toml flag.
-                new_val = not descriptions_on
-                providers_doc["include_descriptions"] = new_val
-                dump_providers(PROVIDERS_PATH, providers_doc)
-                status_msg = f"Descriptions {'enabled' if new_val else 'disabled'}."
-                changed = True
                 continue
             status_msg = None
             selected = ordered[pi]
@@ -2281,7 +2388,9 @@ def render_models_text() -> int:
     return 0
 
 
-def _build_config_models_preview(providers_doc: dict, sort_by_name: bool = False) -> list:
+def _build_config_models_preview(
+    providers_doc: dict, sort_by_name: bool = False
+) -> list:
     """Build the --models-style enabled-models listing as colored segment
     lines, for rendering in the empty space under the --config main menu.
     Default order is providers.json (provider-name) order; sort_by_name
@@ -2294,6 +2403,18 @@ def _build_config_models_preview(providers_doc: dict, sort_by_name: bool = False
     # First element is a heading marker: ("heading", text) -> drawn as a
     # full-width blue bar, like the screen title.
     lines.append(("heading", "Enabled Models"))
+    # The Model Descriptions toggle sits directly below the heading, styled
+    # like an enabled/disabled state token (green when on, muted when off).
+    descriptions_on = bool(
+        providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
+    )
+    lines.append([
+        ("Model Descriptions ", P.TEXT),
+        (
+            "[enabled]" if descriptions_on else "[disabled]",
+            P.ENABLED if descriptions_on else P.DISABLED,
+        ),
+    ])
     lines.append([("", P.TEXT)])  # gap under the models header
     model_rows: list = []
     for provider in providers:
