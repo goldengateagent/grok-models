@@ -9,7 +9,7 @@ pub fn cmd_config() -> Res<i32> {
 
     use std::io::IsTerminal;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    // The TUI can add the first provider itself (➕ Add provider…); only the
+    // The TUI can add the first provider itself (➕ Add Provider…); only the
     // numbered fallback bails on an empty providers.json.
     if !tty && providers.is_empty() {
         println!("No providers configured yet. Add with --add-provider");

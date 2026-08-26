@@ -79,8 +79,8 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 3] =
-    ["include_descriptions", "providers", "removed_providers"];
+pub const TOP_LEVEL_KEY_ORDER: [&str; 4] =
+    ["include_descriptions", "last_updated", "providers", "removed_providers"];
 pub const PROVIDER_KEY_ORDER: [&str; 6] =
     ["id", "name", "env_key", "base_url", "enabled", "models"];
 const MODEL_KEY_ORDER: [&str; 7] = [
@@ -314,5 +314,35 @@ mod tests {
             .map(|p| p["id"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(ids, ["z", "a"], "read must keep file order");
+    }
+
+    #[test]
+    fn dump_providers_keeps_last_updated_in_canonical_order_and_does_not_invent_it() {
+        let mut with_stamp = serde_json::json!({
+            "removed_providers": [],
+            "last_updated": "08-26-2026 03:15 PM",
+            "include_descriptions": true,
+            "providers": []
+        });
+        let path = std::env::temp_dir().join(format!("gm-dump-lastupd-{}.json", std::process::id()));
+        dump_providers(&path, &mut with_stamp).expect("dump");
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let keys: Vec<&str> = with_stamp.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["include_descriptions", "last_updated", "providers", "removed_providers"]
+        );
+        assert!(out.contains("\"last_updated\": \"08-26-2026 03:15 PM\""));
+
+        let mut without = serde_json::json!({ "providers": [] });
+        let path = std::env::temp_dir().join(format!("gm-dump-nolastupd-{}.json", std::process::id()));
+        dump_providers(&path, &mut without).expect("dump");
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            !out.contains("last_updated"),
+            "dump must not invent last_updated: {out}"
+        );
     }
 }

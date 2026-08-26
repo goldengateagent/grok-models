@@ -114,29 +114,25 @@ pub fn parse_openai_models_list(payload: &Value) -> Option<Vec<(String, Option<S
     }
 }
 
+/// TUI / CLI status when GET {base_url}/models fails. No HTTP body.
+pub fn live_fetch_error_status(url: &str) -> String {
+    format!("error {url}: fetch live model list failed")
+}
+
+/// GET {base_url}/models. Returns (rows, None) or (None, Some(url)) on failure.
+/// Never prints — callers decide how to surface the URL.
 pub fn try_fetch_provider_models(
     base_url: &str,
-    quiet: bool,
-) -> Option<Vec<(String, Option<String>)>> {
+) -> (Option<Vec<(String, Option<String>)>>, Option<String>) {
     if base_url.is_empty() {
-        return None;
+        return (None, None);
     }
     let url = provider_models_url(base_url);
     match http_get_json(&url) {
-        Err(e) => {
-            if !quiet {
-                println!("  warning: {}", e.0);
-            }
-            None
-        }
+        Err(_) => (None, Some(url)),
         Ok(payload) => match parse_openai_models_list(&payload) {
-            None => {
-                if !quiet {
-                    println!("  warning: no models list at {url}");
-                }
-                None
-            }
-            Some(items) => Some(items),
+            None => (None, Some(url)),
+            Some(items) => (Some(items), None),
         },
     }
 }
@@ -326,14 +322,21 @@ pub fn authority_items_for_provider(
     pinfo: &Value,
     base_url: &str,
     quiet: bool,
-) -> Vec<(String, Option<String>)> {
+) -> (Vec<(String, Option<String>)>, Option<String>) {
     let catalog = catalog_models_map(pinfo);
     if USE_PROVIDER_MODELS_ENDPOINT && !base_url.is_empty() {
-        if let Some(live) = try_fetch_provider_models(base_url, quiet) {
-            return live;
+        let (live, err_url) = try_fetch_provider_models(base_url);
+        if let Some(live) = live {
+            return (live, None);
         }
+        if let Some(ref url) = err_url {
+            if !quiet {
+                println!("{}", live_fetch_error_status(url));
+            }
+        }
+        return (items_from_catalog(&catalog), err_url);
     }
-    items_from_catalog(&catalog)
+    (items_from_catalog(&catalog), None)
 }
 
 fn providers_list(doc: &Value) -> Vec<Value> {
@@ -343,11 +346,42 @@ fn providers_list(doc: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Local `MM-DD-YYYY HH:MM AM/PM` for providers.json `last_updated`.
+pub fn last_updated_stamp() -> String {
+    unsafe {
+        let mut t: libc::time_t = 0;
+        libc::time(&mut t);
+        let tm = libc::localtime(&t);
+        if tm.is_null() {
+            return String::new();
+        }
+        let tm = *tm;
+        let hour24 = tm.tm_hour;
+        let ampm = if hour24 < 12 { "AM" } else { "PM" };
+        let hour12 = {
+            let h = hour24 % 12;
+            if h == 0 { 12 } else { h }
+        };
+        format!(
+            "{:02}-{:02}-{} {:02}:{:02} {ampm}",
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_year + 1900,
+            hour12,
+            tm.tm_min
+        )
+    }
+}
+
 /// Update phase (1 of 2): reconcile every configured provider's model list
 /// in providers.json against fresh data (live /models with catalog fallback)
 /// and backfill env_key/base_url. Fetches models.dev itself. Reads and
 /// writes only providers.json — no config.toml involvement.
 pub fn update_providers_json() -> Res<Stats> {
+    update_providers_json_with(false)
+}
+
+pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
     let mut doc = jsonio::load_providers()?;
     let models_dev = fetch_models_dev()?;
     let mut stats = Stats::default();
@@ -362,10 +396,12 @@ pub fn update_providers_json() -> Res<Stats> {
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
         let Some(pinfo) = models_dev.get(&pid).filter(|p| p.is_object()).cloned() else {
-            println!(
-                "  warning: provider {} not found in models.dev; skipping",
-                core::py_repr(&pid)
-            );
+            if !quiet {
+                println!(
+                    "  warning: provider {} not found in models.dev; skipping",
+                    core::py_repr(&pid)
+                );
+            }
             stats.providers_missing += 1;
             continue;
         };
@@ -404,13 +440,16 @@ pub fn update_providers_json() -> Res<Stats> {
         // Bring the stored model list in line with the authoritative one:
         // add/remove/rename entries, then update each entry's attributes
         // from the current catalog.
-        let items = authority_items_for_provider(&pinfo, &effective_base_url, false);
+        let (items, _err) = authority_items_for_provider(&pinfo, &effective_base_url, quiet);
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
         reconcile_models_map(models_map, &items, &catalog_models, &mut stats);
         stats.providers_synced += 1;
     }
 
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("last_updated".into(), Value::String(last_updated_stamp()));
+    }
     jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
 
     Ok(stats)
@@ -420,6 +459,10 @@ pub fn update_providers_json() -> Res<Stats> {
 /// config.toml from it alone — enabled providers, table fields, table
 /// ownership, and pending deletions are all derived from the file.
 pub fn update_config_toml() -> Res<std::path::PathBuf> {
+    update_config_toml_with(false)
+}
+
+pub fn update_config_toml_with(quiet: bool) -> Res<std::path::PathBuf> {
     let mut doc = jsonio::load_providers()?;
 
     // Table ownership: configured providers plus remembered deletions.
@@ -454,7 +497,7 @@ pub fn update_config_toml() -> Res<std::path::PathBuf> {
         // base_url comes straight from providers.json; empty means the
         // provider has none stored and the catalog had nothing to backfill.
         let base_url = provider.get("base_url").and_then(Value::as_str).unwrap_or("");
-        if base_url.is_empty() {
+        if base_url.is_empty() && !quiet {
             println!(
                 "  warning: provider {} has no base URL; \
 tables will have an empty base_url",
@@ -647,6 +690,40 @@ pub fn print_sync_report(stats: &Stats, path: &std::path::Path, providers_doc: &
 mod tests {
     use super::*;
     use crate::test_support::grok_home_lock;
+
+    #[test]
+    fn last_updated_stamp_is_local_12h_mm_dd_yyyy() {
+        let s = last_updated_stamp();
+        let re = regex_lite_stamp(&s);
+        assert!(re, "last_updated stamp not MM-DD-YYYY HH:MM AM/PM: {s:?}");
+    }
+
+    fn regex_lite_stamp(s: &str) -> bool {
+        let b = s.as_bytes();
+        // MM-DD-YYYY[space]HH:MM[space]AM|PM
+        if b.len() != 19 {
+            return false;
+        }
+        let digits = |i: usize| b[i].is_ascii_digit();
+        digits(0)
+            && digits(1)
+            && b[2] == b'-'
+            && digits(3)
+            && digits(4)
+            && b[5] == b'-'
+            && digits(6)
+            && digits(7)
+            && digits(8)
+            && digits(9)
+            && b[10] == b' '
+            && digits(11)
+            && digits(12)
+            && b[13] == b':'
+            && digits(14)
+            && digits(15)
+            && b[16] == b' '
+            && (&b[17..] == b"AM" || &b[17..] == b"PM")
+    }
 
     /// Fixture models.dev payload exercising every model info field variant:
     /// context window + reasoning efforts, reasoning without efforts, plain

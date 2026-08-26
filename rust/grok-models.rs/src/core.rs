@@ -312,6 +312,142 @@ pub fn provider_label(p: &Value) -> String {
     format!("({name}) - {pid} [{state}]")
 }
 
+/// Main-list identity: `(name) - id`.
+pub fn provider_display(p: &Value) -> String {
+    let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+    let name = p
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(pid);
+    format!("({name}) - {pid}")
+}
+
+/// Padded `(name) - id [enabled/disabled]` rows (no env cell).
+pub fn format_provider_id_rows(rows: &[(String, String, bool)]) -> Vec<String> {
+    let names: Vec<String> = rows.iter().map(|(name, _, _)| format!("({name})")).collect();
+    let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let id_w = rows.iter().map(|(_, pid, _)| pid.len()).max().unwrap_or(0);
+    let token_col = if rows.is_empty() { 0 } else { name_w + 3 + id_w + 1 };
+    names
+        .iter()
+        .zip(rows.iter())
+        .map(|(nlab, (_, pid, enabled))| {
+            let token = if *enabled { "[enabled]" } else { "[disabled]" };
+            let head = format!("{:<name_w$} - {:<id_w$}", nlab, pid);
+            format!("{:<token_col$}{token}", head)
+        })
+        .collect()
+}
+
+/// `[disabled]` is the longer state token; pad `[enabled]` to this width so
+/// the env column starts on one vertical line.
+pub const PROVIDER_TOKEN_W: usize = 10;
+/// Gap between the padded `[enabled]`/`[disabled]` token and the env box.
+pub const PROVIDER_ENV_GAP: usize = 2;
+/// Left/right inner padding of the env black box, in columns.
+pub const PROVIDER_ENV_PAD: i32 = 1;
+pub const MODEL_DESC_LABEL: &str = "Model Descriptions";
+pub const UPDATE_LIST_LABEL: &str = "Update Model List";
+
+/// Env-cell text on a main-menu provider row (`ENV = value`), if any.
+pub fn provider_row_env_text(opt: &str) -> Option<&str> {
+    for tok in ["[enabled]", "[disabled]"] {
+        if let Some(p) = opt.find(tok) {
+            let rest = opt[p + tok.len()..].trim_start_matches(' ');
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// Column where `[enabled]` / `[disabled]` / `[date]` start on the main menu.
+/// Shared by provider rows and the Model Descriptions / Update Model List
+/// trailing rows so the tokens form one vertical line.
+pub fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
+    let name_w = providers
+        .iter()
+        .map(|p| {
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
+            format!("({name})").len()
+        })
+        .max()
+        .unwrap_or(0);
+    let id_w = providers
+        .iter()
+        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().len())
+        .max()
+        .unwrap_or(0);
+    let provider_col = if providers.is_empty() {
+        0
+    } else {
+        // "{name} - {id} " then token
+        name_w + 3 + id_w + 1
+    };
+    provider_col
+        .max(MODEL_DESC_LABEL.len() + 1)
+        .max(UPDATE_LIST_LABEL.len() + 1)
+}
+
+pub fn pad_state_label(label: &str, token: &str, token_col: usize) -> String {
+    let mut out = String::from(label);
+    if out.len() < token_col {
+        out.push_str(&" ".repeat(token_col - out.len()));
+    }
+    out.push_str(token);
+    out
+}
+
+/// Padded main-menu provider rows: aligned dashes, aligned state tokens,
+/// then a gap + env cell.
+pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
+    let names: Vec<String> = providers
+        .iter()
+        .map(|p| {
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
+            format!("({name})")
+        })
+        .collect();
+    let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let id_w = providers
+        .iter()
+        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().len())
+        .max()
+        .unwrap_or(0);
+    let token_col = provider_state_token_col(providers);
+    let env_w = providers
+        .iter()
+        .map(|p| first_env_key(&Value::Object(p.clone())).len())
+        .max()
+        .unwrap_or(0);
+    names
+        .iter()
+        .zip(providers.iter())
+        .map(|(name, p)| {
+            let state = if p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let token = format!("[{state}]");
+            let head = format!("{:<name_w$} - {:<id_w$}", name, pid);
+            let mut left = format!("{:<token_col$}{:<tw$}", head, token, tw = PROVIDER_TOKEN_W);
+            let envk = first_env_key(&Value::Object(p.clone()));
+            if !envk.is_empty() {
+                left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
+                left.push_str(&format!("{envk:<env_w$} = "));
+                left.push_str(&env_value(&envk));
+            }
+            left
+        })
+        .collect()
+}
+
 /// `_env_value`: first 10 chars + ellipsis, quoted.
 pub fn env_value(env_var: &str) -> String {
     let val = std::env::var(env_var).unwrap_or_default();
@@ -389,6 +525,59 @@ mod tests {
         );
         let p = json!({"id": "x", "name": "X", "enabled": false});
         assert_eq!(provider_label(&p), "(X) - x [disabled]");
+        assert_eq!(provider_display(&p), "(X) - x");
+        let rows = format_provider_id_rows(&[
+            ("A".into(), "a".into(), true),
+            ("Beta Name".into(), "long-id".into(), false),
+        ]);
+        let tok_a = rows[0].find('[').unwrap();
+        let tok_b = rows[1].find('[').unwrap();
+        assert_eq!(tok_a, tok_b, "state tokens must share a column:\n{}\n{}", rows[0], rows[1]);
+        assert!(rows[0].starts_with("(A)"), "{}", rows[0]);
+        assert!(rows[1].contains(" - long-id"), "{}", rows[1]);
+        assert!(rows[0].ends_with("[enabled]"), "{}", rows[0]);
+        assert!(rows[1].ends_with("[disabled]"), "{}", rows[1]);
+    }
+
+    #[test]
+    fn provider_menu_labels_aligns_ids_tokens_and_env() {
+        let a = json!({
+            "id": "a", "name": "A", "enabled": true, "env_key": "A_KEY"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let b = json!({
+            "id": "long-id", "name": "Beta Name", "enabled": false, "env_key": "LONGER_API_KEY"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let labels = provider_menu_labels(&[a.clone(), b.clone()]);
+        let tok_a = labels[0].find('[').unwrap();
+        let tok_b = labels[1].find('[').unwrap();
+        assert_eq!(tok_a, tok_b, "state tokens must share a column:\n{}\n{}", labels[0], labels[1]);
+        let env_a = labels[0].find("A_KEY").unwrap();
+        let env_b = labels[1].find("LONGER_API_KEY").unwrap();
+        assert_eq!(env_a, env_b, "env cells must share a column:\n{}\n{}", labels[0], labels[1]);
+        assert_eq!(
+            labels[0].find(" = "),
+            labels[1].find(" = "),
+            "equals must share a column:\n{}\n{}",
+            labels[0],
+            labels[1]
+        );
+        assert_eq!(
+            &labels[0][tok_a..tok_a + PROVIDER_TOKEN_W],
+            "[enabled] ",
+            "[enabled] must pad to [disabled] width"
+        );
+        assert_eq!(&labels[1][tok_b..tok_b + PROVIDER_TOKEN_W], "[disabled]");
+        let col = provider_state_token_col(&[a.clone(), b.clone()]);
+        let desc = pad_state_label(MODEL_DESC_LABEL, "[enabled]", col);
+        let upd = pad_state_label(UPDATE_LIST_LABEL, "[08-26-2026 03:15 PM]", col);
+        assert_eq!(desc.find('['), Some(tok_a), "Model Descriptions token must line up");
+        assert_eq!(upd.find('['), Some(tok_a), "Update Model List token must line up");
     }
 
     #[test]

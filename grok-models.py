@@ -60,6 +60,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def last_updated_stamp() -> str:
+    """Local `MM-DD-YYYY HH:MM AM/PM` for providers.json last_updated."""
+    now = datetime.now()
+    hour = now.hour % 12 or 12
+    ampm = "AM" if now.hour < 12 else "PM"
+    return f"{now.month:02d}-{now.day:02d}-{now.year} {hour:02d}:{now.minute:02d} {ampm}"
+
+
 def fail(message: str) -> None:
     raise SyncError(message)
 
@@ -80,7 +88,12 @@ def dump_json(path: Path, obj: object) -> None:
 # (import, add-provider, sync) produced them: fields in canonical order,
 # providers alphabetically by display name, models alphabetically by
 # display name.
-TOP_LEVEL_KEY_ORDER = ("include_descriptions", "providers", "removed_providers")
+TOP_LEVEL_KEY_ORDER = (
+    "include_descriptions",
+    "last_updated",
+    "providers",
+    "removed_providers",
+)
 PROVIDER_KEY_ORDER = ("id", "name", "env_key", "base_url", "enabled", "models")
 MODEL_KEY_ORDER = (
     "enabled",
@@ -346,23 +359,30 @@ def parse_openai_models_list(payload: object) -> list[tuple[str, str | None]] | 
     return items or None
 
 
+def live_fetch_error_status(url: str) -> str:
+    """TUI / CLI status when GET {base_url}/models fails. No HTTP body."""
+    return f"error {url}: fetch live model list failed"
+
+
 def try_fetch_provider_models(
-    base_url: str, quiet: bool = False
-) -> list[tuple[str, str | None]] | None:
-    """GET {base_url}/models. Returns parsed (id, name) rows or None on failure."""
+    base_url: str,
+) -> tuple[list[tuple[str, str | None]] | None, str | None]:
+    """GET {base_url}/models. Returns (rows, None) or (None, url) on failure.
+
+    Never prints — callers decide whether to surface the URL in the TUI
+    status line or as a one-line CLI message.
+    """
     if not isinstance(base_url, str) or not base_url:
-        return None
+        return None, None
     url = provider_models_url(base_url)
     try:
         payload = http_get_json(url)
-    except SyncError as exc:
-        if not quiet:
-            print(f"  warning: {exc}")
-        return None
+    except SyncError:
+        return None, url
     items = parse_openai_models_list(payload)
-    if items is None and not quiet:
-        print(f"  warning: no models list at {url}")
-    return items
+    if items is None:
+        return None, url
+    return items, None
 
 
 def catalog_models_dict(pinfo: dict) -> dict:
@@ -465,13 +485,16 @@ def reconcile_models_map(
 
 def authority_items_for_provider(
     pinfo: dict, base_url: str, quiet: bool = False
-) -> list[tuple[str, str | None]]:
+) -> tuple[list[tuple[str, str | None]], str | None]:
     catalog = catalog_models_dict(pinfo)
     if USE_PROVIDER_MODELS_ENDPOINT and base_url:
-        live = try_fetch_provider_models(base_url, quiet=quiet)
+        live, err_url = try_fetch_provider_models(base_url)
         if live is not None:
-            return live
-    return items_from_catalog(catalog)
+            return live, None
+        if err_url and not quiet:
+            print(live_fetch_error_status(err_url))
+        return items_from_catalog(catalog), err_url
+    return items_from_catalog(catalog), None
 
 
 def first_letter_cap(text: str) -> str:
@@ -571,7 +594,7 @@ def search_providers(models_dev: dict, term: str) -> str | None:
 
 _CURSES_FAILED = object()  # sentinel: curses couldn't run (not a tty, etc.)
 _SORT_TOGGLED = object()  # sentinel: main-menu S toggled Enabled Models sort
-_DESCRIPTIONS_TOGGLED = object()  # sentinel: main-menu D / preview row toggled
+_CURSES_IGNORE = object()  # leaked CSI/mouse after ESC; keep the current screen
 
 
 # Tokyo Night (Night/Storm) palette — values mirror grok-build's tokyonight.rs.
@@ -1030,6 +1053,31 @@ def _draw_seg_line(stdscr, y, x, segments, max_w) -> None:
         pass
 
 
+def _curses_getch(stdscr):
+    """Read a key, distinguishing a real ESC from a leaked CSI/mouse prefix.
+
+    Fast wheel bursts can outrun ncurses and surface as ESC + leftover bytes.
+    Treating those as ESC would pop Configure Models back to the provider
+    page. A lone ESC (nothing pending after escdelay) is still ESC."""
+    ch = stdscr.getch()
+    if ch != 27:
+        return ch
+    stdscr.nodelay(True)
+    try:
+        nxt = stdscr.getch()
+        if nxt in (-1, curses.ERR):
+            return 27
+        if nxt == getattr(curses, "KEY_MOUSE", -2):
+            return nxt
+        while True:
+            n = stdscr.getch()
+            if n in (-1, curses.ERR):
+                break
+        return _CURSES_IGNORE
+    finally:
+        stdscr.nodelay(False)
+
+
 def _curses_select_win(
     stdscr,
     options: list[str],
@@ -1043,6 +1091,8 @@ def _curses_select_win(
     preview: list | None = None,
     status: str | None = None,
     inline_edit: dict | None = None,
+    section_sep_before: int | None = None,
+    model_initial: tuple[str, str] | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme.
 
@@ -1068,6 +1118,20 @@ def _curses_select_win(
     # Scroll offset into the preview pane (the enabled-models listing under
     # the provider list). The provider rows above never move.
     preview_scroll = 0
+    # Cursor into Enabled Models rows (None = still on the option list).
+    model_cursor = None
+    if model_initial and preview:
+        preview_models = [
+            (k, ln[1], ln[2])
+            for k, ln in enumerate(preview)
+            if isinstance(ln, tuple) and ln[0] == "model"
+        ]
+        for j, (line_idx, pid, mid) in enumerate(preview_models):
+            if (pid, mid) == model_initial:
+                model_cursor = j
+                current = n - 1 if n else 0
+                preview_scroll = line_idx
+                break
     while True:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
@@ -1084,24 +1148,52 @@ def _curses_select_win(
         elif current >= top + list_h:
             top = current - list_h + 1
         
+        # Optional section rule between the provider rows and the trailing
+        # block (Model Descriptions / Add Provider / Add Model). It gets its
+        # own screen row and pushes the separator/preview down one line —
+        # but only while the whole menu plus the rule fits; otherwise it is
+        # skipped and the layout stays exactly as without it.
+        rule_row = None  # screen row of the rule, if drawn this frame
+        if section_sep_before is not None and n + 1 <= list_h:
+            trial_sep = 2 + n + 1  # separator after the shift
+            if trial_sep + 1 <= height - 5:
+                rule_row = 2 + (section_sep_before - top)
+                try:
+                    stdscr.addstr(rule_row, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
+                except curses.error:
+                    pass
+
+        env_hdr = "# required env_key values"
+        max_env_w = len(env_hdr)
+        has_env_cell = False
+        for opt in options:
+            env = _provider_row_env_text(opt)
+            if env:
+                has_env_cell = True
+                max_env_w = max(max_env_w, len(env))
+
         for row in range(list_h):
             idx = top + row
             if idx >= n:
                 break
+            y = 2 + row if rule_row is None or idx < section_sep_before else 2 + row + 1
             opt = options[idx]
             if multi:
                 mark = "●" if idx in state else "○"
                 line = f"  {mark}  {opt}"
             else:
                 line = f"  ▸ {opt}"
-            line = _clip_cols(line, max(1, width - 2))
+            # Clip only when drawing. Tokenizing a width-truncated env cell
+            # (cut off before '=') would treat the name as a command word and
+            # paint it gold like '='.
+            vis = _clip_cols(line, max(1, width - 2))
 
             is_sel = (idx == current)
             try:
                 # Row background first (theme bg, or selection bg for the cursor),
                 # then the label. A chevron sits right-aligned on expandable rows.
                 row_bg = curses.color_pair(P.SELECTED if is_sel else P.TEXT)
-                stdscr.addstr(2 + row, 0, "\u00a0" * (width - 1), row_bg)
+                stdscr.addstr(y, 0, "\u00a0" * (width - 1), row_bg)
                 label_attr = row_bg | curses.A_BOLD if is_sel and not multi else row_bg
                 # Colorize a [enabled]/[disabled] token green/red. The token may
                 # be followed by a trailing decorative icon, so locate it by
@@ -1114,6 +1206,12 @@ def _curses_select_win(
                 elif "[disabled]" in line:
                     token = "[disabled]"
                     tcolor = P.ERROR_SEL if is_sel else P.ERROR
+                elif "[" in line:
+                    start = line.index("[")
+                    end = line.find("]", start)
+                    if end >= 0 and start + 1 < len(line) and line[start + 1].isdigit():
+                        token = line[start : end + 1]
+                        tcolor = P.ENABLED_SEL if is_sel else P.ENABLED
                 if token:
                     pos = line.index(token)
                     head = line[:pos]
@@ -1121,43 +1219,99 @@ def _curses_select_win(
                     tok_attr = curses.color_pair(tcolor) | (
                         curses.A_BOLD if is_sel else 0
                     )
-                    _addstr_cols(stdscr, 2 + row, 0, _clip_cols(head, width - 2), label_attr)
+                    _addstr_cols(stdscr, y, 0, _clip_cols(head, width - 2), label_attr)
                     hx = _str_cols(head)
                     _addstr_cols(
                         stdscr,
-                        2 + row,
+                        y,
                         hx,
                         _clip_cols(token, max(0, (width - 2) - hx)),
                         tok_attr,
                     )
                     if tail:
                         tx = hx + _str_cols(token)
-                        _addstr_cols(
-                            stdscr,
-                            2 + row,
-                            tx,
-                            _clip_cols(tail, max(0, (width - 2) - tx)),
-                            label_attr,
-                        )
+                        nspaces = len(tail) - len(tail.lstrip(" "))
+                        env = tail[nspaces:]
+                        if nspaces:
+                            _addstr_cols(
+                                stdscr, y, tx,
+                                _clip_cols(" " * nspaces, max(0, (width - 2) - tx)),
+                                label_attr,
+                            )
+                            tx += nspaces
+                        if env:
+                            box_x = max(0, tx - _PROVIDER_ENV_PAD)
+                            box_w = max_env_w + 2 * _PROVIDER_ENV_PAD
+                            try:
+                                stdscr.addstr(
+                                    y, box_x,
+                                    " " * min(box_w, max(0, width - 1 - box_x)),
+                                    _cp(P.CODE_TEXT),
+                                )
+                            except curses.error:
+                                pass
+                            for t, a in _code_line_segments(env):
+                                if tx >= width - 2:
+                                    break
+                                run = _clip_cols(t, max(0, (width - 2) - tx))
+                                _addstr_cols(stdscr, y, tx, run, _cp(a))
+                                tx += _str_cols(run)
+                        elif tail:
+                            _addstr_cols(
+                                stdscr,
+                                y,
+                                tx,
+                                _clip_cols(tail[nspaces:], max(0, (width - 2) - tx)),
+                                label_attr,
+                            )
                 else:
                     _addstr_cols(
-                        stdscr, 2 + row, 0,
+                        stdscr, y, 0,
                         _pad_cols(line, width - 1),
                         label_attr,
                     )
                 if not multi:
-                    chev_x = max(width - 4, _str_cols(line) + 2)
+                    chev_x = max(width - 4, _str_cols(vis) + 2)
                     stdscr.addstr(
-                        2 + row,
+                        y,
                         chev_x,
                         "›",
                         curses.color_pair(P.CHEVRON),
                     )
             except curses.error:
                 pass
-        
-        # Separator line
+
+        # Env-column header on unused row 1 (main menu provider rows).
+        if not back_on_left and not multi and has_env_cell:
+            env_x = None
+            for opt in options:
+                for tok in ("[enabled]", "[disabled]"):
+                    if tok in opt:
+                        p = opt.index(tok) + len(tok)
+                        rest = opt[p:]
+                        nsp = len(rest) - len(rest.lstrip(" "))
+                        if rest.lstrip(" "):
+                            env_x = _str_cols("  ▸ ") + p + nsp
+                            break
+                if env_x is not None:
+                    break
+            if env_x is not None:
+                try:
+                    segs = _code_line_segments(env_hdr)
+                    box_x = max(0, env_x - _PROVIDER_ENV_PAD)
+                    box_w = max_env_w + 2 * _PROVIDER_ENV_PAD
+                    stdscr.addstr(1, box_x, " " * min(box_w, max(0, width - 1 - box_x)), _cp(P.CODE_TEXT))
+                    cx = env_x
+                    for t, a in segs:
+                        stdscr.addstr(1, cx, t, _cp(a))
+                        cx += len(t)
+                except curses.error:
+                    pass
+
+        # Separator line (pushed down one row while the rule is shown)
         sep_y = 2 + min(n, height - 4)
+        if rule_row is not None:
+            sep_y += 1
         try:
             stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
         except curses.error:
@@ -1167,17 +1321,16 @@ def _curses_select_win(
         # main menu) with the enabled-models listing, styled like --models.
         if preview:
             avail_top = sep_y + 1
-            # Reserve two rows above the legend for the transient status line.
-            avail_bottom = height - (5 if status else 3)
+            # Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
+            avail_bottom = height - 5
             max_lines = avail_bottom - avail_top + 1
             if max_lines > 0:
                 # Scroll window over the preview; provider rows above stay put.
+                # Paging is advertised by the legend's "PgUp/PgDn page" entry,
+                # so no inline truncation hint is drawn.
                 max_top = max(0, len(preview) - max_lines)
                 preview_top = min(preview_scroll, max_top)
-                hidden_below = len(preview) - (preview_top + max_lines)
                 draw_lines = preview[preview_top:preview_top + max_lines]
-                if hidden_below > 0:
-                    draw_lines = draw_lines[:-1] + [[("… (run --models for all)", P.MUTED)]]
                 for i, segs in enumerate(draw_lines):
                     y = avail_top + i
                     if isinstance(segs, tuple) and segs[0] == "heading":
@@ -1191,14 +1344,36 @@ def _curses_select_win(
                         except curses.error:
                             pass
                     else:
-                        _draw_seg_line(stdscr, y, 2, segs, width - 3)
+                        draw = segs[3] if isinstance(segs, tuple) and segs[0] == "model" else segs
+                        is_model_sel = (
+                            model_cursor is not None
+                            and isinstance(segs, tuple)
+                            and segs[0] == "model"
+                            and preview
+                            and preview_top + i
+                            == [
+                                k
+                                for k, ln in enumerate(preview)
+                                if isinstance(ln, tuple) and ln[0] == "model"
+                            ][model_cursor]
+                        )
+                        if is_model_sel:
+                            try:
+                                stdscr.addstr(
+                                    y, 0, "\u00a0" * (width - 1),
+                                    curses.color_pair(P.SELECTED),
+                                )
+                            except curses.error:
+                                pass
+                            draw = [(t, _pair_on_selection_bg(p)) for t, p in draw]
+                        _draw_seg_line(stdscr, y, 2, draw, width - 3)
 
         # Transient status line (e.g. post-add confirmation), kept a few rows
         # above the legend so long messages never clobber the menu chrome.
         if status:
             try:
                 stdscr.addstr(
-                    height - 4,
+                    height - 3,
                     2,
                     status[: max(0, width - 4)],
                     curses.color_pair(P.ENABLED),
@@ -1253,29 +1428,59 @@ def _curses_select_win(
                 draw_code_panel(y, panel_lines)
 
         # Legend bar
-        legend = [("↑/↓", "nav"), ("Enter/→", "select")]
+        legend = [("↑/↓", "nav")]
         if multi:
             legend.append(("Space", "toggle"))
         if back_on_left:
+            legend.append(("Enter/→", "select"))
             legend.append(("←", "back"))
         else:
-            # Menus without a back binding (main menu) quit via q instead;
-            # render it inline like the other bindings. S sort sits left of Q.
-            legend.append(("D", "desc"))
+            # Main menu: page sits left of select when the preview overflows.
+            pane_h = (height - 5) - (sep_y + 1) + 1
+            if preview and len(preview) > max(0, pane_h):
+                legend.append(("PgUp/PgDn", "page"))
+            legend.append(("Enter/→", "select"))
             legend.append(("S", "sort"))
             legend.append(("Q", "quit"))
         _curses_draw_legend(stdscr, legend)
         
         stdscr.refresh()
         _emit_sgr_bg()
-        ch = stdscr.getch()
+        ch = _curses_getch(stdscr)
+        if ch is _CURSES_IGNORE:
+            continue
         if ch == curses.KEY_RESIZE:
             _curses_theme_bkgd(stdscr)
             continue
-        if ch == curses.KEY_UP and current > 0:
-            current -= 1
-        elif ch == curses.KEY_DOWN and current < n - 1:
-            current += 1
+        preview_models = [
+            (k, ln[1], ln[2])
+            for k, ln in enumerate(preview or [])
+            if isinstance(ln, tuple) and ln[0] == "model"
+        ]
+        if ch == curses.KEY_UP:
+            if model_cursor is not None:
+                if model_cursor > 0:
+                    model_cursor -= 1
+                    if preview_models[model_cursor][0] < preview_scroll:
+                        preview_scroll = preview_models[model_cursor][0]
+                else:
+                    model_cursor = None
+            elif current > 0:
+                current -= 1
+        elif ch == curses.KEY_DOWN:
+            if model_cursor is not None:
+                if model_cursor + 1 < len(preview_models):
+                    model_cursor += 1
+                    # keep the picked model in the preview window
+            elif current < n - 1:
+                current += 1
+            elif preview_models:
+                model_cursor = 0
+                preview_scroll = 0
+                # start at first model line; heading stays pinned above via scroll
+                first = preview_models[0][0]
+                if first > 0:
+                    preview_scroll = 0
         elif multi and ch == ord(" "):
             if current in state:
                 state.discard(current)
@@ -1343,21 +1548,35 @@ def _curses_select_win(
                 # anything else (RESIZE etc.) just re-renders the row
             continue
         elif ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT):
-            # Enter on the "Model Descriptions [..]" preview row toggles it.
-            # The toggle is preview line 1 (right under the heading); Enter
-            # only counts when the provider cursor sits just above the pane
-            # and that row is actually visible.
-            toggle_visible = bool(
-                len(preview or []) > 1
-                and isinstance(preview[1], list)
-                and preview[1]
-                and isinstance(preview[1][0], tuple)
-                and preview[1][0][0] == "Model Descriptions "
-                and sep_y + 2 <= height - 4
-            )
-            if not multi and current == n - 1 and toggle_visible:
-                return _DESCRIPTIONS_TOGGLED
+            if model_cursor is not None and preview_models:
+                _i, pid, mid = preview_models[model_cursor]
+                return ("model", pid, mid)
             return sorted(state) if multi else current
+        elif ch == getattr(curses, "KEY_MOUSE", -1) and preview_models:
+            try:
+                _id, _mx, my, _z, bstate = curses.getmouse()
+            except curses.error:
+                continue
+            wheel_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
+            wheel_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
+            if not (wheel_up or wheel_down):
+                continue
+            avail_top = sep_y + 1
+            if not (avail_top <= my <= height - 5):
+                continue
+            if wheel_down:
+                preview_scroll = min(preview_scroll + 1, max(0, len(preview or []) - 1))
+            else:
+                preview_scroll = max(preview_scroll - 1, 0)
+            # Pin highlight to the first visible model row.
+            vis = [
+                j
+                for j, (idx, _, _) in enumerate(preview_models)
+                if idx >= preview_scroll
+            ]
+            if vis:
+                model_cursor = vis[0]
+                current = n - 1
         elif back_on_left and ch == curses.KEY_LEFT:
             return None
         elif ch == 27 and back_on_left:
@@ -1366,12 +1585,10 @@ def _curses_select_win(
         elif ch == ord("q") and not back_on_left:
             # q quits the tool; only bound at the main menu
             return None
-        elif ch == ord("d") and not back_on_left:
-            return _DESCRIPTIONS_TOGGLED
         elif ch in (curses.KEY_NPAGE, curses.KEY_PPAGE):
             # Page the preview pane; the provider list stays pinned above.
             avail_top = sep_y + 1
-            avail_bottom = height - (5 if status else 3)
+            avail_bottom = height - 5
             max_lines = avail_bottom - avail_top + 1
             if max_lines > 0:
                 max_top = max(0, len(preview or []) - max_lines)
@@ -1379,6 +1596,14 @@ def _curses_select_win(
                     preview_scroll = min(preview_scroll + max_lines, max_top)
                 else:
                     preview_scroll = max(preview_scroll - max_lines, 0)
+            if model_cursor is not None and preview_models:
+                vis = [
+                    j
+                    for j, (idx, _, _) in enumerate(preview_models)
+                    if idx >= preview_scroll
+                ]
+                if vis:
+                    model_cursor = vis[0]
         elif ch in (ord("s"), ord("S")) and not back_on_left:
             return (_SORT_TOGGLED, current)
 
@@ -1516,7 +1741,8 @@ def _curses_filter_list_win(
         )
 
         list_top = 2
-        list_h = max(1, height - list_top - 2 - bottom_padding)
+        # Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
+        list_h = max(1, height - list_top - 4 - bottom_padding)
         if snap_to_current:
             top = cur_vis
             if top + list_h > len(view):
@@ -1573,7 +1799,7 @@ def _curses_filter_list_win(
             if status:
                 try:
                     stdscr.addstr(
-                        height - 4,
+                        height - 3,
                         2,
                         status[: max(0, width - 4)],
                         curses.color_pair(P.ENABLED),
@@ -1585,7 +1811,9 @@ def _curses_filter_list_win(
 
         stdscr.refresh()
         _emit_sgr_bg()
-        ch = stdscr.getch()
+        ch = _curses_getch(stdscr)
+        if ch is _CURSES_IGNORE:
+            continue
         if ch == curses.KEY_RESIZE:
             _curses_theme_bkgd(stdscr)
             continue
@@ -1624,6 +1852,25 @@ def _curses_filter_list_win(
             query += chr(ch)
             current = 0
             top = 0
+        elif ch == getattr(curses, "KEY_MOUSE", -1):
+            try:
+                _id, _mx, my, _z, bstate = curses.getmouse()
+            except curses.error:
+                continue
+            if not (2 <= my < 2 + list_h):
+                continue
+            wheel_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
+            wheel_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
+            if wheel_down and top + 1 < len(view):
+                top += 1
+            elif wheel_up and top > 0:
+                top -= 1
+            else:
+                continue
+            for kind in view[top:]:
+                if kind[0] == "item":
+                    current = kind[1]
+                    break
 
 
 def _curses_model_search_win(
@@ -1679,7 +1926,7 @@ def _curses_model_search_win(
 
     _curses_filter_list_win(
         ids, stdscr,
-        title=f"{provider_title} | Configure models",
+        title=f"{provider_title} | Configure Model",
         legend=[("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")],
         compute_view=compute_view,
         render=render,
@@ -1698,11 +1945,8 @@ def _curses_confirm_win(stdscr, prompt: str) -> bool:
     _curses_init_colors()
     stdscr.erase()
     _curses_theme_bkgd(stdscr)
-    height, width = stdscr.getmaxyx()
-    safe_w = max(1, width - 1)
     try:
-        _curses_draw_header(stdscr, "  Confirm")
-        stdscr.addstr(2, 2, prompt[:width - 4], curses.color_pair(P.TEXT))
+        _curses_draw_header(stdscr, f"  Confirm: {prompt}")
         legend = [("Y", "yes"), ("N", "no"), ("ESC", "cancel")]
         _curses_draw_legend(stdscr, legend)
     except curses.error:
@@ -1710,7 +1954,9 @@ def _curses_confirm_win(stdscr, prompt: str) -> bool:
     stdscr.refresh()
     _emit_sgr_bg()
     while True:
-        ch = stdscr.getch()
+        ch = _curses_getch(stdscr)
+        if ch is _CURSES_IGNORE:
+            continue
         if ch in (ord("y"), ord("Y")):
             return True
         if ch in (ord("n"), ord("N"), 27):  # ESC cancels
@@ -1792,18 +2038,43 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             separators.append((free_sep_idx, P.FREE))
         return ordered, separators
 
-    def render(entry, is_sel):
-        pid, name = entry
+    def padded_labels() -> dict[str, str]:
+        rows = []
+        for pid, name in catalog:
+            p = next(
+                (
+                    pr
+                    for pr in providers_doc.get("providers", [])
+                    if isinstance(pr, dict) and pr.get("id") == pid
+                ),
+                None,
+            )
+            if p is not None:
+                pname = p.get("name") or name or pid
+                enabled = bool(p.get("enabled", True))
+            else:
+                pname = name or pid
+                enabled = False
+            rows.append((pname, pid, enabled))
+        return {pid: lab for (_n, pid, _e), lab in zip(rows, _format_provider_id_rows(rows))}
+
+    def render(entry, _is_sel):
+        pid, _name = entry
         is_added = pid in added_ids()
         is_sugg = pid in suggested and not is_added
-        mark = "●" if is_added else " "
-        label = f"{pid} ({name})" if name else pid
-        pair = P.SELECTED if is_sel else (P.ENABLED if is_added else (P.FREE if is_sugg else P.TEXT))
+        label = padded_labels().get(pid, pid)
+        if label.endswith("[enabled]"):
+            token, tok_pair = "[enabled]", P.ENABLED
+        elif label.endswith("[disabled]"):
+            token, tok_pair = "[disabled]", P.ERROR
+        else:
+            token, tok_pair = "", P.TEXT
+        head = label[: len(label) - len(token)] if token else label
+        name_pair = P.ENABLED if is_added else (P.FREE if is_sugg else P.TEXT)
         return [
             ("  ", P.TEXT),
-            (mark, P.ENABLED if is_added else P.TEXT),
-            ("  ", P.TEXT),
-            (label, pair),
+            (head, name_pair),
+            (token, tok_pair),
         ]
 
     def add(entry):
@@ -1812,10 +2083,12 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             return True  # already configured here; inert row
         before = len(providers_doc["providers"])
         try:
-            add_provider_entry(providers_doc, models_dev, pid, quiet=True)
+            fetch_err_url = add_provider_entry(providers_doc, models_dev, pid, quiet=True)
         except SyncError as exc:
             _curses_inline_error_win(stdscr, f"Add failed: {exc}")
             return True  # stay open
+        if fetch_err_url:
+            status["msg"] = live_fetch_error_status(fetch_err_url)
         if len(providers_doc["providers"]) > before:
             new_entry = next(
                 (
@@ -1834,61 +2107,87 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             result["added"] = (
                 f"Added provider '{pid}' with {n_models} models (all disabled)."
             )
-            status["msg"] = result["added"]
+            if fetch_err_url:
+                status["msg"] = live_fetch_error_status(fetch_err_url)
+            else:
+                status["msg"] = result["added"]
         return True  # stay open so more providers can be added
 
     _curses_filter_list_win(
         catalog, stdscr,
-        title="Add provider",
+        title="Add Provider",
         legend=[("↑/↓/←/→", "nav"), ("ESC", "cancel"), ("Enter", "add"), ("type", "filter")],
         compute_view=compute_view,
         render=render,
         on_enter=add,
-        bottom_padding=1,
+        bottom_padding=0,
         status_fn=lambda: status["msg"],
     )
     return result["added"]
+
+
+def _combo_enabled(providers_doc: dict, pid: str, mid: str) -> bool:
+    """True when (pid, mid) is an enabled model in providers.json."""
+    for p in providers_doc.get("providers", []):
+        if not isinstance(p, dict) or p.get("id") != pid:
+            continue
+        mm = p.get("models") if isinstance(p.get("models"), dict) else {}
+        m = mm.get(mid)
+        return bool(m.get("enabled", True)) if isinstance(m, dict) else False
+    return False
 
 
 def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str | None:
     """Modal: type-to-filter every models.dev model across all providers and
     enable the chosen one. Selecting a model of a provider that has not been
     added yet adds that provider first (all its other models disabled), then
-    enables just the chosen model. Returns a confirmation status line for the
-    parent menu, or None. Fetch/add errors surface inline so the surrounding
-    TUI session survives."""
+    enables just the chosen model. Already-enabled models stay listed at the
+    top (same enabled | free | rest sections as Configure Model) and are
+    inert. Returns a confirmation status line for the parent menu, or None.
+    Fetch/add errors surface inline so the surrounding TUI session survives."""
     try:
         models_dev = fetch_models_dev()
     except SyncError as exc:
         _curses_inline_error_win(stdscr, f"Fetch failed: {exc}")
         return None
 
-    # Index of combos already enabled in providers.json, so the catalog can
-    # skip them in one lookup (mirrors Add Provider excluding existing).
-    enabled_combos = set()
-    for p in providers_doc["providers"]:
-        if not isinstance(p, dict) or not p.get("id"):
-            continue
-        mm = p.get("models") if isinstance(p.get("models"), dict) else {}
-        for mid0, m0 in mm.items():
-            if isinstance(m0, dict) and bool(m0.get("enabled", True)):
-                enabled_combos.add((p.get("id"), mid0))
-
-    # Flatten the catalog across every provider; skip already-enabled combos.
+    # Flatten the catalog across every provider; already-enabled combos stay
+    # listed so the Enabled section can show what is configured.
     catalog = []
+    seen = set()
     for pid, pinfo in models_dev.items():
         if not isinstance(pinfo, dict):
             continue
         pname = pinfo.get("name") or pid
         api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
         for mid, minfo in api_models.items():
-            if (pid, mid) in enabled_combos:
-                continue
             mname = minfo.get("name") if isinstance(minfo, dict) else None
             catalog.append((pid, mid, mname or mid, str(pname)))
-    catalog.sort(key=lambda e: (e[2].lower(), e[0], e[1]))
+            seen.add((pid, mid))
+    for p in providers_doc.get("providers", []):
+        if not isinstance(p, dict) or not p.get("id"):
+            continue
+        pid = p.get("id")
+        pname = p.get("name") or pid
+        mm = p.get("models") if isinstance(p.get("models"), dict) else {}
+        for mid0, m0 in mm.items():
+            if (pid, mid0) in seen:
+                continue
+            if not isinstance(m0, dict) or not bool(m0.get("enabled", True)):
+                continue
+            mname = m0.get("name")
+            catalog.append(
+                (pid, mid0, mname if isinstance(mname, str) and mname else mid0, str(pname))
+            )
+            seen.add((pid, mid0))
 
     result = {"status": None}
+
+    def is_enabled(entry):
+        return _combo_enabled(providers_doc, entry[0], entry[1])
+
+    def is_free(entry):
+        return "free" in entry[1].lower()
 
     def compute_view(entries, query):
         term_l = query.lower()
@@ -1900,24 +2199,55 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
                 or term_l in entry[1].lower()  # model id
             )
 
-        return [e for e in entries if matches(e)], []
-
-    def render(entry, is_sel):
-        pid, mid, mname, pname = entry
-        return f"  {mname} ({pname}) - {pid}/{mid}", (
-            P.SELECTED if is_sel else P.TEXT
+        matched = [e for e in entries if matches(e)]
+        matched.sort(
+            key=lambda e: (
+                0 if is_enabled(e) else 1,
+                0 if is_free(e) else 1,
+                e[2].lower(),
+                e[0],
+                e[1],
+            )
         )
+        enabled_count = sum(1 for e in matched if is_enabled(e))
+        free_disabled_count = sum(1 for e in matched[enabled_count:] if is_free(e))
+        separators = []
+        if 0 < enabled_count < len(matched):
+            separators.append((enabled_count, P.CHEVRON))
+        free_sep_idx = enabled_count + free_disabled_count
+        if free_disabled_count > 0 and free_sep_idx < len(matched):
+            separators.append((free_sep_idx, P.FREE))
+        return matched, separators
+
+    def render(entry, _is_sel):
+        pid, mid, mname, pname = entry
+        enabled = is_enabled(entry)
+        free = is_free(entry)
+        mark = "●" if enabled else "○"
+        rest = f" ({pname}) - {pid}/{mid}"
+        name_pair = P.VALUE if enabled else (P.ENABLED if free else P.TEXT)
+        mark_pair = P.ENABLED if enabled else P.TEXT
+        return [
+            ("  ", P.TEXT),
+            (mark, mark_pair),
+            ("  ", P.TEXT),
+            (mname, name_pair),
+            (rest, P.TEXT),
+        ]
 
     def enable(entry):
         pid, mid, mname, pname = entry
+        if is_enabled(entry):
+            return True  # already enabled here; inert row
         existing = {
             p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)
         }
         added = False
+        fetch_err_url = None
         if pid not in existing:
             before = len(providers_doc["providers"])
             try:
-                add_provider_entry(providers_doc, models_dev, pid, quiet=True)
+                fetch_err_url = add_provider_entry(providers_doc, models_dev, pid, quiet=True)
             except SyncError as exc:
                 _curses_inline_error_win(stdscr, f"Add failed: {exc}")
                 return True  # stay open
@@ -1946,12 +2276,15 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         m["enabled"] = True
         dump_providers(PROVIDERS_PATH, providers_doc)
         prefix = f"Added provider '{pid}'. " if added else ""
-        result["status"] = f"{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
+        if fetch_err_url:
+            result["status"] = live_fetch_error_status(fetch_err_url)
+        else:
+            result["status"] = f"{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
         return False  # close back to the main menu
 
     _curses_filter_list_win(
         catalog, stdscr,
-        title="Add model",
+        title="Add Model",
         legend=[
             ("↑/↓/←/→", "nav"),
             ("ESC", "cancel"),
@@ -1961,9 +2294,56 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         compute_view=compute_view,
         render=render,
         on_enter=enable,
-        bottom_padding=1,
+        bottom_padding=0,
     )
     return result["status"]
+
+
+def _curses_set_reasoning(stdscr, providers_doc: dict, pid: str, mid: str) -> str | None:
+    """Popup: pick a reasoning_efforts value; persist default + reasoning_effort."""
+    provider = next(
+        (p for p in providers_doc.get("providers", [])
+         if isinstance(p, dict) and p.get("id") == pid),
+        None,
+    )
+    if provider is None:
+        return None
+    mm = provider.get("models") if isinstance(provider.get("models"), dict) else {}
+    m = mm.get(mid)
+    if not isinstance(m, dict):
+        return None
+    efforts = m.get("reasoning_efforts")
+    if not isinstance(efforts, list) or not efforts:
+        return "No reasoning levels"
+    labels = []
+    values = []
+    for row in efforts:
+        if not isinstance(row, dict):
+            continue
+        val = row.get("value")
+        if not isinstance(val, str) or not val:
+            continue
+        lab = row.get("label") if isinstance(row.get("label"), str) else val
+        if row.get("default"):
+            labels.append(f"{lab} [default]")
+        else:
+            labels.append(lab)
+        values.append(val)
+    if not values:
+        return "No reasoning levels"
+    mname = m.get("name") or mid
+    pick = _curses_select_win(
+        stdscr, labels, f"Reasoning: {mname}", back_on_left=True,
+    )
+    if pick is None or not isinstance(pick, int) or pick < 0 or pick >= len(values):
+        return None
+    chosen = values[pick]
+    m["reasoning_effort"] = chosen
+    for row in efforts:
+        if isinstance(row, dict):
+            row["default"] = row.get("value") == chosen
+    dump_providers(PROVIDERS_PATH, providers_doc)
+    return f"Reasoning set to {chosen}"
 
 
 def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
@@ -1973,10 +2353,24 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
     import curses
 
     def main(stdscr) -> bool:
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        except curses.error:
+            pass
+        try:
+            return _curses_config_loop(stdscr, providers_doc, providers)
+        finally:
+            try:
+                curses.mousemask(0)
+            except curses.error:
+                pass
+
+    def _curses_config_loop(stdscr, providers_doc, providers) -> bool:
         changed = False
         status_msg = None
         sort_by_name = False
         menu_cursor = 0
+        model_focus = None
         while True:
             # Order is providers.json (sorted only on dump).
             providers[:] = [
@@ -1985,41 +2379,75 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 if isinstance(p, dict) and p.get("id")
             ]
             ordered = providers
-            labels = [_provider_label(p) for p in ordered]
-            labels.append("➕ Add provider…")
-            labels.append("➕ Add model…")
+            # Trailing block after a section rule: Model Descriptions toggle
+            # (Enter toggles it), then the two add actions.
             descriptions_on = bool(
                 providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
             )
-            # "Model Descriptions [enabled/disabled]" now lives inside the
-            # Enabled Models preview (toggled via D or Enter on that row).
+            labels = _provider_menu_labels(ordered)
+            token_col = _provider_state_token_col(ordered)
+            desc = "enabled" if descriptions_on else "disabled"
+            labels.append(_pad_state_label(_MODEL_DESC_LABEL, f"[{desc}]", token_col))
+            last_updated = providers_doc.get("last_updated")
+            if isinstance(last_updated, str) and last_updated:
+                labels.append(
+                    _pad_state_label(_UPDATE_LIST_LABEL, f"[{last_updated}]", token_col)
+                )
+            else:
+                labels.append(_UPDATE_LIST_LABEL)
+            labels.append("➕ Add Provider…")
+            labels.append("➕ Add Model…")
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider",
                 status=status_msg,
                 preview=_build_config_models_preview(providers_doc, sort_by_name),
                 initial=menu_cursor,
+                section_sep_before=len(ordered),
+                model_initial=model_focus,
             )
             if isinstance(pi, tuple) and pi and pi[0] is _SORT_TOGGLED:
                 sort_by_name = not sort_by_name
                 menu_cursor = pi[1]
                 continue
-            if pi is _DESCRIPTIONS_TOGGLED:
-                new_val = not descriptions_on
-                providers_doc["include_descriptions"] = new_val
-                dump_providers(PROVIDERS_PATH, providers_doc)
-                status_msg = f"Model Descriptions {'enabled' if new_val else 'disabled'}."
-                changed = True
+            if isinstance(pi, tuple) and pi and pi[0] == "model":
+                model_focus = (pi[1], pi[2])
+                msg = _curses_set_reasoning(stdscr, providers_doc, pi[1], pi[2])
+                if msg:
+                    status_msg = msg
+                    changed = True
                 continue
+            model_focus = None
             menu_cursor = 0
             if pi is None:
                 return changed
             if pi == len(ordered):
+                new_val = not descriptions_on
+                providers_doc["include_descriptions"] = new_val
+                dump_providers(PROVIDERS_PATH, providers_doc)
+                status_msg = f"Model Descriptions {'enabled' if new_val else 'disabled'}"
+                changed = True
+                menu_cursor = pi  # stay on the toggle row, like Configure Models
+                continue
+            if pi == len(ordered) + 1:
+                try:
+                    stats = update_providers_json(quiet=True)
+                    fresh = load_providers()
+                    providers_doc.clear()
+                    providers_doc.update(fresh)
+                    n_sync = stats.get("providers_synced", 0)
+                    status_msg = f"Updated model list · {n_sync} providers synced"
+                    changed = True
+                except SyncError as exc:
+                    status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: fetch live model list failed"
+                menu_cursor = pi
+                continue
+            if pi == len(ordered) + 2:
                 added_msg = _curses_add_provider_win(providers_doc, providers, stdscr)
                 if added_msg:
                     status_msg = added_msg
                     changed = True
                 continue
-            if pi == len(ordered) + 1:
+            if pi == len(ordered) + 3:
                 enabled_msg = _curses_add_model_win(providers_doc, providers, stdscr)
                 if enabled_msg:
                     status_msg = enabled_msg
@@ -2045,10 +2473,10 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
 
                 bu_before = _bu_get()
                 actions = [
-                    "Configure models",
+                    "Configure Models",
                     f"Provider [{'enabled' if enabled else 'disabled'}]",
                     f"Base Url [{_bu_get()}]",
-                    "Delete provider",
+                    "Delete Provider",
                     "Back",
                 ]
                 env_key = first_env_key(selected)
@@ -2100,7 +2528,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     dump_providers(PROVIDERS_PATH, providers_doc)
                     changed = True
                 elif ai == 3:
-                    if _curses_confirm_win(stdscr, f"Delete provider {selected['id']!r}?"):
+                    if _curses_confirm_win(stdscr, f"Delete Provider {_provider_display(selected)}?"):
                         # Grab the enabled model ids from providers.json
                         # before the entry is removed.
                         enabled = enabled_model_ids(selected)
@@ -2117,7 +2545,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         # Flush the deletion into config.toml now so a re-add
                         # of the same provider this session can't collide
                         # with a pending deletion record.
-                        update_config_toml()
+                        update_config_toml(quiet=True)
                         changed = True
                     break
         return changed
@@ -2200,6 +2628,94 @@ def _config_models_numbered(ids: list[str], models: dict) -> bool:
 def _provider_label(p: dict) -> str:
     state = "enabled" if p.get("enabled", True) else "disabled"
     return f"({p.get('name') or p['id']}) - {p['id']} [{state}]"
+
+
+def _provider_display(p: dict) -> str:
+    """Main-list identity: `(name) - id`."""
+    pid = p.get("id") or ""
+    name = p.get("name") or pid
+    return f"({name}) - {pid}"
+
+
+def _format_provider_id_rows(rows: list[tuple[str, str, bool]]) -> list[str]:
+    """Padded `(name) - id [enabled/disabled]` rows (no env cell)."""
+    names = [f"({name})" for name, _pid, _en in rows]
+    name_w = max((len(n) for n in names), default=0)
+    id_w = max((len(pid) for _n, pid, _en in rows), default=0)
+    token_col = (name_w + 3 + id_w + 1) if rows else 0
+    out = []
+    for (_name, pid, enabled), nlab in zip(rows, names):
+        token = "[enabled]" if enabled else "[disabled]"
+        head = f"{nlab.ljust(name_w)} - {pid.ljust(id_w)}"
+        out.append(f"{head.ljust(token_col)}{token}")
+    return out
+
+
+# `[disabled]` is the longer state token; pad `[enabled]` to this width so
+# the env column starts on one vertical line.
+_PROVIDER_TOKEN_W = len("[disabled]")
+_PROVIDER_ENV_GAP = 2
+_PROVIDER_ENV_PAD = 1
+_MODEL_DESC_LABEL = "Model Descriptions"
+_UPDATE_LIST_LABEL = "Update Model List"
+
+
+def _provider_row_env_text(opt: str) -> str | None:
+    """Env-cell text on a main-menu provider row (`ENV = value`), if any."""
+    for tok in ("[enabled]", "[disabled]"):
+        if tok in opt:
+            rest = opt[opt.index(tok) + len(tok) :].lstrip(" ")
+            return rest or None
+    return None
+
+
+def _provider_state_token_col(providers: list) -> int:
+    """Column where `[enabled]` / `[disabled]` / `[date]` start on the main
+    menu. Shared by provider rows and the Model Descriptions / Update Model
+    List trailing rows so the tokens form one vertical line."""
+    names = [f"({p.get('name') or p['id']})" for p in providers]
+    name_w = max((len(n) for n in names), default=0)
+    id_w = max((len(p["id"]) for p in providers), default=0)
+    provider_col = (name_w + 3 + id_w + 1) if providers else 0
+    return max(
+        provider_col,
+        len(_MODEL_DESC_LABEL) + 1,
+        len(_UPDATE_LIST_LABEL) + 1,
+    )
+
+
+def _pad_state_label(label: str, token: str, token_col: int) -> str:
+    return f"{label.ljust(token_col)}{token}"
+
+
+def _provider_menu_labels(providers: list) -> list[str]:
+    """Padded main-menu provider rows: aligned dashes, aligned state tokens,
+    then a gap + env cell."""
+    names = [f"({p.get('name') or p['id']})" for p in providers]
+    name_w = max((len(n) for n in names), default=0)
+    id_w = max((len(p["id"]) for p in providers), default=0)
+    token_col = _provider_state_token_col(providers)
+    env_w = max(
+        (len(first_env_key(p)) for p in providers if first_env_key(p)),
+        default=0,
+    )
+    rows = []
+    for p, name in zip(providers, names):
+        state = "enabled" if p.get("enabled", True) else "disabled"
+        token = f"[{state}]"
+        head = f"{name.ljust(name_w)} - {p['id'].ljust(id_w)}"
+        left = f"{head.ljust(token_col)}{token.ljust(_PROVIDER_TOKEN_W)}"
+        envk = first_env_key(p)
+        if envk:
+            left = (
+                left
+                + (" " * _PROVIDER_ENV_GAP)
+                + envk.ljust(env_w)
+                + " = "
+                + _env_value(envk)
+            )
+        rows.append(left)
+    return rows
 
 
 def _provider_state_line(p: dict) -> str:
@@ -2388,6 +2904,29 @@ def render_models_text() -> int:
     return 0
 
 
+def _model_entry(providers: list, pid: str, mid: str) -> dict:
+    for p in providers:
+        if isinstance(p, dict) and p.get("id") == pid:
+            mm = p.get("models") if isinstance(p.get("models"), dict) else {}
+            m = mm.get(mid)
+            return m if isinstance(m, dict) else {}
+    return {}
+
+
+def _model_reasoning_level(m: dict) -> str:
+    efforts = m.get("reasoning_efforts")
+    if isinstance(efforts, list):
+        for row in efforts:
+            if isinstance(row, dict) and row.get("default"):
+                v = row.get("value")
+                if isinstance(v, str) and v:
+                    return v
+    v = m.get("reasoning_effort")
+    if isinstance(v, str) and v:
+        return v
+    return "none"
+
+
 def _build_config_models_preview(
     providers_doc: dict, sort_by_name: bool = False
 ) -> list:
@@ -2400,22 +2939,6 @@ def _build_config_models_preview(
         if isinstance(p, dict) and p.get("id")
     ]
     lines: list = []
-    # First element is a heading marker: ("heading", text) -> drawn as a
-    # full-width blue bar, like the screen title.
-    lines.append(("heading", "Enabled Models"))
-    # The Model Descriptions toggle sits directly below the heading, styled
-    # like an enabled/disabled state token (green when on, muted when off).
-    descriptions_on = bool(
-        providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
-    )
-    lines.append([
-        ("Model Descriptions ", P.TEXT),
-        (
-            "[enabled]" if descriptions_on else "[disabled]",
-            P.ENABLED if descriptions_on else P.DISABLED,
-        ),
-    ])
-    lines.append([("", P.TEXT)])  # gap under the models header
     model_rows: list = []
     for provider in providers:
         pid = provider["id"]
@@ -2434,51 +2957,23 @@ def _build_config_models_preview(
     if sort_by_name:
         model_rows.sort(key=lambda r: (r[0].lower(), r[1].lower(), r[2], r[3]))
     total_enabled = len(model_rows)
+    # First element is a heading marker: ("heading", text) -> drawn as a
+    # full-width blue bar, like the screen title. Count sits on the bar
+    # so paging cannot park a second "Summary" line on the status row.
+    lines.append(("heading", f"Enabled Models: {total_enabled}"))
+    lines.append([("", P.TEXT)])  # gap under the models header
     for mname, pname, pid, mid in model_rows:
-        lines.append([
+        level = _model_reasoning_level(_model_entry(providers, pid, mid))
+        level_pair = P.FREE if level != "none" else P.MUTED
+        lines.append(("model", pid, mid, [
             ("● ", P.ENABLED),
             (mname, P.VALUE),
-            (f" ({pname}) - {pid}/{mid}", P.TEXT),
-        ])
+            (f" ({pname}) ", P.TEXT),
+            (f"({level})", level_pair),
+        ]))
     if not total_enabled:
         lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
         return lines
-    lines.append([("", P.TEXT)])
-    # Env-var requirements rendered as a borderless black code panel with
-    # padding: green text, gray provider-name annotations, red for unset keys.
-    env_rows = []
-    for provider in providers:
-        env = first_env_key(provider)
-        if not env:
-            continue
-        val = _env_value(env)
-        pname = provider.get("name") or provider["id"]
-        env_rows.append((env, val, pname, val == '""'))
-    if env_rows:
-        w_env = max(len(e) for e, _, _, _ in env_rows)
-        w_val = max(len(v) for _, v, _, _ in env_rows)
-        rows_segs = [_code_line_segments("# required env_key values")]
-        for env, val, pname, missing in env_rows:
-            body = env.ljust(w_env) + " = " + val.ljust(w_val)
-            highlight = (0, w_env, P.CODE_ERROR) if missing else None
-            segs = _code_line_segments(body, highlight=highlight)
-            # Provider name renders as a shell comment, e.g. "  # OpenRouter".
-            segs.append(("  # " + pname, P.CODE_COMMENT))
-            rows_segs.append(segs)
-        panel_w = (
-            max(sum(len(t) for t, _ in segs) for segs in rows_segs)
-            + 2 * CODE_PANEL_PAD_X
-        )
-        for segs in rows_segs:
-            seg_len = sum(len(t) for t, _ in segs)
-            lines.append(
-                [(" " * CODE_PANEL_PAD_X, P.CODE_TEXT)]
-                + segs
-                + [(" "
-                    * max(0, panel_w - CODE_PANEL_PAD_X - seg_len),
-                    P.CODE_TEXT)]
-            )
-    lines.append([(f"Summary: {total_enabled} models enabled", P.MUTED)])
     return lines
 
 
@@ -2883,7 +3378,7 @@ def write_config_toml(
     return path
 
 
-def update_providers_json() -> dict:
+def update_providers_json(*, quiet: bool = False) -> dict:
     """Update phase (1 of 2): reconcile every configured provider's model list
     in providers.json against fresh data (live /models with catalog fallback)
     and backfill env_key/base_url. Fetches models.dev itself. Reads and
@@ -2911,7 +3406,8 @@ def update_providers_json() -> dict:
         pid = provider["id"]
         pinfo = models_dev.get(pid)
         if not isinstance(pinfo, dict):
-            print(f"  warning: provider {pid!r} not found in models.dev; skipping")
+            if not quiet:
+                print(f"  warning: provider {pid!r} not found in models.dev; skipping")
             stats["providers_missing"] += 1
             continue
         catalog_models = catalog_models_dict(pinfo)
@@ -2935,15 +3431,16 @@ def update_providers_json() -> dict:
             provider["base_url"] = catalog_api
         base_url = stored or ""
 
-        items = authority_items_for_provider(pinfo, base_url)
+        items, _err = authority_items_for_provider(pinfo, base_url, quiet=quiet)
         reconcile_models_map(models_map, items, catalog_models, stats)
         stats["providers_synced"] += 1
 
+    providers_doc["last_updated"] = last_updated_stamp()
     dump_providers(PROVIDERS_PATH, providers_doc)
     return stats
 
 
-def update_config_toml() -> Path:
+def update_config_toml(*, quiet: bool = False) -> Path:
     """Write phase (2 of 2): load providers.json from disk and render
     config.toml from it alone — enabled providers, table fields, table
     ownership, and pending deletions are all derived from the file."""
@@ -2989,7 +3486,7 @@ def update_config_toml() -> Path:
             if isinstance(provider.get("base_url"), str)
             else ""
         )
-        if not base_url:
+        if not base_url and not quiet:
             print(
                 f"  warning: provider {pid!r} has no base URL; "
                 f"tables will have an empty base_url"
@@ -3057,15 +3554,17 @@ def print_sync_report(stats: dict, path: Path, providers_doc: dict) -> None:
 
 def add_provider_entry(
     providers_doc: dict, models_dev: dict, provider_id: str, quiet: bool = False
-) -> None:
+) -> str | None:
     """Add provider_id to providers_doc with all models disabled and persist.
     quiet suppresses stdout reports — required when called inside the curses
-    TUI, where any raw print corrupts the screen."""
+    TUI, where any raw print corrupts the screen.
+    Returns the live /models URL if that fetch failed (catalog fallback used),
+    otherwise None."""
     existing = {p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)}
     if provider_id in existing:
         if not quiet:
             print(f"Provider {provider_id!r} already exists.")
-        return
+        return None
     pinfo = models_dev.get(provider_id)
     if not isinstance(pinfo, dict):
         fail(f"provider {provider_id!r} not found in models.dev")
@@ -3082,7 +3581,7 @@ def add_provider_entry(
     if isinstance(api_base, str) and api_base:
         entry["base_url"] = api_base
     base_url = entry.get("base_url") if isinstance(entry.get("base_url"), str) else ""
-    items = authority_items_for_provider(pinfo, base_url, quiet=quiet)
+    items, fetch_err_url = authority_items_for_provider(pinfo, base_url, quiet=quiet)
     if not items:
         fail(f"provider {provider_id!r} has no models in models.dev")
     models_map = seed_models_from_items(items, catalog_models)
@@ -3092,6 +3591,7 @@ def add_provider_entry(
     dump_providers(PROVIDERS_PATH, providers_doc)
     if not quiet:
         print(f"Added provider {provider_id!r} with {len(models_map)} models (all disabled).")
+    return fetch_err_url
 
 
 def cmd_search(term: str) -> int:
@@ -3196,9 +3696,9 @@ def _config_models(selected: dict, providers_doc: dict) -> bool:
     return changed
 
 
-def _confirm_delete(pid: str) -> bool:
+def _confirm_delete(label: str) -> bool:
     while True:
-        confirm = prompt_line(f"Delete provider {pid!r}? [no]", "no")
+        confirm = prompt_line(f"Delete Provider {label}? [no]", "no")
         parsed = parse_bool(confirm) if confirm else False
         if parsed is None:
             print("Enter yes or no.")
@@ -3225,9 +3725,9 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
         while True:
             enabled = bool(selected.get("enabled", True))
             actions = [
-                "Configure models",
+                "Configure Models",
                 f"{'Disable' if enabled else 'Enable'} provider",
-                "Delete provider",
+                "Delete Provider",
                 "Back",
             ]
             env_line = _env_status_line(first_env_key(selected))
@@ -3249,7 +3749,7 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                 print(f"{verb} provider {selected['id']!r}.")
                 changed = True
             elif ai == 2:
-                if _confirm_delete(selected["id"]):
+                if _confirm_delete(_provider_display(selected)):
                     # Grab the enabled model ids from providers.json before
                     # the entry is removed, then flush the deletion
                     # immediately.
@@ -3265,7 +3765,7 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                     ]
                     dump_providers(PROVIDERS_PATH, providers_doc)
                     update_config_toml()
-                    print(f"Deleted provider {selected['id']!r}.")
+                    print(f"Deleted Provider {_provider_display(selected)}.")
                     changed = True
                 break
     return changed

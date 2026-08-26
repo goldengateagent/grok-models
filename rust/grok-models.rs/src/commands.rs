@@ -546,7 +546,7 @@ pub fn cmd_disable_all() -> Res<i32> {
 }
 
 /// `add_provider_entry`: add provider with all models disabled and persist.
-pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet: bool) -> Res<()> {
+pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet: bool) -> Res<Option<String>> {
     let existing: Vec<String> = usable(doc)
         .iter()
         .map(|p| p.get("id").map(id_to_string).unwrap_or_default())
@@ -555,7 +555,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         if !quiet {
             println!("Provider {} already exists.", core::py_repr(provider_id));
         }
-        return Ok(());
+        return Ok(None);
     }
     let pinfo = match api.get(provider_id) {
         Some(p) if p.is_object() => p.clone(),
@@ -585,7 +585,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !api_url.is_empty() {
         entry.insert("base_url".into(), Value::String(api_url.to_string()));
     }
-    let items = crate::sync::authority_items_for_provider(&pinfo, api_url, quiet);
+    let (items, fetch_err_url) = crate::sync::authority_items_for_provider(&pinfo, api_url, quiet);
     if items.is_empty() {
         return fail(format!(
             "provider {} has no models in models.dev",
@@ -609,7 +609,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
             n_models
         );
     }
-    Ok(())
+    Ok(fetch_err_url)
 }
 
 fn id_to_string(v: &Value) -> String {

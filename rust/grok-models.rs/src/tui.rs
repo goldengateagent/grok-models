@@ -62,6 +62,9 @@ pub trait Stdscr {
     fn refresh(&mut self);
     fn addstr(&mut self, y: i32, x: i32, s: &str, attr: Paint);
     fn getch(&mut self) -> Key;
+    /// Force the next `refresh` to rewrite every cell. Used after a confirm
+    /// overlay so leftover title/body cells cannot survive a diff paint.
+    fn invalidate(&mut self) {}
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -78,6 +81,10 @@ pub enum Key {
     Resize,
     PageUp,
     PageDown,
+    /// Mouse-wheel up; payload is the 0-based row the event landed on.
+    WheelUp(i32),
+    /// Mouse-wheel down; payload is the 0-based row the event landed on.
+    WheelDown(i32),
     Eof,
 }
 
@@ -176,7 +183,7 @@ fn paint_for(p: P) -> Paint {
 
 /// Terminal columns for one scalar. `➕` (and similar emoji) are 2 columns
 /// even though East Asian Width is Neutral — treating them as 1 is what
-/// left `d`/`…` ghosts after `Add provider…` and ate the space in that label.
+/// left `d`/`…` ghosts after `Add Provider…` and ate the space in that label.
 fn char_cols(ch: char) -> usize {
     if ch == '➕' {
         return 2;
@@ -486,15 +493,25 @@ fn paint_bg<S: Stdscr>(stdscr: &mut S, paint: Paint) {
 /// painted green (enabled) or red (disabled) independent of the row color.
 fn split_state_token(line: &str) -> Option<(String, String, String)> {
     let (token, pos) = if let Some(p) = line.find("[enabled]") {
-        ("[enabled]", p)
+        ("[enabled]".to_string(), p)
     } else if let Some(p) = line.find("[disabled]") {
-        ("[disabled]", p)
+        ("[disabled]".to_string(), p)
+    } else if let Some(p) = line.find('[') {
+        let rest = &line[p + 1..];
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            match rest.find(']') {
+                Some(rel) => (line[p..=p + 1 + rel].to_string(), p),
+                None => return None,
+            }
+        } else {
+            return None;
+        }
     } else {
         return None;
     };
     let head = line[..pos].to_string();
     let tail = line[pos + token.len()..].to_string();
-    Some((head, token.to_string(), tail))
+    Some((head, token, tail))
 }
 
 // ---------------------------------------------------------------------------
@@ -556,9 +573,8 @@ pub enum SelectOutcome {
     Cancelled,
     /// Main-menu `S`: toggle Enabled Models sort; carries the current cursor.
     SortToggled(usize),
-    /// Main-menu `D` (or Enter on the toggle row in the preview): flip
-    /// include_descriptions.
-    DescriptionsToggled,
+    /// Enter on an Enabled Models row.
+    ModelPicked { pid: String, mid: String },
 }
 
 /// A line drawn in the `--config` main-menu preview panel beneath the provider
@@ -568,6 +584,22 @@ pub enum SelectOutcome {
 pub enum PreviewLine {
     Heading(String),
     Segs(Vec<(String, P)>),
+    Model {
+        pid: String,
+        mid: String,
+        segs: Vec<(String, P)>,
+    },
+}
+
+fn preview_model_entries(preview: &[PreviewLine]) -> Vec<(usize, String, String)> {
+    preview
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| match line {
+            PreviewLine::Model { pid, mid, .. } => Some((i, pid.clone(), mid.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Step the preview pane's scroll offset by one page (the visible preview
@@ -583,7 +615,9 @@ fn page_preview(
 ) {
     let Some(preview) = preview else { return };
     let avail_top = sep_y + 1;
-    let avail_bottom = h - if has_status { 5 } else { 3 };
+    let _ = has_status;
+    // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
+    let avail_bottom = h - 5;
     let max_lines = (avail_bottom - avail_top + 1).max(0) as usize;
     if max_lines == 0 {
         return;
@@ -594,6 +628,50 @@ fn page_preview(
     } else {
         preview_scroll.saturating_sub(max_lines)
     };
+}
+
+/// Restore the Enabled Models highlight to `(pid, mid)` after a reasoning
+/// popup (or a no-op Enter on a model with no levels).
+fn restore_preview_model_cursor(
+    preview: Option<&[PreviewLine]>,
+    focus: Option<(&str, &str)>,
+    n: usize,
+    current: &mut usize,
+    model_cursor: &mut Option<usize>,
+    preview_scroll: &mut usize,
+) {
+    let Some((pid, mid)) = focus else { return };
+    let Some(preview) = preview else { return };
+    let models = preview_model_entries(preview);
+    if let Some((i, (line_idx, _, _))) = models
+        .iter()
+        .enumerate()
+        .find(|(_, (_, p, m))| p == pid && m == mid)
+    {
+        *model_cursor = Some(i);
+        if n > 0 {
+            *current = n - 1;
+        }
+        *preview_scroll = *line_idx;
+    }
+}
+
+/// If the cursor is in the Enabled Models pane, pin it to the first model
+/// row that is still in the scroll window so a page/wheel never leaves the
+/// highlight on a row that scrolled off.
+fn pin_model_cursor_to_scroll(
+    preview: Option<&[PreviewLine]>,
+    preview_scroll: usize,
+    model_cursor: &mut Option<usize>,
+) {
+    if model_cursor.is_none() {
+        return;
+    }
+    let models = preview.map(preview_model_entries).unwrap_or_default();
+    *model_cursor = models
+        .iter()
+        .position(|(idx, _, _)| *idx >= preview_scroll)
+        .or_else(|| models.len().checked_sub(1));
 }
 
 pub fn select_win<S: Stdscr>(
@@ -608,6 +686,8 @@ pub fn select_win<S: Stdscr>(
     status: Option<&str>,
     preview: Option<&[PreviewLine]>,
     initial: usize,
+    section_sep_before: Option<usize>,
+    model_initial: Option<(&str, &str)>,
 ) -> Option<SelectOutcome> {
     if options.is_empty() {
         return None;
@@ -623,6 +703,15 @@ pub fn select_win<S: Stdscr>(
     // Scroll offset into the preview pane (the enabled-models listing under
     // the provider list). The provider rows above never move.
     let mut preview_scroll = 0usize;
+    let mut model_cursor: Option<usize> = None;
+    restore_preview_model_cursor(
+        preview,
+        model_initial,
+        n,
+        &mut current,
+        &mut model_cursor,
+        &mut preview_scroll,
+    );
 
     loop {
         stdscr.erase();
@@ -638,11 +727,48 @@ pub fn select_win<S: Stdscr>(
             top = current + 1 - list_h;
         }
 
-        for (row, _idx) in (0..list_h).enumerate() {
+        // Optional section rule between the provider rows and the trailing
+        // block (Model Descriptions / Add Provider / Add Model). It gets its
+        // own screen row and pushes the separator/preview down one line —
+        // but only while the whole menu plus the rule fits; otherwise it is
+        // skipped and the layout stays exactly as without it.
+        let rule_drawn = match section_sep_before {
+            Some(before) if n + 1 <= list_h => {
+                let trial_sep = 2 + n as i32 + 1; // separator after the shift
+                let avail_bottom = h - 5;
+                if trial_sep + 1 <= avail_bottom {
+                    let rule_y = 2 + (before - top) as i32;
+                    let rule = "─".repeat((w.max(1) as usize).saturating_sub(1));
+                    stdscr.addstr(rule_y, 0, &rule, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        let env_hdr = "# required env_key values";
+        let mut max_env_w = env_hdr.len();
+        let mut has_env_cell = false;
+        for opt in options {
+            if let Some(env) = crate::core::provider_row_env_text(opt) {
+                has_env_cell = true;
+                max_env_w = max_env_w.max(env.len());
+            }
+        }
+        let env_pad = crate::core::PROVIDER_ENV_PAD;
+
+        for row in 0..list_h {
             let idx = top + row;
             if idx >= n {
                 break;
             }
+            let y = if rule_drawn && idx >= section_sep_before.unwrap_or(usize::MAX) {
+                2 + row as i32 + 1
+            } else {
+                2 + row as i32
+            };
             let is_sel = idx == current;
             let row_paint = if is_sel {
                 Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold()
@@ -654,14 +780,18 @@ pub fn select_win<S: Stdscr>(
                 if is_sel { bg_color(P::Selected) } else { bg_color(P::Text) },
             );
             let fill = "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
-            stdscr.addstr((2 + row) as i32, 0, &fill, row_bg);
+            stdscr.addstr(y, 0, &fill, row_bg);
             let line = if multi {
                 let mark = if state[idx] { "●" } else { "○" };
                 format!("  {mark}  {}", options[idx])
             } else {
                 format!("  ▸ {}", options[idx])
             };
-            let line = clip_cols(&line, (w.max(1) as usize).saturating_sub(2));
+            // Clip only when drawing. Tokenizing a width-truncated env cell
+            // (cut off before '=') would treat the name as a command word and
+            // paint it gold like '='.
+            let vis_limit = (w.max(1) as usize).saturating_sub(2);
+            let vis = clip_cols(&line, vis_limit);
             let label = if !multi && is_sel {
                 row_paint
             } else {
@@ -670,7 +800,7 @@ pub fn select_win<S: Stdscr>(
             // Colorize a [enabled]/[disabled] token green/red, mirroring
             // Python's `_curses_select_win` (P.ENABLED/P.ERROR pairs).
             if let Some((head, token, tail)) = split_state_token(&line) {
-                let tok_enabled = token == "[enabled]";
+                let tok_enabled = token != "[disabled]";
                 let tok_fg = if tok_enabled {
                     theme::accent(2)
                 } else {
@@ -686,28 +816,107 @@ pub fn select_win<S: Stdscr>(
                     bg_color(P::Text)
                 };
                 let tok_paint = Paint::plain(tok_fg, tok_bg).bold_if(is_sel);
-                stdscr.addstr((2 + row) as i32, 0, &head, label);
+                stdscr.addstr(y, 0, &clip_cols(&head, vis_limit), label);
                 let tok_x = str_cols(&head) as i32;
-                stdscr.addstr((2 + row) as i32, tok_x, &token, tok_paint);
+                if (tok_x as usize) < vis_limit {
+                    stdscr.addstr(
+                        y,
+                        tok_x,
+                        &clip_cols(&token, vis_limit.saturating_sub(tok_x as usize)),
+                        tok_paint,
+                    );
+                }
                 if !tail.is_empty() {
-                    let tail_x = (str_cols(&head) + str_cols(&token)) as i32;
-                    stdscr.addstr((2 + row) as i32, tail_x, &tail, label);
+                    let mut tail_x = (str_cols(&head) + str_cols(&token)) as i32;
+                    let nspaces = tail.len() - tail.trim_start_matches(' ').len();
+                    let env = &tail[nspaces..];
+                    if nspaces > 0 {
+                        let gap = clip_cols(&" ".repeat(nspaces), vis_limit.saturating_sub(tail_x as usize));
+                        if !gap.is_empty() && (tail_x as usize) < vis_limit {
+                            stdscr.addstr(y, tail_x, &gap, label);
+                        }
+                        tail_x += nspaces as i32;
+                    }
+                    if !env.is_empty() {
+                        let box_x = (tail_x - env_pad).max(0);
+                        let box_w = max_env_w + 2 * env_pad as usize;
+                        let fill_w = box_w.min((w.max(1) as usize).saturating_sub(box_x as usize + 1));
+                        stdscr.addstr(
+                            y,
+                            box_x,
+                            &" ".repeat(fill_w),
+                            Paint::plain(tn_color(P::CodeText), bg_color(P::CodeText)),
+                        );
+                        let segs = code_line_segments(env, None);
+                        draw_seg_line(
+                            stdscr,
+                            y,
+                            tail_x,
+                            &segs,
+                            vis_limit.saturating_sub(tail_x as usize),
+                        );
+                    } else if nspaces == 0 {
+                        stdscr.addstr(
+                            y,
+                            tail_x,
+                            &clip_cols(&tail, vis_limit.saturating_sub(tail_x as usize)),
+                            label,
+                        );
+                    }
                 }
             } else {
                 stdscr.addstr(
-                    (2 + row) as i32,
+                    y,
                     0,
                     &pad_cols(&line, (w.max(1) as usize).saturating_sub(1), ' '),
                     label,
                 );
             }
             if !multi {
-                let chev_x = (str_cols(&line) as i32 + 2).max(w - 4);
-                stdscr.addstr((2 + row) as i32, chev_x, "›", Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+                let chev_x = (str_cols(&vis) as i32 + 2).max(w - 4);
+                stdscr.addstr(y, chev_x, "›", Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
             }
         }
 
-        let sep_y = 2 + (n.min(h as usize - 4) as i32);
+        // Env-column header on unused row 1 (main menu provider rows).
+        if !back_on_left && !multi && has_env_cell {
+            let mut env_x: Option<i32> = None;
+            for opt in options {
+                for tok in ["[enabled]", "[disabled]"] {
+                    if let Some(p) = opt.find(tok) {
+                        let after = p + tok.len();
+                        let rest = &opt[after..];
+                        let nsp = rest.len() - rest.trim_start_matches(' ').len();
+                        if !rest.trim_start_matches(' ').is_empty() {
+                            env_x = Some(str_cols("  ▸ ") as i32 + after as i32 + nsp as i32);
+                            break;
+                        }
+                    }
+                }
+                if env_x.is_some() {
+                    break;
+                }
+            }
+            if let Some(env_x) = env_x {
+                let segs = code_line_segments(env_hdr, None);
+                let box_x = (env_x - env_pad).max(0);
+                let box_w = max_env_w + 2 * env_pad as usize;
+                let fill_w = box_w.min((w.max(1) as usize).saturating_sub(box_x as usize + 1));
+                stdscr.addstr(
+                    1,
+                    box_x,
+                    &" ".repeat(fill_w),
+                    Paint::plain(tn_color(P::CodeText), bg_color(P::CodeText)),
+                );
+                draw_seg_line(stdscr, 1, env_x, &segs, box_w);
+            }
+        }
+
+        // Separator line (pushed down one row while the rule is shown)
+        let mut sep_y = 2 + (n.min(h as usize - 4) as i32);
+        if rule_drawn {
+            sep_y += 1;
+        }
         let sep = "─".repeat((w.max(1) as usize).saturating_sub(1));
         stdscr.addstr(sep_y, 0, &sep, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
 
@@ -716,24 +925,20 @@ pub fn select_win<S: Stdscr>(
         // The action menu passes no preview and may have a footer instead.
         if let Some(preview) = preview {
             let avail_top = sep_y + 1;
-            // Reserve two rows above the legend for the transient status line.
-            let avail_bottom = h - if status.is_some() { 5 } else { 3 };
+            // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
+            let avail_bottom = h - 5;
             let max_lines = (avail_bottom - avail_top + 1).max(0) as usize;
             if max_lines > 0 {
-                // Scroll window over the preview; provider rows above stay put.
+                // Scroll window over the preview; provider rows above stay
+                // put. Paging is advertised by the legend's "PgUp/PgDn page"
+                // entry, so no inline truncation hint is drawn.
                 let max_top = preview.len().saturating_sub(max_lines);
                 let preview_top = preview_scroll.min(max_top);
-                let hidden_below =
-                    preview.len().saturating_sub(preview_top + max_lines);
-                let mut draw_lines: Vec<PreviewLine> =
-                    preview[preview_top..].to_vec();
-                if hidden_below > 0 {
-                    draw_lines.truncate(max_lines.saturating_sub(1));
-                    draw_lines.push(PreviewLine::Segs(vec![(
-                        "… (run --models for all)".to_string(),
-                        P::Muted,
-                    )]));
-                }
+                // preview_scroll can exceed the window after a resize; clamp
+                // the slice so a stale offset can't panic.
+                let end = (preview_top + max_lines).min(preview.len());
+                let draw_lines: Vec<PreviewLine> =
+                    preview[preview_top..end].to_vec();
                 for (i, line) in draw_lines.iter().enumerate() {
                     let y = avail_top + i as i32;
                     match line {
@@ -746,6 +951,36 @@ pub fn select_win<S: Stdscr>(
                         }
                         PreviewLine::Segs(segs) => {
                             draw_seg_line(stdscr, y, 2, segs, (w.max(1) as usize).saturating_sub(3));
+                        }
+                        PreviewLine::Model { segs, .. } => {
+                            let models = preview_model_entries(preview);
+                            let abs_i = preview_top + i;
+                            let is_sel = model_cursor
+                                .and_then(|c| models.get(c).map(|(idx, _, _)| *idx == abs_i))
+                                .unwrap_or(false);
+                            if is_sel {
+                                let hfill = "\u{00a0}"
+                                    .repeat((w.max(1) as usize).saturating_sub(1));
+                                stdscr.addstr(
+                                    y,
+                                    0,
+                                    &hfill,
+                                    Paint::plain(tn_color(P::Selected), bg_color(P::Selected)),
+                                );
+                                let sel: Vec<(String, P)> = segs
+                                    .iter()
+                                    .map(|(t, _)| (t.clone(), P::Selected))
+                                    .collect();
+                                draw_seg_line(
+                                    stdscr,
+                                    y,
+                                    2,
+                                    &sel,
+                                    (w.max(1) as usize).saturating_sub(3),
+                                );
+                            } else {
+                                draw_seg_line(stdscr, y, 2, segs, (w.max(1) as usize).saturating_sub(3));
+                            }
                         }
                     }
                 }
@@ -760,7 +995,7 @@ pub fn select_win<S: Stdscr>(
                 .take((w.max(1) as usize).saturating_sub(4))
                 .collect();
             stdscr.addstr(
-                h - 4,
+                h - 3,
                 2,
                 &trunc,
                 Paint::plain(tn_color(P::Enabled), bg_color(P::Enabled)),
@@ -790,17 +1025,24 @@ pub fn select_win<S: Stdscr>(
 
         let mut legend: Vec<(String, String)> = vec![
             ("↑/↓".to_string(), "nav".to_string()),
-            ("Enter/→".to_string(), "select".to_string()),
         ];
         if multi {
             legend.push(("Space".to_string(), "toggle".to_string()));
         }
         if back_on_left {
+            legend.push(("Enter/→".to_string(), "select".to_string()));
             legend.push(("←".to_string(), "back".to_string()));
         } else {
-            // On the main menu (where q actually quits) "S sort" sits left of
-            // "Q quit", separated by the legend's "│" separator.
-            legend.push(("D".to_string(), "desc".to_string()));
+            // Main menu: page sits left of select when the preview overflows.
+            if let Some(pv) = preview {
+                let avail_top = sep_y + 1;
+                let avail_bottom = h - 5;
+                let visible = ((avail_bottom - avail_top + 1).max(0)) as usize;
+                if pv.len() > visible {
+                    legend.push(("PgUp/PgDn".to_string(), "page".to_string()));
+                }
+            }
+            legend.push(("Enter/→".to_string(), "select".to_string()));
             legend.push(("S".to_string(), "sort".to_string()));
             legend.push(("Q".to_string(), "quit".to_string()));
         }
@@ -813,26 +1055,43 @@ pub fn select_win<S: Stdscr>(
             Key::Resize => {
                 paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
             }
-            Key::Up if current > 0 => current -= 1,
-            Key::Down if current + 1 < n => current += 1,
+            Key::Up => {
+                if let Some(c) = model_cursor {
+                    if c > 0 {
+                        model_cursor = Some(c - 1);
+                    } else {
+                        model_cursor = None;
+                    }
+                } else if current > 0 {
+                    current -= 1;
+                }
+            }
+            Key::Down => {
+                let models = preview.map(preview_model_entries).unwrap_or_default();
+                if let Some(c) = model_cursor {
+                    if c + 1 < models.len() {
+                        model_cursor = Some(c + 1);
+                    }
+                } else if current + 1 < n {
+                    current += 1;
+                } else if !models.is_empty() && !back_on_left {
+                    model_cursor = Some(0);
+                }
+            }
             Key::Char(' ') if multi => {
                 state[current] = !state[current];
             }
             Key::Enter | Key::Right => {
-                // Enter on the "Model Descriptions [..]" preview row toggles
-                // it. The toggle is preview line 1 (right under the heading);
-                // Enter only counts when the provider cursor sits just above
-                // the pane and that row is actually visible.
-                let toggle_visible = preview.is_some()
-                    && preview.unwrap().len() > 1
-                    && matches!(
-                        &preview.unwrap()[1],
-                        PreviewLine::Segs(segs)
-                            if segs.first().map(|(t, _)| t.as_str()) == Some("Model Descriptions ")
-                    )
-                    && sep_y + 2 <= h - 4;
-                if !multi && current == n - 1 && toggle_visible {
-                    return Some(SelectOutcome::DescriptionsToggled);
+                if let Some(c) = model_cursor {
+                    if let Some(preview) = preview {
+                        let models = preview_model_entries(preview);
+                        if let Some((_, pid, mid)) = models.get(c) {
+                            return Some(SelectOutcome::ModelPicked {
+                                pid: pid.clone(),
+                                mid: mid.clone(),
+                            });
+                        }
+                    }
                 }
                 if multi {
                     let picked: Vec<usize> = (0..n).filter(|i| state[*i]).collect();
@@ -841,16 +1100,48 @@ pub fn select_win<S: Stdscr>(
                     return Some(SelectOutcome::Picked(current));
                 }
             }
+            Key::WheelDown(y) => {
+                let models = preview.map(preview_model_entries).unwrap_or_default();
+                let avail_top = sep_y + 1;
+                if !models.is_empty()
+                    && !back_on_left
+                    && y >= avail_top
+                    && y <= h - 5
+                {
+                    let max_top = preview.map(|p| p.len().saturating_sub(1)).unwrap_or(0);
+                    preview_scroll = (preview_scroll + 1).min(max_top);
+                    model_cursor = Some(0);
+                    pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
+                    current = n.saturating_sub(1);
+                }
+            }
+            Key::WheelUp(y) => {
+                let models = preview.map(preview_model_entries).unwrap_or_default();
+                let avail_top = sep_y + 1;
+                if !models.is_empty()
+                    && !back_on_left
+                    && y >= avail_top
+                    && y <= h - 5
+                {
+                    preview_scroll = preview_scroll.saturating_sub(1);
+                    model_cursor = Some(0);
+                    pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
+                    current = n.saturating_sub(1);
+                }
+            }
             Key::Left | Key::Esc if back_on_left => return Some(SelectOutcome::Cancelled),
             Key::Char('q') if !back_on_left => return Some(SelectOutcome::Cancelled),
-            Key::Char('d') | Key::Char('D') if !back_on_left => {
-                return Some(SelectOutcome::DescriptionsToggled);
-            }
             Key::Char('s') | Key::Char('S') if !back_on_left => {
                 return Some(SelectOutcome::SortToggled(current));
             }
-            Key::PageDown => page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, true),
-            Key::PageUp => page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, false),
+            Key::PageDown => {
+                page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, true);
+                pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
+            }
+            Key::PageUp => {
+                page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, false);
+                pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
+            }
             Key::Interrupt => return Some(SelectOutcome::Cancelled),
             _ => {}
         }
@@ -966,8 +1257,9 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
         );
 
         let list_top = 2usize;
+        // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
         let list_h = ((h as usize)
-            .saturating_sub(list_top + 2 + bottom_pad))
+            .saturating_sub(list_top + 4 + bottom_pad))
         .max(1);
         if snap_to_current {
             top = cur_vis;
@@ -1032,7 +1324,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                     .take((w.max(1) as usize).saturating_sub(4))
                     .collect();
                 stdscr.addstr(
-                    h - 4,
+                    h - 3,
                     2,
                     &trunc,
                     Paint::plain(tn_color(P::Enabled), bg_color(P::Enabled)),
@@ -1081,6 +1373,44 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                 query.push(c);
                 current = 0;
                 top = 0;
+            }
+            Key::WheelDown(y) => {
+                let list_bottom = (list_top + list_h) as i32;
+                if y < list_top as i32 || y >= list_bottom {
+                    continue;
+                }
+                if !view.is_empty() && top + 1 < view.len() {
+                    top += 1;
+                }
+                if let Some(i) = view[top.min(view.len().saturating_sub(1))..]
+                    .iter()
+                    .find_map(|r| match r {
+                        FilterViewRow::Item(i) => Some(*i),
+                        _ => None,
+                    })
+                {
+                    current = i;
+                }
+            }
+            Key::WheelUp(y) => {
+                let list_bottom = (list_top + list_h) as i32;
+                if y < list_top as i32 || y >= list_bottom {
+                    continue;
+                }
+                if top > 0 {
+                    top -= 1;
+                }
+                if let Some(i) = view.get(top).and_then(|r| match r {
+                    FilterViewRow::Item(i) => Some(*i),
+                    FilterViewRow::Sep(_) => view[top..]
+                        .iter()
+                        .find_map(|r| match r {
+                            FilterViewRow::Item(i) => Some(*i),
+                            _ => None,
+                        }),
+                }) {
+                    current = i;
+                }
             }
             _ => {}
         }
@@ -1189,10 +1519,7 @@ pub fn model_search_win<S: Stdscr>(
 pub fn confirm_win<S: Stdscr>(stdscr: &mut S, prompt: &str) -> bool {
     stdscr.erase();
     paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-    draw_header(stdscr, "  Confirm");
-    let (h, w) = stdscr.getmaxyx();
-    let trunc: String = prompt.chars().take((w.max(1) as usize).saturating_sub(4)).collect();
-    stdscr.addstr(2, 2, &trunc, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
+    draw_header(stdscr, &format!("  Confirm: {prompt}"));
     draw_legend(
         stdscr,
         &[
@@ -1201,13 +1528,17 @@ pub fn confirm_win<S: Stdscr>(stdscr: &mut S, prompt: &str) -> bool {
             ("ESC".to_string(), "cancel".to_string()),
         ],
     );
-    let _ = h;
     stdscr.refresh();
     loop {
         match stdscr.getch() {
-            Key::Char('y') | Key::Char('Y') => return true,
-            Key::Char('n') | Key::Char('N') | Key::Esc => return false,
-            Key::Interrupt => return false,
+            Key::Char('y') | Key::Char('Y') => {
+                stdscr.invalidate();
+                return true;
+            }
+            Key::Char('n') | Key::Char('N') | Key::Esc | Key::Interrupt => {
+                stdscr.invalidate();
+                return false;
+            }
             _ => {}
         }
     }
@@ -1237,6 +1568,7 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
     stdscr.refresh();
     let _ = emit_sgr_bg_keep_alive();
     let _ = stdscr.getch();
+    stdscr.invalidate();
 }
 
 /// Filter-list model for the add-provider modal: live-filter the FULL
@@ -1264,6 +1596,45 @@ impl<'a> AddProviderPicker<'a> {
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .filter(|id| !id.is_empty())
+            .collect()
+    }
+
+    fn padded_labels(&self) -> std::collections::HashMap<String, String> {
+        let added = self.added_ids();
+        let mut rows: Vec<(String, String, bool)> = Vec::new();
+        if let Some(obj) = self.api.as_object() {
+            for (pid, pinfo) in obj {
+                if !pinfo.is_object() {
+                    continue;
+                }
+                let cat_name = pinfo
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(pid);
+                if added.contains(pid) {
+                    let p = usable(self.doc)
+                        .into_iter()
+                        .find(|pr| pr.get("id").and_then(Value::as_str) == Some(pid));
+                    let name = p
+                        .as_ref()
+                        .and_then(|pr| pr.get("name").and_then(Value::as_str))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(cat_name);
+                    let enabled = p
+                        .as_ref()
+                        .map(|pr| crate::get_bool_obj(pr, "enabled", true))
+                        .unwrap_or(false);
+                    rows.push((name.to_string(), pid.clone(), enabled));
+                } else {
+                    rows.push((cat_name.to_string(), pid.clone(), false));
+                }
+            }
+        }
+        core::format_provider_id_rows(&rows)
+            .into_iter()
+            .zip(rows.iter())
+            .map(|(lab, (_, pid, _))| (pid.clone(), lab))
             .collect()
     }
 }
@@ -1324,30 +1695,30 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         (ordered, separators)
     }
 
-    fn render(&self, entry: &(String, String), is_sel: bool) -> Vec<(String, P)> {
-        let (pid, name) = entry;
+    fn render(&self, entry: &(String, String), _is_sel: bool) -> Vec<(String, P)> {
+        let (pid, _name) = entry;
         let added = self.added_ids().contains(pid);
         let suggested = SUGGESTED_PROVIDER_IDS.contains(&pid.as_str()) && !added;
-        let label = if name.is_empty() {
-            format!("  {pid}")
+        let labels = self.padded_labels();
+        let label = labels.get(pid).cloned().unwrap_or_else(|| pid.clone());
+        let (head, token, tok_pair) = if let Some(rest) = label.strip_suffix("[enabled]") {
+            (rest.to_string(), "[enabled]".to_string(), P::Enabled)
+        } else if let Some(rest) = label.strip_suffix("[disabled]") {
+            (rest.to_string(), "[disabled]".to_string(), P::Error)
         } else {
-            format!("  {pid} ({name})")
+            (label, String::new(), P::Text)
         };
-        let pair = if is_sel {
-            P::Selected
-        } else if added {
+        let name_pair = if added {
             P::Enabled
         } else if suggested {
             P::Free
         } else {
             P::Text
         };
-        let mark_pair = if is_sel { P::Selected } else { P::Enabled };
         vec![
             ("  ".to_string(), P::Text),
-            ("●".to_string(), mark_pair),
-            ("  ".to_string(), P::Text),
-            (label, pair),
+            (head, name_pair),
+            (token, tok_pair),
         ]
     }
 
@@ -1356,11 +1727,14 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         if self.added_ids().contains(pid) {
             return true; // already configured; inert row (delete via its menu)
         }
-        if let Err(e) = crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
-            // Add errors surface inline so the surrounding session survives.
-            inline_error_win(stdscr, &format!("Add failed: {}", e.0));
-            return true; // stay open
-        }
+        let fetch_err_url = match crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
+            Err(e) => {
+                // Add errors surface inline so the surrounding session survives.
+                inline_error_win(stdscr, &format!("Add failed: {}", e.0));
+                return true; // stay open
+            }
+            Ok(url) => url,
+        };
         // dump_providers already wrote name-sorted order back into doc.
         let mut model_count = 0usize;
         if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
@@ -1375,7 +1749,10 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         self.added = Some(format!(
             "Added provider '{pid}' with {model_count} models (all disabled)."
         ));
-        *self.status.borrow_mut() = self.added.clone();
+        *self.status.borrow_mut() = match fetch_err_url {
+            Some(url) => Some(crate::sync::live_fetch_error_status(&url)),
+            None => self.added.clone(),
+        };
         true // stay open so more providers can be added
     }
 }
@@ -1420,7 +1797,7 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
     filter_list_win_with(
         stdscr,
         &catalog,
-        "Add provider",
+        "Add Provider",
         &[
             ("↑/↓/←/→".to_string(), "nav".to_string()),
             ("ESC".to_string(), "cancel".to_string()),
@@ -1428,7 +1805,7 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
             ("type".to_string(), "filter".to_string()),
         ],
         &mut picker,
-        1,
+        0,
         Some(&move || status_for_fn.borrow().clone()),
     );
     picker.added
@@ -1519,48 +1896,80 @@ pub fn edit_inline_row<S: Stdscr>(
 // Add-model modal: cross-provider catalog search
 // ---------------------------------------------------------------------------
 
-/// Flatten every models.dev model across all providers, skipping combos that
-/// are already enabled in the doc (default-enabled counts as enabled).
-/// Entries: (pid, mid, model display name, provider display name), sorted by
-/// (display name lower, pid, mid).
-fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, String, String)> {
-    let mut enabled_combos: std::collections::HashSet<(String, String)> = Default::default();
-    if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
-        for p in arr {
-            let Some(pid) = p.get("id").and_then(Value::as_str) else { continue };
-            let Some(mm) = p.get("models").and_then(Value::as_object) else { continue };
-            for (mid, m) in mm {
-                if m.is_object() && crate::get_bool_val(m, "enabled", true) {
-                    enabled_combos.insert((pid.to_string(), mid.clone()));
-                }
-            }
-        }
-    }
-
-    let mut catalog: Vec<(String, String, String, String)> = Vec::new();
-    let Some(api_obj) = api.as_object() else { return catalog };
-    for (pid, pinfo) in api_obj {
-        if !pinfo.is_object() {
+/// True when `(pid, mid)` is an enabled model in `doc`.
+fn combo_enabled(doc: &Value, pid: &str, mid: &str) -> bool {
+    let Some(arr) = doc.get("providers").and_then(Value::as_array) else {
+        return false;
+    };
+    for p in arr {
+        if p.get("id").and_then(Value::as_str) != Some(pid) {
             continue;
         }
-        let pname = pinfo.get("name").and_then(Value::as_str).filter(|s| !s.is_empty())
-            .unwrap_or(pid);
-        let api_models = pinfo.get("models").and_then(Value::as_object);
-        for (mid, minfo) in api_models.into_iter().flatten() {
-            if enabled_combos.contains(&(pid.clone(), mid.clone())) {
+        let Some(mm) = p.get("models").and_then(Value::as_object) else {
+            return false;
+        };
+        return mm
+            .get(mid)
+            .is_some_and(|m| m.is_object() && crate::get_bool_val(m, "enabled", true));
+    }
+    false
+}
+
+/// Flatten every models.dev model across all providers. Already-enabled
+/// combos stay listed so the Enabled section can show what is configured;
+/// extra enabled models that exist only in the doc are appended.
+/// Entries: (pid, mid, model display name, provider display name).
+fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, String, String)> {
+    let mut catalog: Vec<(String, String, String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = Default::default();
+    if let Some(api_obj) = api.as_object() {
+        for (pid, pinfo) in api_obj {
+            if !pinfo.is_object() {
                 continue;
             }
-            let mname = minfo
+            let pname = pinfo
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-                .unwrap_or(mid);
-            catalog.push((pid.clone(), mid.clone(), mname.to_string(), pname.to_string()));
+                .unwrap_or(pid);
+            let api_models = pinfo.get("models").and_then(Value::as_object);
+            for (mid, minfo) in api_models.into_iter().flatten() {
+                let mname = minfo
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(mid);
+                catalog.push((pid.clone(), mid.clone(), mname.to_string(), pname.to_string()));
+                seen.insert((pid.clone(), mid.clone()));
+            }
         }
     }
-    catalog.sort_by(|a, b| {
-        (a.2.to_lowercase(), a.0.clone(), a.1.clone()).cmp(&(b.2.to_lowercase(), b.0.clone(), b.1.clone()))
-    });
+    if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
+        for p in arr {
+            let Some(pid) = p.get("id").and_then(Value::as_str) else { continue };
+            let pname = p
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(pid);
+            let Some(mm) = p.get("models").and_then(Value::as_object) else { continue };
+            for (mid, m) in mm {
+                if seen.contains(&(pid.to_string(), mid.clone())) {
+                    continue;
+                }
+                if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
+                    continue;
+                }
+                let mname = m
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(mid);
+                catalog.push((pid.to_string(), mid.clone(), mname.to_string(), pname.to_string()));
+                seen.insert((pid.to_string(), mid.clone()));
+            }
+        }
+    }
     catalog
 }
 
@@ -1568,6 +1977,12 @@ struct AddModelPicker<'a> {
     doc: &'a mut Value,
     api: Value,
     status: Option<String>,
+}
+
+impl<'a> AddModelPicker<'a> {
+    fn is_enabled(&self, pid: &str, mid: &str) -> bool {
+        combo_enabled(self.doc, pid, mid)
+    }
 }
 
 impl<'a> FilterList for AddModelPicker<'a> {
@@ -1580,7 +1995,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
     ) -> (Vec<(String, String, String, String)>, Vec<(usize, P)>) {
         // Searchable: model display name and model id only.
         let term_l = query.to_lowercase();
-        let ordered: Vec<_> = entries
+        let mut ordered: Vec<_> = entries
             .iter()
             .filter(|(_, mid, mname, _)| {
                 term_l.is_empty()
@@ -1589,35 +2004,84 @@ impl<'a> FilterList for AddModelPicker<'a> {
             })
             .cloned()
             .collect();
-        (ordered, Vec::new())
+        ordered.sort_by(|a, b| {
+            let a_en = if self.is_enabled(&a.0, &a.1) { 0u8 } else { 1 };
+            let b_en = if self.is_enabled(&b.0, &b.1) { 0u8 } else { 1 };
+            let a_free = if a.1.to_lowercase().contains("free") { 0u8 } else { 1 };
+            let b_free = if b.1.to_lowercase().contains("free") { 0u8 } else { 1 };
+            (a_en, a_free, a.2.to_lowercase(), a.0.clone(), a.1.clone()).cmp(&(
+                b_en,
+                b_free,
+                b.2.to_lowercase(),
+                b.0.clone(),
+                b.1.clone(),
+            ))
+        });
+        let enabled_count = ordered
+            .iter()
+            .filter(|(pid, mid, _, _)| self.is_enabled(pid, mid))
+            .count();
+        let free_disabled_count = ordered[enabled_count.min(ordered.len())..]
+            .iter()
+            .filter(|(_, mid, _, _)| mid.to_lowercase().contains("free"))
+            .count();
+        let mut separators: Vec<(usize, P)> = Vec::new();
+        if 0 < enabled_count && enabled_count < ordered.len() {
+            separators.push((enabled_count, P::Chevron));
+        }
+        let free_sep_idx = enabled_count + free_disabled_count;
+        if free_disabled_count > 0 && free_sep_idx < ordered.len() {
+            separators.push((free_sep_idx, P::Free));
+        }
+        (ordered, separators)
     }
 
     fn render(
         &self,
         entry: &(String, String, String, String),
-        is_sel: bool,
+        _is_sel: bool,
     ) -> Vec<(String, P)> {
         let (pid, mid, mname, pname) = entry;
-        vec![(
-            format!("  {mname} ({pname}) - {pid}/{mid}"),
-            if is_sel { P::Selected } else { P::Text },
-        )]
+        let enabled = self.is_enabled(pid, mid);
+        let is_free = mid.to_lowercase().contains("free");
+        let mark = if enabled { "●" } else { "○" };
+        let rest = format!(" ({pname}) - {pid}/{mid}");
+        let name_pair = if enabled {
+            P::Value
+        } else if is_free {
+            P::Enabled
+        } else {
+            P::Text
+        };
+        let mark_pair = if enabled { P::Enabled } else { P::Text };
+        vec![
+            ("  ".to_string(), P::Text),
+            (mark.to_string(), mark_pair),
+            ("  ".to_string(), P::Text),
+            (mname.clone(), name_pair),
+            (rest, P::Text),
+        ]
     }
 
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String, String, String)) -> bool {
         let (pid, mid, mname, pname) = entry;
+        if combo_enabled(self.doc, pid, mid) {
+            return true; // already enabled; inert row
+        }
         let existing: Vec<String> = usable(self.doc)
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .collect();
         let mut added = false;
+        let mut fetch_err_url = None;
         if !existing.iter().any(|e| e == pid) {
             match crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
                 Err(e) => {
                     inline_error_win(stdscr, &format!("Add failed: {}", e.0));
                     return true; // stay open
                 }
-                Ok(()) => {
+                Ok(url) => {
+                    fetch_err_url = url;
                     if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
                         if arr.len() > existing.len() {
                             added = true;
@@ -1654,16 +2118,19 @@ impl<'a> FilterList for AddModelPicker<'a> {
         } else {
             String::new()
         };
-        self.status = Some(format!(
-            "{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
-        ));
+        self.status = Some(match fetch_err_url {
+            Some(url) => crate::sync::live_fetch_error_status(&url),
+            None => format!("{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."),
+        });
         false // close back to the main menu
     }
 }
 
 /// Modal: type-to-filter every models.dev model across all providers and
-/// enable the chosen one, auto-adding a missing provider first. Returns the
-/// confirmation status line for the parent menu, or None.
+/// enable the chosen one, auto-adding a missing provider first. Already-
+/// enabled models stay listed (enabled | free | rest, like Configure Model)
+/// and are inert. Returns the confirmation status line for the parent menu,
+/// or None.
 pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<String> {
     let api = match crate::sync::fetch_models_dev() {
         Ok(a) => a,
@@ -1677,7 +2144,7 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
     filter_list_win_with(
         stdscr,
         &catalog,
-        "Add model",
+        "Add Model",
         &[
             ("↑/↓/←/→".to_string(), "nav".to_string()),
             ("ESC".to_string(), "cancel".to_string()),
@@ -1685,7 +2152,7 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
             ("type".to_string(), "filter".to_string()),
         ],
         &mut picker,
-        1,
+        0,
         None,
     );
     picker.status
@@ -1713,23 +2180,6 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
         .unwrap_or_default();
 
     let mut lines: Vec<PreviewLine> = Vec::new();
-    // Heading marker -> full-width blue bar, like the screen title.
-    lines.push(PreviewLine::Heading("Enabled Models".to_string()));
-    // The Model Descriptions toggle sits directly below the heading, styled
-    // like an enabled/disabled state token (green when on, muted when off).
-    let descriptions_on = doc
-        .get("include_descriptions")
-        .and_then(Value::as_bool)
-        .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
-    lines.push(PreviewLine::Segs(vec![
-        ("Model Descriptions ".to_string(), P::Text),
-        (
-            if descriptions_on { "[enabled]".to_string() } else { "[disabled]".to_string() },
-            if descriptions_on { P::Enabled } else { P::Disabled },
-        ),
-    ]));
-    lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
-
     let mut model_rows: Vec<(String, String, String, String)> = Vec::new();
     for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -1767,12 +2217,24 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
         });
     }
     let total_enabled = model_rows.len();
+    // Heading marker -> full-width blue bar, like the screen title.
+    // Count sits on the bar so paging cannot park a second "Summary"
+    // line on the status row.
+    lines.push(PreviewLine::Heading(format!("Enabled Models: {total_enabled}")));
+    lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
     for (mname, pname, pid, mid) in &model_rows {
-        lines.push(PreviewLine::Segs(vec![
-            ("● ".to_string(), P::Enabled),
-            (mname.clone(), P::Value),
-            (format!(" ({pname}) - {pid}/{mid}"), P::Text),
-        ]));
+        let level = model_reasoning_level(doc, pid, mid);
+        let level_pair = if level != "none" { P::Free } else { P::Muted };
+        lines.push(PreviewLine::Model {
+            pid: pid.clone(),
+            mid: mid.clone(),
+            segs: vec![
+                ("● ".to_string(), P::Enabled),
+                (mname.clone(), P::Value),
+                (format!(" ({pname}) "), P::Text),
+                (format!("({level})"), level_pair),
+            ],
+        });
     }
 
     if total_enabled == 0 {
@@ -1783,66 +2245,123 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
         return lines;
     }
 
-    lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)]));
+    lines
+}
 
-    // Env-var requirements rendered as a borderless black code panel with
-    // padding: green text, gray provider-name annotations, red for unset keys.
-    let mut env_rows: Vec<(String, String, String, bool)> = Vec::new();
-    for provider in &providers {
-        let env = crate::first_env_key_from(provider);
-        if env.is_empty() {
+fn model_reasoning_level(doc: &Value, pid: &str, mid: &str) -> String {
+    let Some(arr) = doc.get("providers").and_then(Value::as_array) else {
+        return "none".into();
+    };
+    for p in arr {
+        if p.get("id").and_then(Value::as_str) != Some(pid) {
             continue;
         }
-        let val = crate::core::env_value(&env);
-        let pname = crate::name_or(&Value::Object((*provider).clone()), provider.get("id").and_then(Value::as_str).unwrap_or_default());
-        let missing = val == "\"\"";
-        env_rows.push((env, val, pname, missing));
-    }
-
-    if !env_rows.is_empty() {
-        let w_env = env_rows.iter().map(|(e, _, _, _)| e.chars().count()).max().unwrap_or(0);
-        let w_val = env_rows.iter().map(|(_, v, _, _)| v.chars().count()).max().unwrap_or(0);
-        let mut rows_segs: Vec<Vec<(String, P)>> = vec![code_line_segments(
-            "# required env_key values",
-            None,
-        )];
-        for (env, val, pname, missing) in &env_rows {
-            let body = format!("{:<w_env$} = {:<w_val$}", env, val);
-            let highlight = if *missing {
-                Some((0, w_env, P::CodeError))
-            } else {
-                None
-            };
-            let mut segs = code_line_segments(&body, highlight);
-            // Provider name renders as a shell comment, e.g. "  # OpenRouter".
-            segs.push(("  # ".to_string() + pname, P::CodeComment));
-            rows_segs.push(segs);
+        let Some(m) = p.get("models").and_then(Value::as_object).and_then(|mm| mm.get(mid)) else {
+            return "none".into();
+        };
+        if let Some(efforts) = m.get("reasoning_efforts").and_then(Value::as_array) {
+            for row in efforts {
+                if row.get("default").and_then(Value::as_bool).unwrap_or(false) {
+                    if let Some(v) = row.get("value").and_then(Value::as_str) {
+                        if !v.is_empty() {
+                            return v.to_string();
+                        }
+                    }
+                }
+            }
         }
-        const PAD_X: usize = 1;
-        let panel_w = rows_segs
+        if let Some(v) = m.get("reasoning_effort").and_then(Value::as_str) {
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+        return "none".into();
+    }
+    "none".into()
+}
+
+fn set_reasoning_win<S: Stdscr>(
+    stdscr: &mut S,
+    doc: &mut Value,
+    pid: &str,
+    mid: &str,
+) -> Option<String> {
+    let (labels, values, mname) = {
+        let models = doc
+            .get("providers")?
+            .as_array()?
             .iter()
-            .map(|segs| segs.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
-            .max()
-            .unwrap_or(0)
-            + 2 * PAD_X;
-        for segs in &rows_segs {
-            let seg_len: usize = segs.iter().map(|(t, _)| t.chars().count()).sum();
-            let mut line: Vec<(String, P)> =
-                vec![(" ".repeat(PAD_X), P::CodeText)];
-            line.extend(segs.iter().cloned());
-            line.push((
-                " ".repeat(panel_w.saturating_sub(PAD_X + seg_len)),
-                P::CodeText,
-            ));
-            lines.push(PreviewLine::Segs(line));
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))?
+            .get("models")?
+            .as_object()?;
+        let m = models.get(mid)?;
+        let efforts = match m.get("reasoning_efforts").and_then(Value::as_array) {
+            Some(e) if !e.is_empty() => e,
+            _ => return Some("No reasoning levels".into()),
+        };
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for row in efforts {
+            let val = row.get("value").and_then(Value::as_str).unwrap_or("");
+            if val.is_empty() {
+                continue;
+            }
+            let lab = row
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(val);
+            if row.get("default").and_then(Value::as_bool).unwrap_or(false) {
+                labels.push(format!("{lab} [default]"));
+            } else {
+                labels.push(lab.to_string());
+            }
+            values.push(val.to_string());
+        }
+        if values.is_empty() {
+            return Some("No reasoning levels".into());
+        }
+        (labels, values, crate::name_or(m, mid))
+    };
+    let pick = match select_win(
+        stdscr,
+        &labels,
+        &format!("Reasoning: {mname}"),
+        false,
+        &[],
+        true,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+    ) {
+        Some(SelectOutcome::Picked(i)) => i,
+        _ => return None,
+    };
+    if pick >= values.len() {
+        return None;
+    }
+    let chosen = values[pick].clone();
+    let slot = find_by_id_mut(doc, pid)?;
+    let m = slot
+        .get_mut("models")?
+        .as_object_mut()?
+        .get_mut(mid)?
+        .as_object_mut()?;
+    m.insert("reasoning_effort".into(), Value::String(chosen.clone()));
+    if let Some(arr) = m.get_mut("reasoning_efforts").and_then(Value::as_array_mut) {
+        for row in arr {
+            if let Some(obj) = row.as_object_mut() {
+                let is = obj.get("value").and_then(Value::as_str) == Some(chosen.as_str());
+                obj.insert("default".into(), Value::Bool(is));
+            }
         }
     }
-
-    lines.push(PreviewLine::Segs(vec![(
-        format!("Summary: {total_enabled} models enabled"),
-        P::Muted,
-    )]));
-    lines
+    let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+    Some(format!("Reasoning set to {chosen}"))
 }
 
 /// Try to run the TUI; return `Ok(changed)` on success, a `CursesFailed` on
@@ -1863,20 +2382,39 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     let mut status_msg: Option<String> = None;
     let mut sort_by_name = false;
     let mut menu_cursor = 0usize;
+    let mut model_focus: Option<(String, String)> = None;
     loop {
         // Order is providers.json (sorted only on dump).
         let ordered: Vec<Map<String, Value>> = usable(doc);
-        // Zero providers is a valid state: ➕ Add provider… is reachable first.
-        let mut labels: Vec<String> = ordered.iter().map(|p| crate::provider_label_from(p)).collect();
-        labels.push("➕ Add provider…".to_string());
-        labels.push("➕ Add model…".to_string());
+        // Zero providers is a valid state: ➕ Add Provider… is reachable first.
+        // Trailing block after a section rule: Model Descriptions toggle
+        // (Enter toggles it), then the two add actions.
         let descriptions_on = doc
             .get("include_descriptions")
             .and_then(Value::as_bool)
             .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
-        // "Model Descriptions [enabled/disabled]" now lives inside the
-        // Enabled Models preview (toggled via D or Enter on that row).
+        let mut labels: Vec<String> = crate::core::provider_menu_labels(&ordered);
+        let token_col = crate::core::provider_state_token_col(&ordered);
+        labels.push(crate::core::pad_state_label(
+            crate::core::MODEL_DESC_LABEL,
+            &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
+            token_col,
+        ));
+        match doc.get("last_updated").and_then(Value::as_str) {
+            Some(ts) if !ts.is_empty() => {
+                labels.push(crate::core::pad_state_label(
+                    crate::core::UPDATE_LIST_LABEL,
+                    &format!("[{ts}]"),
+                    token_col,
+                ));
+            }
+            _ => labels.push(crate::core::UPDATE_LIST_LABEL.to_string()),
+        }
+        labels.push("➕ Add Provider…".to_string());
+        labels.push("➕ Add Model…".to_string());
         let preview = build_config_models_preview(doc, sort_by_name);
+        // "Model Descriptions [enabled/disabled]" is a selectable row in the
+        // trailing block; Enter lands on it as SelectOutcome::Picked.
         let pi = match select_win(stdscr,
             &labels,
             "Select Provider",
@@ -1888,6 +2426,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             status_msg.as_deref(),
             Some(&preview),
             menu_cursor,
+            Some(ordered.len()),
+            model_focus.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
         ) {
             None => return Ok(changed),
             Some(SelectOutcome::Cancelled) => return Ok(changed),
@@ -1896,33 +2436,68 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 menu_cursor = i;
                 continue;
             }
-            Some(SelectOutcome::DescriptionsToggled) => {
-                // "Model Descriptions [enabled/disabled]" — global flag.
-                let new_val = !descriptions_on;
-                if let Some(obj) = doc.as_object_mut() {
-                    obj.insert("include_descriptions".into(), Value::Bool(new_val));
+            Some(SelectOutcome::ModelPicked { pid, mid }) => {
+                model_focus = Some((pid.clone(), mid.clone()));
+                if let Some(msg) = set_reasoning_win(stdscr, doc, &pid, &mid) {
+                    status_msg = Some(msg);
+                    changed = true;
                 }
-                let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                status_msg = Some(format!(
-                    "Model Descriptions {}.",
-                    if new_val { "enabled" } else { "disabled" }
-                ));
-                changed = true;
                 continue;
             }
-            Some(SelectOutcome::Picked(i)) => i,
+            Some(SelectOutcome::Picked(i)) => {
+                model_focus = None;
+                i
+            }
         };
         menu_cursor = 0;
         if pi == ordered.len() {
-            // "➕ Add provider…" — modal over the models.dev catalog.
+            // "Model Descriptions [enabled/disabled]" — global flag.
+            let new_val = !descriptions_on;
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("include_descriptions".into(), Value::Bool(new_val));
+            }
+            let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+            status_msg = Some(format!(
+                "Model Descriptions {}",
+                if new_val { "enabled" } else { "disabled" }
+            ));
+            changed = true;
+            menu_cursor = pi; // stay on the toggle row, like Configure Models
+            continue;
+        }
+        if pi == ordered.len() + 1 {
+            match crate::sync::update_providers_json_with(true) {
+                Ok(stats) => {
+                    if let Ok(fresh) = jsonio::load_providers() {
+                        *doc = fresh;
+                    }
+                    status_msg = Some(format!(
+                        "Updated model list · {} providers synced",
+                        stats.providers_synced
+                    ));
+                    changed = true;
+                }
+                Err(e) => {
+                    status_msg = Some(if e.0.starts_with("error ") {
+                        e.0
+                    } else {
+                        format!("error {}: fetch live model list failed", e.0)
+                    });
+                }
+            }
+            menu_cursor = pi;
+            continue;
+        }
+        if pi == ordered.len() + 2 {
+            // "➕ Add Provider…" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
                 status_msg = Some(msg);
                 changed = true;
             }
             continue;
         }
-        if pi == ordered.len() + 1 {
-            // "➕ Add model…" — cross-provider modal; auto-adds a missing
+        if pi == ordered.len() + 3 {
+            // "➕ Add Model…" — cross-provider modal; auto-adds a missing
             // provider and enables just that model.
             if let Some(msg) = add_model_win(stdscr, doc) {
                 status_msg = Some(msg);
@@ -1938,10 +2513,10 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let current_base =
                 target.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
             let actions = vec![
-                "Configure models".to_string(),
+                "Configure Models".to_string(),
                 format!("Provider [{}]", if enabled { "enabled" } else { "disabled" }),
                 format!("Base Url [{current_base}]"),
-                "Delete provider".to_string(),
+                "Delete Provider".to_string(),
                 "Back".to_string(),
             ];
             let env_key = crate::first_env_key_from(&target);
@@ -1971,11 +2546,12 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 None,
                 None,
                 action_cursor,
+                None,
+                None,
             ) {
                 None | Some(SelectOutcome::Cancelled) => break,
                 Some(SelectOutcome::SortToggled(_)) => continue,
-                // No preview on the action menu, so this cannot fire there.
-                Some(SelectOutcome::DescriptionsToggled) => continue,
+                Some(SelectOutcome::ModelPicked { .. }) => continue,
                 Some(SelectOutcome::Picked(i)) => i,
             };
             action_cursor = ai;
@@ -1990,9 +2566,12 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         _ => Vec::new(),
                     };
                     if ids.is_empty() {
-                        println!(
-                            "No models for {}. Run a sync or re-add the provider.",
-                            core::py_repr(&id_str)
+                        inline_error_win(
+                            stdscr,
+                            &format!(
+                                "No models for {}. Run a sync or re-add the provider.",
+                                core::py_repr(&id_str)
+                            ),
                         );
                     } else {
                         let mut models = target
@@ -2005,11 +2584,11 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .unwrap_or(target["id"].as_str().unwrap_or_default());
-                        let provider_title = format!("Provider: {pname} | Configure models");
+                        let provider_title = format!("Provider: {pname} | Configure Model");
                         model_search_win(stdscr, &ids, &mut models, &provider_title, &id_str, pname);
                         // Sync BOTH the live `target` copy and the doc: the
                         // action menu renders from `target`, so re-entering
-                        // Configure models must reflect the toggles even
+                        // Configure Models must reflect the toggles even
                         // without going back to the main menu first.
                         let updated = Value::Object(models);
                         target.insert("models".to_string(), updated.clone());
@@ -2068,7 +2647,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     }
                 }
                 3 => {
-                    if confirm_win(stdscr, &format!("Delete provider {}?", core::py_repr(&id_str))) {
+                    if confirm_win(stdscr, &format!("Delete Provider {}?", core::provider_display(&Value::Object(target.clone())))) {
                         // Grab the enabled model ids from providers.json
                         // before the entry is removed.
                         let enabled = core::enabled_model_ids(&Value::Object(target.clone()));
@@ -2078,7 +2657,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         // Flush the deletion into config.toml now so a re-add
                         // of the same provider this session can't collide
                         // with a pending deletion record.
-                        crate::sync::update_config_toml()?;
+                        crate::sync::update_config_toml_with(true)?;
                         changed = true;
                     }
                     break;
@@ -2138,6 +2717,12 @@ fn emit_cell<W: std::io::Write>(w: &mut W, y: i32, x: i32, s: &str, paint: Paint
 /// paint over (or leave scrollback history of) the user's existing terminal.
 /// On exit we restore the original screen, so closing `--config` returns the
 /// terminal exactly as it was before — no blue background, no menu history.
+fn enable_mouse<W: std::io::Write>(w: &mut W) {
+    let _ = write!(w, "\x1b[?1000h\x1b[?1006h");
+}
+fn disable_mouse<W: std::io::Write>(w: &mut W) {
+    let _ = write!(w, "\x1b[?1000l\x1b[?1006l");
+}
 fn enter_alt_screen<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?1049h");
 }
@@ -2152,12 +2737,11 @@ fn show_cursor<W: std::io::Write>(w: &mut W) {
 }
 
 /// The set of DEC private modes grok-models enables (alternate screen +
-/// hidden cursor). The restore sequence clears exactly these on every exit
-/// path so the terminal returns to its prior state. We deliberately do NOT
-/// emit modes we never enable (mouse / bracketed-paste / focus / Kitty),
-/// mirroring grok-build's gated teardown. This is the hand-rolled equivalent
-/// of grok-build's `RESTORE_SEQ` (async-signal-safe: ANSI only).
-const RESTORE_SEQ: &[u8] = b"\x1b[?25h\x1b[?1049l\x1b[0m";
+/// hidden cursor + SGR mouse tracking). The restore sequence clears exactly
+/// these on every exit path so the terminal returns to its prior state and
+/// wheel events stop being eaten. This is the hand-rolled equivalent of
+/// grok-build's `RESTORE_SEQ` (async-signal-safe: ANSI only).
+const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m";
 
 /// Original termios captured at `open()`, restored on every exit path
 /// (normal `Drop`, SIGINT/SIGTERM/SIGHUP, panic) so the terminal never stays
@@ -2373,14 +2957,20 @@ impl Stdscr for RealStdscr {
                 matches!(wait_stdin_readable(ESC_DELAY_MS), Ok(true))
             };
             if !readable {
-                // Esc-delay expired on an incomplete sequence.
+                // Esc-delay expired on an incomplete sequence. A lone ESC is
+                // a real Esc; a truncated CSI/mouse prefix must be dropped —
+                // emitting Esc would pop Configure Models back to the
+                // provider page on a fast wheel burst.
                 if self.input_buf.first() == Some(&0x1b) {
-                    self.input_buf.remove(0);
-                    return Key::Esc;
+                    if self.input_buf.len() == 1 {
+                        self.input_buf.clear();
+                        return Key::Esc;
+                    }
+                    self.input_buf.clear();
                 }
                 continue;
             }
-            let mut buf = [0u8; 256];
+            let mut buf = [0u8; 4096];
             match std::io::stdin().read(&mut buf) {
                 Ok(nread) if nread >= 1 => self.input_buf.extend_from_slice(&buf[..nread]),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
@@ -2392,6 +2982,10 @@ impl Stdscr for RealStdscr {
                 _ => return Key::Eof,
             }
         }
+    }
+    fn invalidate(&mut self) {
+        let (rows, cols) = self.getmaxyx();
+        self.committed = unknown_frame(rows as usize, cols as usize);
     }
 }
 
@@ -2406,6 +3000,7 @@ impl RealStdscr {
         // Swap to the alternate screen and hide the cursor before drawing.
         let mut out = std::io::stdout();
         enter_alt_screen(&mut out);
+        enable_mouse(&mut out);
         hide_cursor(&mut out);
         let _ = out.flush();
         // Ensure every exit path restores the terminal (Ctrl-C, terminal
@@ -2428,6 +3023,7 @@ impl Drop for RealStdscr {
         // restore cooked mode. Finally reset our signal handlers so a later
         // Ctrl-C (e.g. during the post-config sync) behaves normally.
         let mut out = std::io::stdout();
+        disable_mouse(&mut out);
         show_cursor(&mut out);
         leave_alt_screen(&mut out);
         let _ = out.flush();
@@ -2474,6 +3070,21 @@ impl TermiosMode {
 /// Parse one key from the front of `buf`, returning the key and bytes
 /// consumed. Returns None only when the buffer ends with an incomplete
 /// escape sequence (more bytes are needed to decide).
+/// SGR/X10 wheel: bit 6 marks a wheel event, bit 0 is direction (0 up / 1
+/// down). Modifier and motion bits (shift/ctrl/meta/32) are ignored so a
+/// fast trackpad burst still scrolls instead of being dropped or turned
+/// into Esc. Releases (`press == false`) are ignored to avoid double-steps.
+fn sgr_wheel_key(btn: u32, press: bool, y: i32) -> Key {
+    if !press || btn & 64 == 0 {
+        return Key::Eof;
+    }
+    if btn & 1 == 0 {
+        Key::WheelUp(y)
+    } else {
+        Key::WheelDown(y)
+    }
+}
+
 fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
     if buf.is_empty() {
         return None;
@@ -2504,13 +3115,49 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
                     return Some((key, 4));
                 }
             }
-            // Unknown CSI: swallow through its final alpha byte.
+            // SGR mouse: ESC [ < btn ; x ; y M/m. Wheel is bit 6 (64/65), plus
+            // optional shift/meta/ctrl/motion bits. Only button-press (`M`)
+            // scrolls; release (`m`) is ignored so a fast wheel does not
+            // double-step or leak Esc.
+            if buf[2] == b'<' {
+                let end = buf[3..]
+                    .iter()
+                    .position(|b| *b == b'M' || *b == b'm')
+                    .map(|p| p + 4);
+                let Some(end) = end else {
+                    return None; // wait for the tail
+                };
+                let press = buf[end - 1] == b'M';
+                let payload = std::str::from_utf8(&buf[3..end - 1]).unwrap_or("");
+                let mut parts = payload.split(';');
+                let btn = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                let _x = parts.next();
+                // SGR mouse coords are 1-based.
+                let y = parts
+                    .next()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(1)
+                    .saturating_sub(1);
+                return Some((sgr_wheel_key(btn, press, y), end));
+            }
+            // X10 mouse: ESC [ M Cb Cx Cy (button/x/y each + 32).
+            if buf[2] == b'M' {
+                if buf.len() < 6 {
+                    return None;
+                }
+                let btn = (buf[3] as u32).saturating_sub(32);
+                let y = (buf[5] as i32).saturating_sub(32).saturating_sub(1);
+                return Some((sgr_wheel_key(btn, true, y), 6));
+            }
+            // Unknown CSI: swallow through its final alpha byte. Never Esc —
+            // treating leftover mouse CSI as Esc pops back to the provider
+            // page mid-scroll.
             let end = buf[2..]
                 .iter()
                 .position(|b| b.is_ascii_alphabetic())
                 .map(|p| p + 3)
                 .unwrap_or(buf.len());
-            return Some((Key::Esc, end));
+            return Some((Key::Eof, end));
         }
         // ESC followed by something else (e.g. an unknown alt-chord).
         return Some((Key::Esc, 1));
@@ -2634,12 +3281,12 @@ mod tests {
         assert_eq!(char_cols('➕'), 2);
         assert_eq!(char_cols('A'), 1);
         assert_eq!(char_cols('…'), 1);
-        let label = "➕ Add provider…";
+        let label = "➕ Add Provider…";
         assert_eq!(str_cols(label), label.chars().count() + 1);
-        let clipped = clip_cols("Back from Add provider…", 4);
+        let clipped = clip_cols("Back from Add Provider…", 4);
         assert_eq!(clipped, "Back");
-        let padded = pad_cols("Back", str_cols("➕ Add provider…"), ' ');
-        assert_eq!(str_cols(&padded), str_cols("➕ Add provider…"));
+        let padded = pad_cols("Back", str_cols("➕ Add Provider…"), ' ');
+        assert_eq!(str_cols(&padded), str_cols("➕ Add Provider…"));
         assert!(!padded.contains('d') || padded.starts_with("Back"));
         assert!(!padded[4..].contains('d'));
         assert!(!padded.contains('…'));
@@ -2680,14 +3327,14 @@ mod tests {
         filter_list_win(
             &mut f,
             &model.entries.clone(),
-            "Configure models",
+            "Configure Model",
             &[("ESC".into(), "back".into())],
             &mut model,
         );
         let calls = f.recorded();
         let headers: Vec<_> = calls
             .iter()
-            .filter(|(_, _, t, _)| t.contains("Configure models"))
+            .filter(|(_, _, t, _)| t.contains("Configure Model"))
             .map(|(_, _, t, _)| t.clone())
             .collect();
         assert!(
@@ -2758,7 +3405,7 @@ mod tests {
         filter_list_win(
             &mut f,
             &model.entries.clone(),
-            "Configure models",
+            "Configure Model",
             &[("ESC".into(), "back".into())],
             &mut model,
         );
@@ -2782,12 +3429,13 @@ mod tests {
         let options = vec![
             "opencode (OpenCode Zen) [enabled]".to_string(),
             "grok (Grok) [disabled]".to_string(),
+            "Update Model List [08-26-2026 03:15 PM]".to_string(),
         ];
 
         // initial = 0: first (enabled) row selected.
         let mut f = FakeStdscr::new(h, w);
         f.script(Key::Char('q'));
-        let _ = select_win(&mut f, &options, "Select Provider", false, &[], false, None, None, None, None, 0);
+        let _ = select_win(&mut f, &options, "Select Provider", false, &[], false, None, None, None, None, 0, None, None);
         let calls = f.recorded();
 
         // Title present.
@@ -2819,6 +3467,15 @@ mod tests {
             dis
         );
 
+        // Date token `[MM-DD-YYYY …]` is green, matching [enabled].
+        let upd = token_paints(&calls, "[08-26-2026 03:15 PM]");
+        assert!(!upd.is_empty(), "no date token drawn");
+        assert!(
+            upd.iter().all(|p| is_green(p.fg)),
+            "date token not green: {:?}",
+            upd
+        );
+
         // Legend 'Q' drawn inline with the other legend items (row h-2),
         // not right-aligned in the lower-right corner.
         let q_calls: Vec<_> = calls
@@ -2834,7 +3491,7 @@ mod tests {
         // initial = 1: disabled row selected -> token red AND bold (selected).
         let mut f2 = FakeStdscr::new(h, w);
         f2.script(Key::Char('q'));
-        let _ = select_win(&mut f2, &options, "Select Provider", false, &[], false, None, None, None, None, 1);
+        let _ = select_win(&mut f2, &options, "Select Provider", false, &[], false, None, None, None, None, 1, None, None);
         let calls2 = f2.recorded();
         let dis2 = token_paints(&calls2, "[disabled]");
         assert!(
@@ -2873,12 +3530,67 @@ mod tests {
         // Bare operators outside quotes are gold symbols.
         let segs = code_line_segments("a >> b | c", None);
         assert!(segs.iter().any(|(t, p)| *p == P::CodeSymbol && t.contains('>')));
+
+        // A width-truncated env cell with the '=' clipped off is a command
+        // word (gold). The row renderer must tokenize the full cell first.
+        let segs = code_line_segments("OPENCODE_API_KEY", None);
+        assert_eq!(segs[0].1, P::CodeSymbol);
+        let segs = code_line_segments("OPENCODE_API_KEY = \"\"", None);
+        assert_eq!(segs[0].0, "OPENCODE_API_KEY");
+        assert_eq!(segs[0].1, P::CodeError);
+    }
+
+    #[test]
+    fn env_cell_keeps_var_color_when_clipped_before_equals() {
+        let opt = "(A) - a [enabled]  OPENCODE_API_KEY = \"\"".to_string();
+        let full = format!("  ▸ {opt}");
+        let eq_at = str_cols(&full[..full.find('=').unwrap()]);
+        // vis_limit is width-2; clip exactly at '=' so the equals is gone.
+        let w = (eq_at + 2) as i32;
+        let mut f = FakeStdscr::new(30, w);
+        f.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f,
+            &[opt],
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+        );
+        let calls = f.recorded();
+        let gold = theme::CODE_SYMBOL_GOLD;
+        let name_paints: Vec<Paint> = calls
+            .iter()
+            .filter(|(_, _, t, _)| t.contains("OPENCODE_API_KEY") || t.contains("OPENCODE"))
+            .map(|(_, _, _, p)| *p)
+            .collect();
+        assert!(
+            !name_paints.is_empty(),
+            "env var name missing from a clipped env cell: {:?}",
+            calls.iter().map(|(_, _, t, _)| t.clone()).collect::<Vec<_>>()
+        );
+        assert!(
+            name_paints.iter().all(|p| p.fg != gold),
+            "clipped env var name painted gold like '=': {name_paints:?}"
+        );
+        assert!(
+            name_paints.iter().any(|p| p.fg == tn_color(P::CodeError)),
+            "clipped empty env var should stay error-red: {name_paints:?}"
+        );
     }
 
     #[test]
     fn add_provider_picker_buckets_added_suggested_and_rest() {
         // The full catalog stays listed (already-added providers included);
-        // sections: Added (green, ●) | Suggested (cyan) | rest (white).
+        // sections: Added | Suggested | rest. Rows use the main-list
+        // `(name) - id [enabled/disabled]` format.
         for enabled_flag in [true, false] {
             let mut doc = serde_json::json!({
                 "providers": [{
@@ -2921,20 +3633,35 @@ mod tests {
                 "green rule after the Added bucket, cyan rule after Suggested"
             );
 
-            // Added row renders green with a ● prefix.
+            // Added row uses main-list `(name) - id [state]` format.
             let row = picker.render(&("opencode".to_string(), "OpenCode".to_string()), false);
-            assert_eq!(row[1], ("●".to_string(), P::Enabled));
-            assert!(row[3].0.contains("opencode"));
-            assert_eq!(row[3].1, P::Enabled);
+            let joined: String = row.iter().map(|(t, _)| t.as_str()).collect();
+            assert!(joined.contains("(OpenCode)"), "{joined}");
+            assert!(joined.contains(" - opencode"), "{joined}");
+            if enabled_flag {
+                assert_eq!(row[2], ("[enabled]".to_string(), P::Enabled));
+            } else {
+                assert_eq!(row[2], ("[disabled]".to_string(), P::Error));
+            }
+            assert_eq!(row[1].1, P::Enabled);
 
-            // Suggested rows render cyan without a prefix glyph change
-            // (the space mark is invisible filler).
+            // Suggested rows: cyan name, [disabled] token.
             let srow = picker.render(&("openrouter".to_string(), "OpenRouter".to_string()), false);
-            assert_eq!(srow[3].1, P::Free);
+            assert_eq!(srow[1].1, P::Free);
+            assert_eq!(srow[2], ("[disabled]".to_string(), P::Error));
+            let sjoined: String = srow.iter().map(|(t, _)| t.as_str()).collect();
+            assert!(sjoined.contains("(OpenRouter)"), "{sjoined}");
 
-            // Other rows stay default white.
+            // Other rows stay default white with [disabled].
             let orow = picker.render(&("anthropic".to_string(), "Anthropic".to_string()), false);
-            assert_eq!(orow[3].1, P::Text);
+            assert_eq!(orow[1].1, P::Text);
+            assert_eq!(orow[2], ("[disabled]".to_string(), P::Error));
+            let ojoined: String = orow.iter().map(|(t, _)| t.as_str()).collect();
+            assert!(ojoined.contains("(Anthropic)"), "{ojoined}");
+
+            // Tokens share a column across the catalog.
+            assert_eq!(row[1].0.len(), srow[1].0.len(), "padded heads must match");
+            assert_eq!(row[1].0.len(), orow[1].0.len(), "padded heads must match");
 
             // Enter on an Added row must NOT call add_provider_entry.
             let before = picker.doc["providers"].as_array().unwrap().len();
@@ -3006,14 +3733,14 @@ mod tests {
         // Baseline frame (scroll 0).
         let mut f0 = FakeStdscr::new(h, 80);
         f0.script(Key::Char('q'));
-        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0);
+        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None);
 
         // Two PageDowns, then quit.
         let mut f1 = FakeStdscr::new(h, 80);
         f1.script(Key::PageDown);
         f1.script(Key::PageDown);
         f1.script(Key::Char('q'));
-        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0);
+        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None);
 
         let base_rows: Vec<i32> = f0
             .recorded()
@@ -3049,7 +3776,8 @@ mod tests {
     }
 
     #[test]
-    fn build_add_model_catalog_flattens_sorts_and_skips_enabled() {        let api = serde_json::json!({
+    fn build_add_model_catalog_includes_enabled_and_doc_only() {
+        let api = serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {}
@@ -3059,22 +3787,83 @@ mod tests {
                 "zeta-mini": {"name": "Zeta Mini"}
             }}
         });
-        // zeta/alpha already enabled -> excluded.
+        // zeta/alpha already enabled stays listed; doc-only enabled is appended.
         let doc = serde_json::json!({"providers": [{
             "id": "zeta", "name": "Zeta AI",
-            "models": {"alpha": {"enabled": true}}
+            "models": {
+                "alpha": {"enabled": true},
+                "legacy": {"name": "Legacy", "enabled": true}
+            }
         }]});
         let cat = build_add_model_catalog(&api, &doc);
-        let keys: Vec<(String, String)> = cat.iter().map(|(p, m, _, _)| (p.clone(), m.clone())).collect();
+        let mut keys: Vec<(String, String)> = cat.iter().map(|(p, m, _, _)| (p.clone(), m.clone())).collect();
+        keys.sort();
         assert_eq!(
             keys,
-            [("aaa", "alpha"), ("zeta", "beta"), ("aaa", "zeta-mini")]
-                .map(|(p, m)| (p.to_string(), m.to_string()))
+            [
+                ("aaa", "alpha"),
+                ("aaa", "zeta-mini"),
+                ("zeta", "alpha"),
+                ("zeta", "beta"),
+                ("zeta", "legacy"),
+            ]
+            .map(|(p, m)| (p.to_string(), m.to_string()))
         );
-        // Sorted by display name lower: "Alpha Two" < "beta" < "Zeta Mini".
-        assert_eq!(cat[0].2, "Alpha Two");
-        assert_eq!(cat[1].2, "beta"); // name falls back to model id
-        assert_eq!(cat[2].2, "Zeta Mini");
+    }
+
+    #[test]
+    fn add_model_picker_buckets_enabled_free_and_rest() {
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "zeta", "name": "Zeta AI",
+                "models": {"alpha": {"name": "Alpha One", "enabled": true}}
+            }]
+        });
+        let api = serde_json::json!({
+            "zeta": {"name": "Zeta AI", "models": {
+                "alpha": {"name": "Alpha One"},
+                "beta": {},
+                "zeta-free": {"name": "Zeta Free"}
+            }},
+            "aaa": {"name": "AAA", "models": {
+                "omega": {"name": "Omega"}
+            }}
+        });
+        let catalog = build_add_model_catalog(&api, &doc);
+        let mut picker = AddModelPicker { doc: &mut doc, api, status: None };
+        let (ordered, seps) = picker.compute_view(&catalog, "");
+        assert_eq!(
+            ordered.iter().map(|(p, m, _, _)| (p.as_str(), m.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("zeta", "alpha"),
+                ("zeta", "zeta-free"),
+                ("zeta", "beta"),
+                ("aaa", "omega"),
+            ]
+        );
+        assert_eq!(seps, vec![(1, P::Chevron), (2, P::Free)]);
+
+        let enabled_row = picker.render(&ordered[0], false);
+        assert_eq!(enabled_row[1], ("●".into(), P::Enabled));
+        assert_eq!(enabled_row[3], ("Alpha One".into(), P::Value));
+
+        let free_row = picker.render(&ordered[1], false);
+        assert_eq!(free_row[1], ("○".into(), P::Text));
+        assert_eq!(free_row[3], ("Zeta Free".into(), P::Enabled));
+
+        let rest_row = picker.render(&ordered[2], false);
+        assert_eq!(rest_row[1], ("○".into(), P::Text));
+        assert_eq!(rest_row[3], ("beta".into(), P::Text));
+
+        let mut f = FakeStdscr::new(20, 80);
+        assert!(
+            picker.on_enter(&mut f, &ordered[0]),
+            "Enter on an already-enabled row must stay open and stay inert"
+        );
+        assert_eq!(
+            picker.doc["providers"][0]["models"]["alpha"]["enabled"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]
@@ -3094,13 +3883,15 @@ mod tests {
             Some("Added provider 'x' with 9 models (all disabled)."),
             None,
             0,
+            None,
+            None,
         );
         let calls = f.recorded();
         assert!(
             calls
                 .iter()
-                .any(|(y, _, t, _)| *y == 26 && t.contains("Added provider 'x'")),
-            "status line not at height-4"
+                .any(|(y, _, t, _)| *y == 27 && t.contains("Added provider 'x'")),
+            "status line not at height-3"
         );
     }
 
@@ -3122,32 +3913,29 @@ mod tests {
             }]
         });
 
-        // The preview builder produces the heading, an enabled-model row, and
-        // an env-var code panel (env name red when the var is unset).
+        // The preview builder produces the heading and enabled-model rows;
+        // env cells live on the provider list, not in this pane.
         let preview = build_config_models_preview(&doc, false);
         assert!(preview
             .iter()
-            .any(|l| matches!(l, PreviewLine::Heading(t) if t == "Enabled Models")));
+            .any(|l| matches!(l, PreviewLine::Heading(t) if t == "Enabled Models: 1")));
+        assert!(
+            !preview.iter().any(|l| matches!(
+                l,
+                PreviewLine::Segs(segs) if segs.iter().any(|(t, _)| t.contains("Summary:"))
+            )),
+            "preview must not carry a trailing Summary line"
+        );
         let has_enabled_row = preview.iter().any(|l| matches!(
             l,
-            PreviewLine::Segs(segs) if segs
+            PreviewLine::Model { segs, .. } if segs
                 .iter()
                 .any(|(t, p)| t == "● " && *p == P::Enabled)
         ));
         assert!(has_enabled_row, "preview missing enabled-model row");
-        let has_env_panel = preview.iter().any(|l| matches!(
-            l,
-            PreviewLine::Segs(segs) if segs.iter().any(|(t, p)| {
-                t.contains("# required env_key values") && *p == P::CodeComment
-            })
-        )) && preview.iter().any(|l| matches!(
-            l,
-            PreviewLine::Segs(segs) if segs.iter().any(|(t, _)| t.contains("OPENCODE_API_KEY"))
-        ));
-        assert!(has_env_panel, "preview missing env-var panel");
 
-        // Drive the selector with the preview; assert it renders under the list.
-        let options = vec!["opencode (OpenCode Zen) [enabled]".to_string()];
+        // Drive the selector with padded provider rows + env suffix.
+        let options = crate::core::provider_menu_labels(&[doc["providers"][0].as_object().unwrap().clone()]);
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Char('q'));
         let _ = select_win(
@@ -3162,6 +3950,8 @@ mod tests {
             None,
             Some(&preview),
             0,
+            None,
+            None,
         );
         let calls = f.recorded();
         assert!(
@@ -3170,7 +3960,7 @@ mod tests {
         );
         assert!(
             calls.iter().any(|(_, _, t, _)| t.contains("OPENCODE_API_KEY")),
-            "preview env-var box not drawn"
+            "provider-row env cell not drawn"
         );
         // 'Q' drawn inline with the legend items (row h-2), not right corner.
         assert!(
@@ -3195,6 +3985,8 @@ mod tests {
             None,
             None,
             0,
+            None,
+            None,
         );
         let legend: Vec<(i32, String)> = f
             .recorded()
@@ -3207,10 +3999,54 @@ mod tests {
         assert!(s_x.is_some(), "legend missing S: {legend:?}");
         assert!(q_x.is_some(), "legend missing Q: {legend:?}");
         assert!(
+            legend.iter().all(|(_, t)| t != "D"),
+            "D must not appear on the main-menu legend: {legend:?}"
+        );
+        assert!(
             s_x.unwrap() < q_x.unwrap(),
             "S should be left of Q: S@{} Q@{}",
             s_x.unwrap(),
             q_x.unwrap()
+        );
+    }
+
+    #[test]
+    fn select_win_main_menu_legend_page_before_select_when_preview_overflows() {
+        let preview: Vec<PreviewLine> = (0..40)
+            .map(|i| PreviewLine::Heading(format!("row {i}")))
+            .collect();
+        let mut f = FakeStdscr::new(30, 80);
+        f.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f,
+            &["one".to_string()],
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+        );
+        let legend: Vec<(i32, String)> = f
+            .recorded()
+            .iter()
+            .filter(|(y, _, _, _)| *y == 28)
+            .map(|(_, x, t, _)| (*x, t.clone()))
+            .collect();
+        let page_x = legend.iter().find(|(_, t)| t == "page").map(|(x, _)| *x);
+        let select_x = legend.iter().find(|(_, t)| t == "select").map(|(x, _)| *x);
+        assert!(page_x.is_some(), "legend missing page: {legend:?}");
+        assert!(select_x.is_some(), "legend missing select: {legend:?}");
+        assert!(
+            page_x.unwrap() < select_x.unwrap(),
+            "PgUp/PgDn page should sit left of Enter/→ select: page@{} select@{}",
+            page_x.unwrap(),
+            select_x.unwrap()
         );
     }
 
@@ -3230,6 +4066,8 @@ mod tests {
             None,
             None,
             0,
+            None,
+            None,
         );
         assert!(
             matches!(out, Some(SelectOutcome::SortToggled(0))),
@@ -3241,7 +4079,7 @@ mod tests {
         f2.script(Key::Esc);
         let out2 = select_win(
             &mut f2,
-            &["Configure models".to_string()],
+            &["Configure Models".to_string()],
             "Provider: X",
             false,
             &[],
@@ -3251,6 +4089,8 @@ mod tests {
             None,
             None,
             0,
+            None,
+            None,
         );
         assert!(
             matches!(out2, Some(SelectOutcome::Cancelled)),
@@ -3262,7 +4102,7 @@ mod tests {
         preview
             .iter()
             .filter_map(|line| match line {
-                PreviewLine::Segs(segs) => segs
+                PreviewLine::Segs(segs) | PreviewLine::Model { segs, .. } => segs
                     .iter()
                     .find(|(_, p)| *p == P::Value)
                     .map(|(t, _)| t.clone()),
@@ -3359,7 +4199,7 @@ mod tests {
         filter_list_win(
             &mut f,
             &ids,
-            "Configure models",
+            "Configure Model",
             &[("ESC".into(), "back".into())],
             &mut picker,
         );
@@ -3494,11 +4334,17 @@ use serde_json::json;
             "header not at row 0; row0 = {:?}",
             row_text(&grid, 0)
         );
-        // Provider label occupies its own row (row 2), not the bottom.
+        // The provider sits directly under the header (no top padding); a
+        // section rule separates it from the trailing block below.
         assert!(
             row_text(&grid, 2).contains("(OpenCode Zen) - opencode"),
             "provider label not at row 2; row2 = {:?}",
             row_text(&grid, 2)
+        );
+        assert!(
+            row_text(&grid, 3).contains("───"),
+            "section rule not at row 3; row3 = {:?}",
+            row_text(&grid, 3)
         );
         // Models preview heading rendered in the empty space under the list.
         let any_enabled = (0..h as usize).any(|r| row_text(&grid, r).contains("Enabled Models"));
@@ -3609,9 +4455,8 @@ use serde_json::json;
     #[test]
     fn terminal_emitters_match_restore_contract() {
         // The hand-rolled RESTORE_SEQ must clear exactly the modes we enable
-        // (cursor + alt screen), matching grok-build's gated teardown (it
-        // does not emit modes we never enable: mouse/paste/focus/Kitty).
-        assert_eq!(RESTORE_SEQ, b"\x1b[?25h\x1b[?1049l\x1b[0m");
+        // (mouse tracking + cursor + alt screen).
+        assert_eq!(RESTORE_SEQ, b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m");
         let mut buf: Vec<u8> = Vec::new();
         enter_alt_screen(&mut buf);
         hide_cursor(&mut buf);
@@ -3639,19 +4484,34 @@ use serde_json::json;
         // more bytes (escdelay) instead of misreading it.
         assert_eq!(parse_key_prefix(b"\x1b"), None);
         assert_eq!(parse_key_prefix(b"\x1b["), None);
-        // Unknown CSI swallows through its final alpha byte as Esc.
-        assert_eq!(parse_key_prefix(b"\x1b[?1049h"), Some((Key::Esc, 8)));
+        // Unknown CSI is swallowed, not Esc (mouse leftovers must not pop a menu).
+        assert_eq!(parse_key_prefix(b"\x1b[?1049h"), Some((Key::Eof, 8)));
         // PageUp/PageDown arrive as CSI 5~/6~.
         assert_eq!(parse_key_prefix(b"\x1b[5~"), Some((Key::PageUp, 4)));
         assert_eq!(parse_key_prefix(b"\x1b[6~"), Some((Key::PageDown, 4)));
         assert_eq!(parse_key_prefix(b"\x1b[5"), None, "partial PageUp must wait for its tail");
+        // SGR mouse wheel: ESC [ < 64/65 ; x ; y M. y is 1-based in the
+        // sequence and 0-based on Key::Wheel*.
+        assert_eq!(parse_key_prefix(b"\x1b[<64;1;5M"), Some((Key::WheelUp(4), 10)));
+        assert_eq!(parse_key_prefix(b"\x1b[<65;10;12M"), Some((Key::WheelDown(11), 12)));
+        assert_eq!(parse_key_prefix(b"\x1b[<64;1;5"), None, "partial SGR mouse must wait for its tail");
+        // Release (`m`) does not scroll; modifier/motion bits still count as wheel.
+        assert_eq!(parse_key_prefix(b"\x1b[<64;1;5m"), Some((Key::Eof, 10)));
+        assert_eq!(parse_key_prefix(b"\x1b[<96;1;5M"), Some((Key::WheelUp(4), 10)));
+        assert_eq!(parse_key_prefix(b"\x1b[<97;1;8M"), Some((Key::WheelDown(7), 10)));
+        // X10 mouse: ESC [ M Cb Cx Cy with wheel-up button 64 (+32 => 96).
+        assert_eq!(
+            parse_key_prefix(&[0x1b, b'[', b'M', 64 + 32, 1 + 32, 5 + 32]),
+            Some((Key::WheelUp(4), 6))
+        );
+        assert_eq!(parse_key_prefix(b"\x1b[M"), None, "partial X10 mouse must wait");
     }
 
     #[test]
-    fn config_flow_descriptions_menu_item_toggles_flag() {
+    fn config_flow_d_key_does_not_toggle_descriptions() {
         isolate_grok_home();
         let _grok_home_guard = crate::test_support::grok_home_lock();
-let mut doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
                 "name": "Provider One",
@@ -3659,26 +4519,44 @@ let mut doc = serde_json::json!({
                 "models": {"alpha-1": {"name": "Alpha One", "description": "D.", "enabled": false}}
             }]
         });
-        // The toggle now lives inside the Enabled Models preview. Pressing
-        // 'd' on the main menu toggles the flag on; a second run toggles it
-        // back off. 'q' quits (ESC is a no-op on the main menu).
+        // 'd' is not a main-menu shortcut; only Enter on the Model
+        // Descriptions row toggles the flag. 'q' quits.
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Char('d'));
         f.script(Key::Char('q'));
         let _ = run_config_flow_with_backend(&mut f, &mut doc);
         assert_eq!(
             doc.get("include_descriptions").and_then(Value::as_bool),
-            Some(true),
-            "'d' on the main menu must persist include_descriptions: true"
+            None,
+            "'d' on the main menu must not toggle include_descriptions"
         );
-        let mut f2 = FakeStdscr::new(30, 80);
-        f2.script(Key::Char('d'));
-        f2.script(Key::Char('q'));
-        let _ = run_config_flow_with_backend(&mut f2, &mut doc);
+    }
+
+    #[test]
+    fn config_flow_enter_on_descriptions_row_toggles_flag() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        // One provider: the trailing block starts right after it, so one
+        // Down from the provider row lands on "Model Descriptions [disabled]".
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {}
+            }]
+        });
+        // Enter on Add Provider… would fetch models.dev, so the walk stops at
+        // the toggle row.
+        let mut f = FakeStdscr::new(30, 80);
+        f.script(Key::Down); // onto Model Descriptions
+        f.script(Key::Enter); // toggle it
+        f.script(Key::Char('q'));
+        let _ = run_config_flow_with_backend(&mut f, &mut doc);
         assert_eq!(
             doc.get("include_descriptions").and_then(Value::as_bool),
-            Some(false),
-            "second toggle must set include_descriptions back off"
+            Some(true),
+            "Enter on the Model Descriptions row must toggle the flag"
         );
     }
 
@@ -3694,10 +4572,11 @@ let mut doc = serde_json::json!({
                 "models": {}
             }]
         });
-        // Enter the action menu and press 'd': it must be ignored there
-        // (no DescriptionsToggled), then Back exits to the main menu.
+        // Enter the action menu and press 'd': it is unbound there (and on
+        // the main menu), then Back exits to the main menu.
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Enter); // open action menu (Back-on-left submenu)
+        f.script(Key::Char('d'));
         f.script(Key::Esc);   // leave the action menu
         f.script(Key::Char('q')); // quit the main menu
         let out = run_config_flow_with_backend(&mut f, &mut doc);
@@ -3706,6 +4585,136 @@ let mut doc = serde_json::json!({
             doc.get("include_descriptions").and_then(Value::as_bool),
             None,
             "'d' must not toggle descriptions from the action menu"
+        );
+    }
+
+    #[test]
+    fn config_flow_delete_leaves_clean_main_menu() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "opencode",
+                "name": "OpenCode Zen",
+                "enabled": true,
+                "models": { "hy3-free": { "name": "HY3 Free", "enabled": true } }
+            }]
+        });
+        let (h, w) = (30, 80);
+        let mut cap = CaptureStdscr::new(h, w);
+        cap.script(Key::Enter); // provider action menu
+        cap.script(Key::Down);
+        cap.script(Key::Down);
+        cap.script(Key::Down); // Delete Provider
+        cap.script(Key::Enter);
+        cap.script(Key::Char('y'));
+        cap.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut cap, &mut doc);
+        assert!(res.is_ok(), "delete flow errored: {:?}", res.err());
+        let grid = cap.screen();
+        assert!(
+            !grid_contains(&grid, "Delete Provider"),
+            "confirm/action leftover on main menu after delete: {:?}",
+            (0..h as usize).map(|r| row_text(&grid, r)).collect::<Vec<_>>()
+        );
+        let bottom = row_text(&grid, (h - 2) as usize);
+        assert!(
+            bottom.contains('Q'),
+            "legend must stay on row h-2 after delete; row = {:?}",
+            bottom
+        );
+        assert!(
+            doc.get("providers")
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.is_empty()),
+            "provider must be removed from the doc"
+        );
+    }
+
+    #[test]
+    fn config_flow_enter_on_enabled_model_writes_reasoning() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {
+                    "alpha-1": {
+                        "name": "Alpha One",
+                        "enabled": true,
+                        "reasoning_effort": "low",
+                        "reasoning_efforts": [
+                            {"value": "low", "label": "Low", "default": true},
+                            {"value": "high", "label": "High", "default": false}
+                        ]
+                    }
+                }
+            }]
+        });
+        let mut f = FakeStdscr::new(30, 80);
+        // provider → Descriptions → Update Model List → Add Provider →
+        // Add Model → first Enabled Models row.
+        for _ in 0..5 {
+            f.script(Key::Down);
+        }
+        f.script(Key::Enter); // open reasoning picker
+        f.script(Key::Down); // High
+        f.script(Key::Enter);
+        f.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(res.is_ok(), "reasoning flow errored: {:?}", res.err());
+        let m = &doc["providers"][0]["models"]["alpha-1"];
+        assert_eq!(m.get("reasoning_effort").and_then(Value::as_str), Some("high"));
+        let efforts = m["reasoning_efforts"].as_array().unwrap();
+        assert_eq!(efforts[0]["default"], Value::Bool(false));
+        assert_eq!(efforts[1]["default"], Value::Bool(true));
+        let last = f
+            .recorded()
+            .into_iter()
+            .rev()
+            .find(|(_, _, t, _)| t.contains("Alpha One"))
+            .expect("Alpha One should still be on screen");
+        assert_eq!(
+            last.3.bg,
+            bg_color(P::Selected),
+            "cursor must stay on the enabled model after picking a reasoning level"
+        );
+    }
+
+    #[test]
+    fn config_flow_model_cursor_stays_when_no_reasoning_levels() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {
+                    "alpha-1": { "name": "Alpha One", "enabled": true }
+                }
+            }]
+        });
+        let mut f = FakeStdscr::new(30, 80);
+        for _ in 0..5 {
+            f.script(Key::Down);
+        }
+        f.script(Key::Enter); // (none) — no picker
+        f.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(res.is_ok(), "none-reasoning flow errored: {:?}", res.err());
+        let last = f
+            .recorded()
+            .into_iter()
+            .rev()
+            .find(|(_, _, t, _)| t.contains("Alpha One"))
+            .expect("Alpha One should still be on screen");
+        assert_eq!(
+            last.3.bg,
+            bg_color(P::Selected),
+            "cursor must stay on the enabled model after Enter on (none)"
         );
     }
 }
