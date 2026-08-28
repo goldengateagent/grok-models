@@ -691,6 +691,15 @@ def search_providers(models_dev: dict, term: str) -> str | None:
 _CURSES_FAILED = object()  # sentinel: curses couldn't run (not a tty, etc.)
 _SORT_TOGGLED = object()  # sentinel: main-menu S toggled Enabled Models sort
 _CURSES_IGNORE = object()  # leaked CSI/mouse after ESC; keep the current screen
+# Extra keys decoded from a wheel burst; _curses_getch pops these first.
+_curses_key_q: list = []
+# DEC private modes matching rust enable_mouse / disable_mouse (X10 + SGR).
+_MOUSE_ENABLE = b"\x1b[?1000h\x1b[?1006h"
+_MOUSE_DISABLE = b"\x1b[?1000l\x1b[?1006l"
+# ncurses NCURSES_MOUSE_MASK(5, PRESSED) = 2 << 24. Homebrew Python's curses
+# often omits BUTTON5_PRESSED, which made wheel-down a no-op on macOS.
+_BUTTON4_PRESSED = getattr(curses, "BUTTON4_PRESSED", 0x80000)
+_BUTTON5_PRESSED = getattr(curses, "BUTTON5_PRESSED", 0x2000000)
 
 
 # Tokyo Night (Night/Storm) palette — values mirror grok-build's tokyonight.rs.
@@ -1149,29 +1158,159 @@ def _draw_seg_line(stdscr, y, x, segments, max_w) -> None:
         pass
 
 
+def _sgr_wheel_key(btn: int, press: bool, y: int):
+    """SGR/X10 wheel: bit 6 marks a wheel event, bit 0 is direction (0 up / 1
+    down). Releases (`press == False`) are ignored so a fast wheel does not
+    double-step. Matches rust `sgr_wheel_key` from the 7f899b3 wheel fix."""
+    if not press or (btn & 64) == 0:
+        return _CURSES_IGNORE
+    if (btn & 1) == 0:
+        return ("wheel_up", y)
+    return ("wheel_down", y)
+
+
+def _parse_key_prefix(buf: list[int]):
+    """Parse one key from the front of `buf`.
+
+    Returns `(key, bytes_consumed)` or None when the buffer ends on an
+    incomplete escape (caller waits). Unknown CSI is `_CURSES_IGNORE`, never
+    Esc — leftover mouse CSI must not pop Configure Models. Mirrors rust
+    `parse_key_prefix` (commit 7f899b3)."""
+    if not buf:
+        return None
+    if buf[0] != 27:
+        return (buf[0], 1)
+    if len(buf) == 1:
+        return None
+    if buf[1] != ord("["):
+        return (27, 1)
+    if len(buf) == 2:
+        return None
+    arrows = {
+        ord("A"): curses.KEY_UP,
+        ord("B"): curses.KEY_DOWN,
+        ord("C"): curses.KEY_RIGHT,
+        ord("D"): curses.KEY_LEFT,
+    }
+    if buf[2] in arrows:
+        return (arrows[buf[2]], 3)
+    if buf[2] in (ord("5"), ord("6")):
+        if len(buf) == 3:
+            return None
+        if buf[3] == ord("~"):
+            key = curses.KEY_PPAGE if buf[2] == ord("5") else curses.KEY_NPAGE
+            return (key, 4)
+    # SGR mouse: ESC [ < btn ; x ; y M/m
+    if buf[2] == ord("<"):
+        end = None
+        for i in range(3, len(buf)):
+            if buf[i] in (ord("M"), ord("m")):
+                end = i + 1
+                break
+        if end is None:
+            return None
+        press = buf[end - 1] == ord("M")
+        payload = bytes(buf[3 : end - 1]).decode("ascii", "replace")
+        parts = payload.split(";")
+        try:
+            btn = int(parts[0]) if parts else 0
+        except ValueError:
+            btn = 0
+        try:
+            y = int(parts[2]) if len(parts) >= 3 else 1
+        except ValueError:
+            y = 1
+        y = max(0, y - 1)
+        return (_sgr_wheel_key(btn, press, y), end)
+    # X10 mouse: ESC [ M Cb Cx Cy (button/x/y each + 32)
+    if buf[2] == ord("M"):
+        if len(buf) < 6:
+            return None
+        btn = buf[3] - 32
+        y = buf[5] - 32 - 1
+        return (_sgr_wheel_key(btn, True, y), 6)
+    # Unknown CSI: swallow through its final alpha byte. Never Esc.
+    for i in range(2, len(buf)):
+        if 65 <= buf[i] <= 90 or 97 <= buf[i] <= 122:
+            return (_CURSES_IGNORE, i + 1)
+    return (_CURSES_IGNORE, len(buf))
+
+
+def _as_wheel(ch):
+    """Normalize a getch result to `('wheel_up'|'wheel_down', y)` or None."""
+    if isinstance(ch, tuple) and ch and ch[0] in ("wheel_up", "wheel_down"):
+        return ch
+    if ch == getattr(curses, "KEY_MOUSE", -1):
+        try:
+            _id, _mx, my, _z, bstate = curses.getmouse()
+        except curses.error:
+            return None
+        if bstate & _BUTTON5_PRESSED:
+            return ("wheel_down", my)
+        if bstate & _BUTTON4_PRESSED:
+            return ("wheel_up", my)
+    return None
+
+
 def _curses_getch(stdscr):
     """Read a key, distinguishing a real ESC from a leaked CSI/mouse prefix.
 
     Fast wheel bursts can outrun ncurses and surface as ESC + leftover bytes.
     Treating those as ESC would pop Configure Models back to the provider
-    page. A lone ESC (nothing pending after escdelay) is still ESC."""
+    page. A lone ESC (nothing pending after escdelay) is still ESC.
+
+    SGR (`ESC [<64;x;yM`) and X10 wheel sequences are decoded here so
+    scrolling works when Python curses lacks BUTTON5_PRESSED and when
+    ncurses cannot parse SGR mouse into KEY_MOUSE."""
+    if _curses_key_q:
+        return _curses_key_q.pop(0)
     ch = stdscr.getch()
     if ch != 27:
         return ch
     stdscr.nodelay(True)
+    pending_special = None
     try:
+        buf = [27]
         nxt = stdscr.getch()
         if nxt in (-1, curses.ERR):
             return 27
-        if nxt == getattr(curses, "KEY_MOUSE", -2):
+        mouse = getattr(curses, "KEY_MOUSE", -2)
+        if nxt == mouse:
             return nxt
+        if nxt > 255:
+            return nxt
+        buf.append(nxt)
         while True:
             n = stdscr.getch()
             if n in (-1, curses.ERR):
                 break
-        return _CURSES_IGNORE
+            if n > 255:
+                pending_special = n
+                break
+            buf.append(n)
     finally:
         stdscr.nodelay(False)
+
+    keys = []
+    i = 0
+    while i < len(buf):
+        parsed = _parse_key_prefix(buf[i:])
+        if parsed is None:
+            # Incomplete at end of burst: a lone ESC is Esc; a truncated
+            # CSI/mouse prefix is dropped (not Esc).
+            if buf[i] == 27 and len(buf) - i == 1:
+                keys.append(27)
+            break
+        key, used = parsed
+        keys.append(key)
+        i += used
+    if pending_special is not None:
+        keys.append(pending_special)
+    if not keys:
+        return _CURSES_IGNORE
+    first, rest = keys[0], keys[1:]
+    _curses_key_q.extend(rest)
+    return first
 
 
 CODEX_CONFIG_INFO = (
@@ -1691,19 +1830,12 @@ def _curses_select_win(
                 _i, pid, mid = preview_models[model_cursor]
                 return ("model", pid, mid)
             return sorted(state) if multi else current
-        elif ch == getattr(curses, "KEY_MOUSE", -1) and preview_models:
-            try:
-                _id, _mx, my, _z, bstate = curses.getmouse()
-            except curses.error:
-                continue
-            wheel_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
-            wheel_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
-            if not (wheel_up or wheel_down):
-                continue
+        elif (wheel := _as_wheel(ch)) is not None and preview_models:
+            wkind, my = wheel
             avail_top = sep_y + 1
             if not (avail_top <= my <= height - 5):
                 continue
-            if wheel_down:
+            if wkind == "wheel_down":
                 preview_scroll = min(preview_scroll + 1, max(0, len(preview or []) - 1))
             else:
                 preview_scroll = max(preview_scroll - 1, 0)
@@ -1971,6 +2103,22 @@ def _curses_filter_list_win(
         if ch == curses.KEY_RESIZE:
             _curses_theme_bkgd(stdscr)
             continue
+        wheel = _as_wheel(ch)
+        if wheel is not None:
+            wkind, my = wheel
+            if not (2 <= my < 2 + list_h):
+                continue
+            if wkind == "wheel_down" and top + 1 < len(view):
+                top += 1
+            elif wkind == "wheel_up" and top > 0:
+                top -= 1
+            else:
+                continue
+            for kind in view[top:]:
+                if kind[0] == "item":
+                    current = kind[1]
+                    break
+            continue
         if ch == 27:  # ESC -> back
             return
         if ch == curses.KEY_UP and current > 0:
@@ -2019,25 +2167,6 @@ def _curses_filter_list_win(
             query += chr(ch)
             current = 0
             top = 0
-        elif ch == getattr(curses, "KEY_MOUSE", -1):
-            try:
-                _id, _mx, my, _z, bstate = curses.getmouse()
-            except curses.error:
-                continue
-            if not (2 <= my < 2 + list_h):
-                continue
-            wheel_down = bool(bstate & getattr(curses, "BUTTON5_PRESSED", 0))
-            wheel_up = bool(bstate & getattr(curses, "BUTTON4_PRESSED", 0))
-            if wheel_down and top + 1 < len(view):
-                top += 1
-            elif wheel_up and top > 0:
-                top -= 1
-            else:
-                continue
-            for kind in view[top:]:
-                if kind[0] == "item":
-                    current = kind[1]
-                    break
 
 
 def _curses_model_search_win(
@@ -2585,9 +2714,19 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             curses.mousemask(curses.ALL_MOUSE_EVENTS)
         except curses.error:
             pass
+        # ncurses mousemask typically enables X10 only. SGR (1006) is what
+        # modern terminals emit for the wheel; rust enable_mouse sends both.
+        try:
+            os.write(1, _MOUSE_ENABLE)
+        except OSError:
+            pass
         try:
             return _curses_config_loop(stdscr, providers_doc, providers)
         finally:
+            try:
+                os.write(1, _MOUSE_DISABLE)
+            except OSError:
+                pass
             try:
                 curses.mousemask(0)
             except curses.error:
