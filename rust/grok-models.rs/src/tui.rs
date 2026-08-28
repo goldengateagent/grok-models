@@ -831,7 +831,7 @@ pub fn select_win<S: Stdscr>(
             } else {
                 list_top as i32 + row as i32
             };
-            let is_sel = idx == current;
+            let is_sel = idx == current && model_cursor.is_none();
             let row_paint = if is_sel {
                 Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold()
             } else {
@@ -1123,7 +1123,19 @@ pub fn select_win<S: Stdscr>(
             Key::Up => {
                 if let Some(c) = model_cursor {
                     if c > 0 {
-                        model_cursor = Some(c - 1);
+                        let next = c - 1;
+                        model_cursor = Some(next);
+                        // Keep the highlighted model in the pane: if it sits
+                        // above the current window, scroll up to its line.
+                        // Mirrors Python `_curses_select_win` KEY_UP.
+                        if let Some(preview) = preview {
+                            let models = preview_model_entries(preview);
+                            if let Some((line_idx, _, _)) = models.get(next) {
+                                if *line_idx < preview_scroll {
+                                    preview_scroll = *line_idx;
+                                }
+                            }
+                        }
                     } else {
                         model_cursor = None;
                     }
@@ -2575,8 +2587,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         // Order is providers.json (sorted only on dump).
         let ordered: Vec<Map<String, Value>> = usable(doc);
         // Zero providers is a valid state: ➕ Add Provider… is reachable first.
-        // Trailing block after a section rule: Model Descriptions toggle
-        // (Enter toggles it), then the two add actions.
+        // Trailing block after a section rule: Codex Config, Model
+        // Descriptions toggle (Enter toggles it), then the two add actions.
         let descriptions_on = doc
             .get("include_descriptions")
             .and_then(Value::as_bool)
@@ -2584,13 +2596,13 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         let mut labels: Vec<String> = crate::core::provider_menu_labels(&ordered);
         let token_col = crate::core::provider_state_token_col(&ordered);
         labels.push(crate::core::pad_state_label(
-            crate::core::MODEL_DESC_LABEL,
-            &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
+            crate::core::CODEX_CONFIG_LABEL,
+            &format!("[{}]", crate::jsonio::codex_status_token(doc)),
             token_col,
         ));
         labels.push(crate::core::pad_state_label(
-            crate::core::CODEX_CONFIG_LABEL,
-            &format!("[{}]", crate::jsonio::codex_status_token(doc)),
+            crate::core::MODEL_DESC_LABEL,
+            &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
             token_col,
         ));
         match doc.get("last_updated").and_then(Value::as_str) {
@@ -2606,8 +2618,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         labels.push("➕ Add Provider…".to_string());
         labels.push("➕ Add Model…".to_string());
         let preview = build_config_models_preview(doc, sort_by_name);
-        // "Model Descriptions [enabled/disabled]" is a selectable row in the
-        // trailing block; Enter lands on it as SelectOutcome::Picked.
+        // Trailing-block rows (Codex Config, Model Descriptions, …) are
+        // selectable; Enter lands on them as SelectOutcome::Picked.
         let pi = match select_win(stdscr,
             &labels,
             "Select Provider (changes sync on exit)",
@@ -2643,21 +2655,6 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             }
         };
         if pi == ordered.len() {
-            // "Model Descriptions [enabled/disabled]" — global flag.
-            let new_val = !descriptions_on;
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert("include_descriptions".into(), Value::Bool(new_val));
-            }
-            let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-            status_msg = Some(format!(
-                "Model Descriptions {}",
-                if new_val { "enabled" } else { "disabled" }
-            ));
-            changed = true;
-            menu_cursor = pi; // stay on the toggle row, like Configure Models
-            continue;
-        }
-        if pi == ordered.len() + 1 {
             // Provider rows share the main provider-list layout.
             let enabled: Vec<Map<String, Value>> = doc
                 .get("providers")
@@ -2738,6 +2735,21 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 _ => {}
             }
             menu_cursor = pi;
+            continue;
+        }
+        if pi == ordered.len() + 1 {
+            // "Model Descriptions [enabled/disabled]" — global flag.
+            let new_val = !descriptions_on;
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert("include_descriptions".into(), Value::Bool(new_val));
+            }
+            let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+            status_msg = Some(format!(
+                "Model Descriptions {}",
+                if new_val { "enabled" } else { "disabled" }
+            ));
+            changed = true;
+            menu_cursor = pi; // stay on the toggle row, like Configure Models
             continue;
         }
         if pi == ordered.len() + 2 {
@@ -3500,6 +3512,8 @@ mod tests {
         w: i32,
         calls: std::cell::RefCell<Vec<(i32, i32, String, Paint)>>,
         keys: std::cell::RefCell<Vec<Key>>,
+        /// `calls.len()` at each `erase`, so tests can inspect the last frame.
+        frame_starts: std::cell::RefCell<Vec<usize>>,
     }
 
     impl FakeStdscr {
@@ -3509,6 +3523,7 @@ mod tests {
                 w,
                 calls: Default::default(),
                 keys: Default::default(),
+                frame_starts: Default::default(),
             }
         }
         fn script(&self, k: Key) {
@@ -3517,13 +3532,21 @@ mod tests {
         fn recorded(&self) -> Vec<(i32, i32, String, Paint)> {
             self.calls.borrow().clone()
         }
+        fn last_frame(&self) -> Vec<(i32, i32, String, Paint)> {
+            let start = self.frame_starts.borrow().last().copied().unwrap_or(0);
+            self.calls.borrow()[start..].to_vec()
+        }
     }
 
     impl Stdscr for FakeStdscr {
         fn getmaxyx(&self) -> (i32, i32) {
             (self.h, self.w)
         }
-        fn erase(&mut self) {}
+        fn erase(&mut self) {
+            self.frame_starts
+                .borrow_mut()
+                .push(self.calls.borrow().len());
+        }
         fn refresh(&mut self) {}
         fn addstr(&mut self, y: i32, x: i32, s: &str, paint: Paint) {
             self.calls.borrow_mut().push((y, x, s.to_string(), paint));
@@ -4153,6 +4176,64 @@ mod tests {
             .find(|(_, _, t, _)| t == "one")
             .map(|(y, _, _, _)| y);
         assert_eq!(base_prov_y, scroll_prov_y, "provider row moved while paging");
+    }
+
+    #[test]
+    fn select_win_up_scrolls_preview_to_keep_model_visible() {
+        // After paging down in Enabled Models, Up must scroll the pane so
+        // the previous model is drawn — not walk the cursor off the top
+        // of the window until it pops back to the menu.
+        let mut preview: Vec<PreviewLine> = vec![PreviewLine::Heading("Enabled Models".into())];
+        for i in 0..40 {
+            preview.push(PreviewLine::Model {
+                pid: "prov".into(),
+                mid: format!("m{i}"),
+                segs: vec![(format!("model-{i}"), P::Value)],
+            });
+        }
+        let options = vec!["one".to_string()];
+        let h = 30;
+
+        let mut f_paged = FakeStdscr::new(h, 80);
+        f_paged.script(Key::Down);
+        f_paged.script(Key::PageDown);
+        f_paged.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_paged, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None,
+        );
+
+        let mut f_up = FakeStdscr::new(h, 80);
+        f_up.script(Key::Down);
+        f_up.script(Key::PageDown);
+        f_up.script(Key::Up);
+        f_up.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_up, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None,
+        );
+
+        fn last_frame_models(f: &FakeStdscr) -> Vec<String> {
+            f.last_frame()
+                .into_iter()
+                .filter_map(|(_, _, t, _)| {
+                    if t.starts_with("model-") {
+                        Some(t)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        let paged = last_frame_models(&f_paged);
+        let after_up = last_frame_models(&f_up);
+        assert!(!paged.is_empty() && !after_up.is_empty());
+        assert_ne!(
+            paged.first(),
+            after_up.first(),
+            "Up after PageDown must scroll the preview; paged={paged:?} after_up={after_up:?}"
+        );
     }
 
     #[test]
@@ -4934,8 +5015,8 @@ use serde_json::json;
     fn config_flow_enter_on_descriptions_row_toggles_flag() {
         isolate_grok_home();
         let _grok_home_guard = crate::test_support::grok_home_lock();
-        // One provider: the trailing block starts right after it, so one
-        // Down from the provider row lands on "Model Descriptions [disabled]".
+        // One provider: the trailing block starts right after it, so two
+        // Downs (Codex Config, then Model Descriptions) land on the toggle.
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -4947,6 +5028,7 @@ use serde_json::json;
         // Enter on Add Provider… would fetch models.dev, so the walk stops at
         // the toggle row.
         let mut f = FakeStdscr::new(30, 80);
+        f.script(Key::Down); // onto Codex Config
         f.script(Key::Down); // onto Model Descriptions
         f.script(Key::Enter); // toggle it
         f.script(Key::Char('q'));
@@ -5052,7 +5134,7 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        // provider → Descriptions → Codex Config → Update Model List →
+        // provider → Codex Config → Descriptions → Update Model List →
         // Add Provider → Add Model → first Enabled Models row.
         for _ in 0..6 {
             f.script(Key::Down);
@@ -5117,6 +5199,54 @@ use serde_json::json;
     }
 
     #[test]
+    fn config_flow_only_current_row_highlighted_in_enabled_models() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider One",
+                "enabled": true,
+                "models": {
+                    "alpha-1": { "name": "Alpha One", "enabled": true }
+                }
+            }]
+        });
+        let mut f = FakeStdscr::new(30, 80);
+        // provider → Codex Config → Descriptions → Update Model List →
+        // Add Provider → Add Model → first Enabled Models row.
+        for _ in 0..6 {
+            f.script(Key::Down);
+        }
+        f.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(res.is_ok(), "main-menu flow errored: {:?}", res.err());
+        let rec = f.recorded();
+        let last_matching = |needle: &str| {
+            rec.iter()
+                .rev()
+                .find(|(_, _, t, _)| t.contains(needle))
+                .cloned()
+                .unwrap_or_else(|| panic!("{needle} should still be on screen"))
+        };
+        let model = last_matching("Alpha One");
+        assert_eq!(
+            model.3.bg,
+            bg_color(P::Selected),
+            "current enabled-model row must be highlighted"
+        );
+        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions"] {
+            let row = last_matching(needle);
+            assert_ne!(
+                row.3.bg,
+                bg_color(P::Selected),
+                "{needle} must not stay highlighted when the cursor is on an enabled model; paint={:?}",
+                row.3
+            );
+        }
+    }
+
+    #[test]
     fn config_flow_codex_picker_selects_enabled_provider_or_disabled() {
         isolate_grok_home();
         let _grok_home_guard = crate::test_support::grok_home_lock();
@@ -5137,8 +5267,8 @@ use serde_json::json;
             ]
         });
         let mut f = FakeStdscr::new(30, 80);
-        // openrouter, ollama-cloud, Descriptions, Codex Config
-        for _ in 0..3 {
+        // openrouter, ollama-cloud, Codex Config
+        for _ in 0..2 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // picker: disabled, openrouter
@@ -5151,7 +5281,7 @@ use serde_json::json;
         assert_eq!(doc["codex_model_provider"], "openrouter");
 
         let mut f2 = FakeStdscr::new(30, 80);
-        for _ in 0..3 {
+        for _ in 0..2 {
             f2.script(Key::Down);
         }
         f2.script(Key::Enter); // picker starts on openrouter

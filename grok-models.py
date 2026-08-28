@@ -1465,7 +1465,7 @@ def _curses_select_win(
             # paint it gold like '='.
             vis = _clip_cols(line, max(1, width - 2))
 
-            is_sel = (idx == current)
+            is_sel = (idx == current) and model_cursor is None
             try:
                 # Row background first (theme bg, or selection bg for the cursor),
                 # then the label. A chevron sits right-aligned on expandable rows.
@@ -2746,17 +2746,17 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 if isinstance(p, dict) and p.get("id")
             ]
             ordered = providers
-            # Trailing block after a section rule: Model Descriptions toggle
-            # (Enter toggles it), then the two add actions.
+            # Trailing block after a section rule: Codex Config, Model
+            # Descriptions toggle (Enter toggles it), then the two add actions.
             descriptions_on = bool(
                 providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
             )
             labels = _provider_menu_labels(ordered)
             token_col = _provider_state_token_col(ordered)
-            desc = "enabled" if descriptions_on else "disabled"
-            labels.append(_pad_state_label(_MODEL_DESC_LABEL, f"[{desc}]", token_col))
             cstat = codex_status_token(providers_doc)
             labels.append(_pad_state_label(_CODEX_CONFIG_LABEL, f"[{cstat}]", token_col))
+            desc = "enabled" if descriptions_on else "disabled"
+            labels.append(_pad_state_label(_MODEL_DESC_LABEL, f"[{desc}]", token_col))
             last_updated = providers_doc.get("last_updated")
             if isinstance(last_updated, str) and last_updated:
                 labels.append(
@@ -2789,14 +2789,6 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             if pi is None:
                 return changed
             if pi == len(ordered):
-                new_val = not descriptions_on
-                providers_doc["include_descriptions"] = new_val
-                dump_providers(PROVIDERS_PATH, providers_doc)
-                status_msg = f"Model Descriptions {'enabled' if new_val else 'disabled'}"
-                changed = True
-                menu_cursor = pi  # stay on the toggle row, like Configure Models
-                continue
-            if pi == len(ordered) + 1:
                 # Provider rows share the main provider-list layout.
                 enabled = [
                     p
@@ -2840,6 +2832,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     status_msg = f"Codex Config {codex_status_token(providers_doc)}"
                     changed = True
                 menu_cursor = pi
+                continue
+            if pi == len(ordered) + 1:
+                new_val = not descriptions_on
+                providers_doc["include_descriptions"] = new_val
+                dump_providers(PROVIDERS_PATH, providers_doc)
+                status_msg = f"Model Descriptions {'enabled' if new_val else 'disabled'}"
+                changed = True
+                menu_cursor = pi  # stay on the toggle row, like Configure Models
                 continue
             if pi == len(ordered) + 2:
                 try:
