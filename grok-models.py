@@ -844,18 +844,17 @@ def _curses_init_colors() -> None:
     bg = rgb(*_TN["bg"])
     visual = rgb(*_TN["bg_visual"])
 
-    # Code-block palette (macOS Terminal "Homebrew"-style): standard ANSI
-    # colors only, so the block renders identically on every terminal —
-    # pure black background, green font, yellow operators/quotes, cyan
-    # comments, white strings, red unset vars.
-    code_bg = curses.COLOR_BLACK
-    code_text = curses.COLOR_GREEN
-    code_comment = curses.COLOR_CYAN
-    code_var = curses.COLOR_GREEN
-    # ANSI COLOR_YELLOW is olive/brown on most terminals; gold reads as yellow.
+    # Code-block palette: same locked RGB as the Rust app (theme.rs
+    # CODE_BG / CODE_TEXT / CODE_COMMENT / CODE_STRING / CODE_SYMBOL_GOLD).
+    # Named ANSI colors follow the Terminal profile (Clear Dark/Light remap
+    # black and green), so these must not use COLOR_BLACK/GREEN/CYAN/WHITE.
+    code_bg = rgb(0, 0, 0)
+    code_text = rgb(0, 255, 0)
+    code_comment = rgb(0, 255, 255)
+    code_var = code_text
     _code_symbol = rgb(255, 204, 0)
-    _code_error = red  # original Tokyo Night red for unset env vars
-    code_string = curses.COLOR_WHITE
+    _code_error = red  # Tokyo Night red for unset env vars
+    code_string = rgb(255, 255, 255)
 
     pairs = {
         P.TEXT: (fg, bg),
