@@ -35,7 +35,7 @@ Grok Build reads the API key from the provider’s `env_key` (shown in the TUI).
 Export that variable in your shell. After `config.toml` changes, relaunch 
 Grok Build so it reloads the file to pick up the model list. 
 
-## Quick start
+## Quick Start
 
 There are two implementations that should behave the same:
 
@@ -83,8 +83,10 @@ Enabled models are pinned to the top, then free models, then the remainder
 sorted by name. Required env var for the `env_key` and sample export are shown.
 
 `providers.json` is written on each edit. `config.toml` is rewritten when you
-quit, if anything changed. Ensure the env_key is exported in your shell and
-restart Grok Build. type `/model` and the new models will appear select.
+quit, if anything changed. Select Sync Model Config to rewrite `config.toml`
+on demand; the row shows `last_synced`. Ensure the env_key is exported in your
+shell and restart Grok Build. type `/model` and the new models will appear
+select.
 
 ## Commands
 

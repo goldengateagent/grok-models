@@ -105,6 +105,7 @@ TOP_LEVEL_KEY_ORDER = (
     "write_codex_config_toml",
     "codex_model_provider",
     "last_updated",
+    "last_synced",
     "providers",
     "removed_providers",
 )
@@ -2747,7 +2748,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             ]
             ordered = providers
             # Trailing block after a section rule: Codex Config, Model
-            # Descriptions toggle (Enter toggles it), then the two add actions.
+            # Descriptions toggle, Update Model List, Sync Model Config,
+            # then the two add actions.
             descriptions_on = bool(
                 providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
             )
@@ -2764,6 +2766,13 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 )
             else:
                 labels.append(_UPDATE_LIST_LABEL)
+            last_synced = providers_doc.get("last_synced")
+            if isinstance(last_synced, str) and last_synced:
+                labels.append(
+                    _pad_state_label(_SYNC_CONFIG_LABEL, f"[{last_synced}]", token_col)
+                )
+            else:
+                labels.append(_SYNC_CONFIG_LABEL)
             labels.append("➕ Add Provider…")
             labels.append("➕ Add Model…")
             pi = _curses_select_win(
@@ -2829,6 +2838,9 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         set_codex_selection(providers_doc, values[picked])
                         dump_providers(PROVIDERS_PATH, providers_doc)
                         update_config_toml(quiet=True)
+                    fresh = load_providers()
+                    providers_doc.clear()
+                    providers_doc.update(fresh)
                     status_msg = f"Codex Config {codex_status_token(providers_doc)}"
                     changed = True
                 menu_cursor = pi
@@ -2855,13 +2867,24 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 menu_cursor = pi
                 continue
             if pi == len(ordered) + 3:
+                try:
+                    update_config_toml(quiet=True)
+                    fresh = load_providers()
+                    providers_doc.clear()
+                    providers_doc.update(fresh)
+                    status_msg = "Synced model config"
+                except SyncError as exc:
+                    status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: sync model config failed"
+                menu_cursor = pi
+                continue
+            if pi == len(ordered) + 4:
                 added_msg = _curses_add_provider_win(providers_doc, providers, stdscr)
                 if added_msg:
                     status_msg = added_msg
                     changed = True
                 menu_cursor = pi
                 continue
-            if pi == len(ordered) + 4:
+            if pi == len(ordered) + 5:
                 enabled_msg = _curses_add_model_win(providers_doc, providers, stdscr)
                 if enabled_msg:
                     status_msg = enabled_msg
@@ -3076,6 +3099,7 @@ _PROVIDER_ENV_PAD = 1
 _MODEL_DESC_LABEL = "Model Descriptions"
 _CODEX_CONFIG_LABEL = "Codex Config"
 _UPDATE_LIST_LABEL = "Update Model List"
+_SYNC_CONFIG_LABEL = "Sync Model Config"
 
 
 def _provider_row_env_text(opt: str) -> str | None:
@@ -3100,6 +3124,7 @@ def _provider_state_token_col(providers: list) -> int:
         len(_MODEL_DESC_LABEL) + 1,
         len(_CODEX_CONFIG_LABEL) + 1,
         len(_UPDATE_LIST_LABEL) + 1,
+        len(_SYNC_CONFIG_LABEL) + 1,
     )
 
 
@@ -4243,7 +4268,8 @@ def update_config_toml(*, quiet: bool = False) -> Path:
     # forever, and persist that.
     if removed_entries:
         providers_doc["removed_providers"] = []
-        dump_providers(PROVIDERS_PATH, providers_doc)
+    providers_doc["last_synced"] = last_updated_stamp()
+    dump_providers(PROVIDERS_PATH, providers_doc)
     return path
 
 

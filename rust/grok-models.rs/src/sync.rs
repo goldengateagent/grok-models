@@ -1003,8 +1003,11 @@ tables will have an empty base_url",
         if let Some(obj) = doc.as_object_mut() {
             obj.insert("removed_providers".into(), Value::Array(Vec::new()));
         }
-        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
     }
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("last_synced".into(), Value::String(last_updated_stamp()));
+    }
+    jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
 
     Ok(path)
 }
@@ -1418,6 +1421,15 @@ mod tests {
         let mut doc = two_provider_doc();
         jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
         update_config_toml().unwrap();
+        let stamped = jsonio::load_providers().unwrap();
+        let last_synced = stamped
+            .get("last_synced")
+            .and_then(Value::as_str)
+            .expect("last_synced");
+        assert!(
+            regex_lite_stamp(last_synced),
+            "last_synced stamp not MM-DD-YYYY HH:MM AM/PM: {last_synced:?}"
+        );
         assert!(
             !paths::codex_config_toml_path().exists(),
             "flag off must not write Codex config.toml"

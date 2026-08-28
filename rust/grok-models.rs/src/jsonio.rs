@@ -79,12 +79,13 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 6] =
+pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
     [
         "include_descriptions",
         "write_codex_config_toml",
         "codex_model_provider",
         "last_updated",
+        "last_synced",
         "providers",
         "removed_providers",
     ];
@@ -422,6 +423,7 @@ mod tests {
         let mut with_stamp = serde_json::json!({
             "removed_providers": [],
             "last_updated": "08-26-2026 03:15 PM",
+            "last_synced": "08-26-2026 04:20 PM",
             "include_descriptions": true,
             "providers": []
         });
@@ -435,11 +437,13 @@ mod tests {
             [
                 "include_descriptions",
                 "last_updated",
+                "last_synced",
                 "providers",
                 "removed_providers",
             ]
         );
         assert!(out.contains("\"last_updated\": \"08-26-2026 03:15 PM\""));
+        assert!(out.contains("\"last_synced\": \"08-26-2026 04:20 PM\""));
 
         let mut with_codex = serde_json::json!({
             "providers": [],
@@ -469,6 +473,10 @@ mod tests {
         assert!(
             !out.contains("last_updated"),
             "dump must not invent last_updated: {out}"
+        );
+        assert!(
+            !out.contains("last_synced"),
+            "dump must not invent last_synced: {out}"
         );
     }
 

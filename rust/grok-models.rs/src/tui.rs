@@ -2588,7 +2588,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         let ordered: Vec<Map<String, Value>> = usable(doc);
         // Zero providers is a valid state: ➕ Add Provider… is reachable first.
         // Trailing block after a section rule: Codex Config, Model
-        // Descriptions toggle (Enter toggles it), then the two add actions.
+        // Descriptions toggle, Update Model List, Sync Model Config, then
+        // the two add actions.
         let descriptions_on = doc
             .get("include_descriptions")
             .and_then(Value::as_bool)
@@ -2614,6 +2615,16 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 ));
             }
             _ => labels.push(crate::core::UPDATE_LIST_LABEL.to_string()),
+        }
+        match doc.get("last_synced").and_then(Value::as_str) {
+            Some(ts) if !ts.is_empty() => {
+                labels.push(crate::core::pad_state_label(
+                    crate::core::SYNC_CONFIG_LABEL,
+                    &format!("[{ts}]"),
+                    token_col,
+                ));
+            }
+            _ => labels.push(crate::core::SYNC_CONFIG_LABEL.to_string()),
         }
         labels.push("➕ Add Provider…".to_string());
         labels.push("➕ Add Model…".to_string());
@@ -2726,6 +2737,9 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
                         let _ = crate::sync::update_config_toml_with(true);
                     }
+                    if let Ok(fresh) = jsonio::load_providers() {
+                        *doc = fresh;
+                    }
                     status_msg = Some(format!(
                         "Codex Config {}",
                         crate::jsonio::codex_status_token(doc)
@@ -2776,6 +2790,25 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 3 {
+            match crate::sync::update_config_toml_with(true) {
+                Ok(_) => {
+                    if let Ok(fresh) = jsonio::load_providers() {
+                        *doc = fresh;
+                    }
+                    status_msg = Some("Synced model config".to_string());
+                }
+                Err(e) => {
+                    status_msg = Some(if e.0.starts_with("error ") {
+                        e.0
+                    } else {
+                        format!("error {}: sync model config failed", e.0)
+                    });
+                }
+            }
+            menu_cursor = pi;
+            continue;
+        }
+        if pi == ordered.len() + 4 {
             // "➕ Add Provider…" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
                 status_msg = Some(msg);
@@ -2784,7 +2817,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 4 {
+        if pi == ordered.len() + 5 {
             // "➕ Add Model…" — cross-provider modal; auto-adds a missing
             // provider and enables just that model.
             if let Some(msg) = add_model_win(stdscr, doc) {
@@ -5135,8 +5168,8 @@ use serde_json::json;
         });
         let mut f = FakeStdscr::new(30, 80);
         // provider → Codex Config → Descriptions → Update Model List →
-        // Add Provider → Add Model → first Enabled Models row.
-        for _ in 0..6 {
+        // Sync Model Config → Add Provider → Add Model → first Enabled Models row.
+        for _ in 0..7 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // open reasoning picker
@@ -5178,7 +5211,7 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        for _ in 0..6 {
+        for _ in 0..7 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // (none) — no picker
@@ -5214,8 +5247,8 @@ use serde_json::json;
         });
         let mut f = FakeStdscr::new(30, 80);
         // provider → Codex Config → Descriptions → Update Model List →
-        // Add Provider → Add Model → first Enabled Models row.
-        for _ in 0..6 {
+        // Sync Model Config → Add Provider → Add Model → first Enabled Models row.
+        for _ in 0..7 {
             f.script(Key::Down);
         }
         f.script(Key::Char('q'));
@@ -5235,7 +5268,7 @@ use serde_json::json;
             bg_color(P::Selected),
             "current enabled-model row must be highlighted"
         );
-        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions"] {
+        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions", "Sync Model Config", "Update Model List"] {
             let row = last_matching(needle);
             assert_ne!(
                 row.3.bg,

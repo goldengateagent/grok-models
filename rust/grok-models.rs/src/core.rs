@@ -350,6 +350,7 @@ pub const PROVIDER_ENV_PAD: i32 = 1;
 pub const MODEL_DESC_LABEL: &str = "Model Descriptions";
 pub const CODEX_CONFIG_LABEL: &str = "Codex Config";
 pub const UPDATE_LIST_LABEL: &str = "Update Model List";
+pub const SYNC_CONFIG_LABEL: &str = "Sync Model Config";
 
 /// Env-cell text on a main-menu provider row (`ENV = value`), if any.
 pub fn provider_row_env_text(opt: &str) -> Option<&str> {
@@ -392,6 +393,7 @@ pub fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
         .max(MODEL_DESC_LABEL.len() + 1)
         .max(CODEX_CONFIG_LABEL.len() + 1)
         .max(UPDATE_LIST_LABEL.len() + 1)
+        .max(SYNC_CONFIG_LABEL.len() + 1)
 }
 
 pub fn pad_state_label(label: &str, token: &str, token_col: usize) -> String {
@@ -578,8 +580,10 @@ mod tests {
         let col = provider_state_token_col(&[a.clone(), b.clone()]);
         let desc = pad_state_label(MODEL_DESC_LABEL, "[enabled]", col);
         let upd = pad_state_label(UPDATE_LIST_LABEL, "[08-26-2026 03:15 PM]", col);
+        let syn = pad_state_label(SYNC_CONFIG_LABEL, "[08-26-2026 03:15 PM]", col);
         assert_eq!(desc.find('['), Some(tok_a), "Model Descriptions token must line up");
         assert_eq!(upd.find('['), Some(tok_a), "Update Model List token must line up");
+        assert_eq!(syn.find('['), Some(tok_a), "Sync Model Config token must line up");
     }
 
     #[test]
