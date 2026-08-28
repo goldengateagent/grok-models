@@ -2708,8 +2708,27 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             ) {
                 Some(SelectOutcome::Picked(i)) => {
                     let sel = values[i].clone();
-                    crate::jsonio::set_codex_selection(doc, sel.as_deref());
-                    let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                    let previous = crate::jsonio::codex_model_provider_id(doc);
+                    let is_switch = sel.is_some()
+                        && !previous.is_empty()
+                        && previous != "disabled"
+                        && sel.as_deref() != Some(previous.as_str());
+                    if is_switch {
+                        // Flush the previous pick: turn writing off, sync
+                        // (which deletes the previous catalog via the
+                        // one-shot cleanup), then turn writing back on for
+                        // the new pick and sync again.
+                        crate::jsonio::set_codex_selection(doc, None);
+                        let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                        let _ = crate::sync::update_config_toml_with(true);
+                        crate::jsonio::set_codex_selection(doc, sel.as_deref());
+                        let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                        let _ = crate::sync::update_config_toml_with(true);
+                    } else {
+                        crate::jsonio::set_codex_selection(doc, sel.as_deref());
+                        let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                        let _ = crate::sync::update_config_toml_with(true);
+                    }
                     status_msg = Some(format!(
                         "Codex Config {}",
                         crate::jsonio::codex_status_token(doc)

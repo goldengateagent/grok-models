@@ -2676,8 +2676,28 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     stdscr, choices, "Codex Config", initial=initial, back_on_left=True
                 )
                 if picked is not None:
-                    set_codex_selection(providers_doc, values[picked])
-                    dump_providers(PROVIDERS_PATH, providers_doc)
+                    previous = codex_model_provider_id(providers_doc)
+                    is_switch = (
+                        values[picked] is not None
+                        and previous
+                        and previous != "disabled"
+                        and values[picked] != previous
+                    )
+                    if is_switch:
+                        # Flush the previous pick: turn writing off, sync
+                        # (which deletes the previous catalog via the
+                        # one-shot cleanup), then turn writing back on for
+                        # the new pick and sync again.
+                        set_codex_selection(providers_doc, None)
+                        dump_providers(PROVIDERS_PATH, providers_doc)
+                        update_config_toml(quiet=True)
+                        set_codex_selection(providers_doc, values[picked])
+                        dump_providers(PROVIDERS_PATH, providers_doc)
+                        update_config_toml(quiet=True)
+                    else:
+                        set_codex_selection(providers_doc, values[picked])
+                        dump_providers(PROVIDERS_PATH, providers_doc)
+                        update_config_toml(quiet=True)
                     status_msg = f"Codex Config {codex_status_token(providers_doc)}"
                     changed = True
                 menu_cursor = pi
