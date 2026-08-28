@@ -212,24 +212,26 @@ pub fn render_models_text() -> Res<i32> {
     }
 
     println!();
+    let mut env_rows: Vec<(String, String, String)> = Vec::new();
     for provider in &providers {
+        if !crate::get_bool_obj(provider, "enabled", true) {
+            continue;
+        }
         let env = crate::first_env_key_from(provider);
         if !env.is_empty() {
-            let penabled = crate::get_bool_obj(provider, "enabled", true);
-            let marker = if penabled { '●' } else { '○' };
             let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
             let pname = provider
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(pid);
-            println!(
-                "{} Required env var: {} = {}  ({})",
-                marker,
-                env,
-                core::env_value(&env),
-                pname
-            );
+            env_rows.push((env.clone(), core::env_value(&env), pname.to_string()));
+        }
+    }
+    if !env_rows.is_empty() {
+        let maxlen = env_rows.iter().map(|(e, _, _)| e.len()).max().unwrap_or(0);
+        for (env, value, pname) in &env_rows {
+            println!("● {:<width$} = {}  ({})", env, value, pname, width = maxlen);
         }
     }
     println!("Summary: {} models enabled", total_enabled);
@@ -676,6 +678,28 @@ pub fn cmd_add_provider(provider_id: &str) -> Res<i32> {
     Ok(0)
 }
 
+/// `cmd_codex`: persist the Codex provider pick (or 'disable').
+pub fn cmd_codex(raw: &str) -> Res<i32> {
+    let mut doc = jsonio::load_providers()?;
+    let pid = raw.trim();
+    if pid == "disabled" {
+        jsonio::set_codex_selection(&mut doc, None);
+        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
+        println!("Codex Config disabled");
+        return Ok(0);
+    }
+    if !jsonio::enabled_provider_ids(&doc).iter().any(|e| e == pid) {
+        return Err(crate::SyncError(format!(
+            "--codex requires 'disabled' or an enabled provider id (got {})",
+            core::py_repr(pid)
+        )));
+    }
+    jsonio::set_codex_selection(&mut doc, Some(pid));
+    jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
+    println!("Codex Config {pid}");
+    Ok(0)
+}
+
 /// `cmd_import`: seed `providers.json` from the `[model.*]` tables already in
 /// `config.toml`, then enable those models. Reuses `--add-provider` and
 /// `--enable`, so no custom reconcile code is needed (mirrors Python).
@@ -724,10 +748,12 @@ pub fn cmd_import() -> Res<i32> {
         return Ok(0);
     }
 
-    // Providers that already exist are skipped by add-provider ("already
-    // exists"); per the revised flow they get enabled so run_sync reconciles
-    // them against the API (adds missing models, drops dead ones) before the
-    // per-model enables run.
+    // add-provider no-ops on a provider id that already exists in
+    // providers.json, so re-call it here for every imported provider and
+    // capture which ids it skipped. Those skipped providers need an
+    // explicit enable so the later run_sync reconciles them against the
+    // models.dev catalog (adds missing models, drops dead ones) before
+    // the per-model enables run.
     let providers_doc_before_add = jsonio::load_providers()?;
     let existing_ids: Vec<String> = providers_doc_before_add
         .get("providers")
@@ -828,5 +854,82 @@ mod tests {
         let existing = vec!["a".to_string()];
         let targets: Vec<String> = vec!["a/x".into(), "a/y".into(), "a".into()];
         assert!(missing_combo_providers(&targets, &existing).is_empty());
+    }
+
+    #[test]
+    fn cmd_codex_sets_provider_or_disabled() {
+        let _guard = crate::test_support::grok_home_lock();
+        let pid = std::process::id();
+        let grok = std::env::temp_dir().join(format!("gm-cmd-codex-grok-{pid}"));
+        let codex = std::env::temp_dir().join(format!("gm-cmd-codex-codex-{pid}"));
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "enabled": true,
+                "models": { "openrouter/free": { "enabled": true } }
+            }]
+        });
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+
+        assert!(cmd_codex("true").is_err());
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        cmd_codex("openrouter").expect("enable provider");
+        let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        assert_eq!(loaded["write_codex_config_toml"], Value::Bool(true));
+        assert_eq!(loaded["codex_model_provider"], "openrouter");
+        assert!(
+            !codex.join("openrouter-models.json").exists(),
+            "catalog json must NOT be written on enable; only at sync"
+        );
+
+        // Sync is the only path that writes the Codex sibling files.
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        crate::sync::update_config_toml_with(false).unwrap();
+        assert!(
+            codex.join("openrouter-models.json").exists(),
+            "catalog json must be written by sync"
+        );
+
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        cmd_codex("disabled").expect("disable");
+        let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        assert_eq!(loaded["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(
+            loaded["codex_model_provider"], "openrouter",
+            "disable alone must keep the remembered provider; only sync clears it"
+        );
+        assert!(
+            codex.join("openrouter-models.json").exists(),
+            "disable alone must not delete the catalog; only sync does"
+        );
+
+        // Next sync one-shot clears the remembered provider and deletes the catalog.
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        crate::sync::update_config_toml_with(false).unwrap();
+        let cleared = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        assert_eq!(
+            cleared["codex_model_provider"], "",
+            "next sync must clear the remembered provider (one-shot)"
+        );
+        assert!(
+            !codex.join("openrouter-models.json").exists(),
+            "catalog json must be deleted on sync after disable"
+        );
+
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        assert!(cmd_codex("missing").is_err());
     }
 }

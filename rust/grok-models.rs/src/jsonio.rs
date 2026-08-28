@@ -79,8 +79,15 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 4] =
-    ["include_descriptions", "last_updated", "providers", "removed_providers"];
+pub const TOP_LEVEL_KEY_ORDER: [&str; 6] =
+    [
+        "include_descriptions",
+        "write_codex_config_toml",
+        "codex_model_provider",
+        "last_updated",
+        "providers",
+        "removed_providers",
+    ];
 pub const PROVIDER_KEY_ORDER: [&str; 6] =
     ["id", "name", "env_key", "base_url", "enabled", "models"];
 const MODEL_KEY_ORDER: [&str; 7] = [
@@ -96,6 +103,10 @@ const MODEL_KEY_ORDER: [&str; 7] = [
 /// Default for the top-level include_descriptions flag when providers.json
 /// does not carry it yet (off).
 pub const INCLUDE_DESCRIPTIONS_DEFAULT: bool = false;
+/// Default for write_codex_config_toml when providers.json does not carry it.
+pub const WRITE_CODEX_CONFIG_TOML_DEFAULT: bool = false;
+/// Default for codex_model_provider when providers.json does not carry it.
+pub const CODEX_MODEL_PROVIDER_DEFAULT: &str = "";
 
 /// models.dev `description` for one model entry, or None when absent/empty.
 pub fn catalog_description(minfo: &Value) -> Option<&str> {
@@ -198,10 +209,99 @@ fn canonicalize_providers(data: &mut Value) {
     }
 }
 
+/// Ids of configured providers with enabled=True, in file order.
+pub fn enabled_provider_ids(doc: &Value) -> Vec<String> {
+    doc.get("providers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let obj = p.as_object()?;
+                    let pid = obj.get("id").and_then(Value::as_str)?;
+                    if pid.is_empty() {
+                        return None;
+                    }
+                    if !obj.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                        return None;
+                    }
+                    Some(pid.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Current `codex_model_provider` string, or empty.
+pub fn codex_model_provider_id(doc: &Value) -> String {
+    doc.get("codex_model_provider")
+        .and_then(Value::as_str)
+        .unwrap_or(CODEX_MODEL_PROVIDER_DEFAULT)
+        .to_string()
+}
+
+/// Persist the Codex provider pick. None disables writing but leaves
+/// `codex_model_provider` so the next config write can clear the previously
+/// emitted Codex block once.
+pub fn set_codex_selection(doc: &mut Value, pid: Option<&str>) {
+    if let Some(obj) = doc.as_object_mut() {
+        match pid {
+            Some(p) if !p.is_empty() => {
+                obj.insert("write_codex_config_toml".into(), Value::Bool(true));
+                obj.insert("codex_model_provider".into(), Value::String(p.to_string()));
+            }
+            _ => {
+                obj.insert("write_codex_config_toml".into(), Value::Bool(false));
+            }
+        }
+    }
+}
+
+/// If write is on but the configured provider is missing or disabled, turn
+/// write off and keep `codex_model_provider` for a one-shot cleanup.
+/// Does not invent keys when already unset.
+pub fn reset_codex_if_invalid(doc: &mut Value) -> bool {
+    let flag = doc
+        .get("write_codex_config_toml")
+        .and_then(Value::as_bool)
+        .unwrap_or(WRITE_CODEX_CONFIG_TOML_DEFAULT);
+    if !flag {
+        return false;
+    }
+    let pid = codex_model_provider_id(doc);
+    if !pid.is_empty() && enabled_provider_ids(doc).iter().any(|e| e == &pid) {
+        return false;
+    }
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("write_codex_config_toml".into(), Value::Bool(false));
+    }
+    true
+}
+
+/// Main-menu state token: provider id, or "disabled".
+pub fn codex_status_token(doc: &Value) -> String {
+    let flag = doc
+        .get("write_codex_config_toml")
+        .and_then(Value::as_bool)
+        .unwrap_or(WRITE_CODEX_CONFIG_TOML_DEFAULT);
+    if !flag {
+        return "disabled".to_string();
+    }
+    let pid = doc
+        .get("codex_model_provider")
+        .and_then(Value::as_str)
+        .unwrap_or(CODEX_MODEL_PROVIDER_DEFAULT);
+    if pid.is_empty() {
+        "disabled".to_string()
+    } else {
+        pid.to_string()
+    }
+}
+
 /// Single write path for providers.json: this is the only sort. Providers
 /// A–Z by display name, models A–Z by display name. `doc` is replaced with
 /// the canonical form so memory matches the file.
 pub fn dump_providers(path: &Path, doc: &mut Value) -> Res<()> {
+    reset_codex_if_invalid(doc);
     let empty = serde_json::Map::new();
     let obj = doc.as_object().unwrap_or(&empty);
     let mut ordered = Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER));
@@ -236,6 +336,7 @@ pub fn load_providers_from(path: &Path) -> Res<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn dump_format_matches_python() {
@@ -331,9 +432,34 @@ mod tests {
         let keys: Vec<&str> = with_stamp.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
-            ["include_descriptions", "last_updated", "providers", "removed_providers"]
+            [
+                "include_descriptions",
+                "last_updated",
+                "providers",
+                "removed_providers",
+            ]
         );
         assert!(out.contains("\"last_updated\": \"08-26-2026 03:15 PM\""));
+
+        let mut with_codex = serde_json::json!({
+            "providers": [],
+            "write_codex_config_toml": true,
+            "include_descriptions": false,
+        });
+        let path = std::env::temp_dir().join(format!("gm-dump-codexflag-{}.json", std::process::id()));
+        dump_providers(&path, &mut with_codex).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        let keys: Vec<&str> = with_codex.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "include_descriptions",
+                "write_codex_config_toml",
+                "providers"
+            ]
+        );
+        assert_eq!(with_codex["write_codex_config_toml"], Value::Bool(false));
+        assert!(with_codex.get("codex_model_provider").is_none());
 
         let mut without = serde_json::json!({ "providers": [] });
         let path = std::env::temp_dir().join(format!("gm-dump-nolastupd-{}.json", std::process::id()));
@@ -344,5 +470,83 @@ mod tests {
             !out.contains("last_updated"),
             "dump must not invent last_updated: {out}"
         );
+    }
+
+    fn sample_providers() -> Value {
+        serde_json::json!({
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "name": "OpenRouter",
+                    "enabled": true,
+                    "models": { "openrouter/free": { "enabled": true, "name": "Free" } }
+                },
+                {
+                    "id": "ollama-cloud",
+                    "name": "Ollama Cloud",
+                    "enabled": true,
+                    "models": { "gemma4:31b": { "enabled": true, "name": "Gemma" } }
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn set_codex_selection_writes_flag_and_provider() {
+        let mut doc = sample_providers();
+        set_codex_selection(&mut doc, Some("openrouter"));
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(true));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+        set_codex_selection(&mut doc, None);
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+        assert_eq!(codex_status_token(&doc), "disabled");
+    }
+
+    #[test]
+    fn dump_resets_codex_when_provider_disabled() {
+        let mut doc = sample_providers();
+        set_codex_selection(&mut doc, Some("openrouter"));
+        doc["providers"][0]["enabled"] = Value::Bool(false);
+        let path = std::env::temp_dir().join(format!("gm-codex-reset-dis-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+    }
+
+    #[test]
+    fn dump_resets_codex_when_provider_deleted() {
+        let mut doc = sample_providers();
+        set_codex_selection(&mut doc, Some("openrouter"));
+        doc["providers"].as_array_mut().unwrap().remove(0);
+        let path = std::env::temp_dir().join(format!("gm-codex-reset-del-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+    }
+
+    #[test]
+    fn dump_keeps_codex_when_provider_still_enabled() {
+        let mut doc = sample_providers();
+        set_codex_selection(&mut doc, Some("ollama-cloud"));
+        let path = std::env::temp_dir().join(format!("gm-codex-keep-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(true));
+        assert_eq!(doc["codex_model_provider"], "ollama-cloud");
+        assert_eq!(codex_status_token(&doc), "ollama-cloud");
+    }
+
+    #[test]
+    fn dump_does_not_invent_codex_keys() {
+        let mut doc = serde_json::json!({ "providers": [] });
+        let path = std::env::temp_dir().join(format!("gm-codex-noinvent-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let out = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!out.contains("write_codex_config_toml"), "{out}");
+        assert!(!out.contains("codex_model_provider"), "{out}");
     }
 }

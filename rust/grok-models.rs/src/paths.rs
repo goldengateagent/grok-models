@@ -48,3 +48,32 @@ pub fn config_toml_path() -> PathBuf {
         _ => home_dir().join(".grok").join("config.toml"),
     }
 }
+
+/// `$CODEX_HOME` if set and non-empty, else `~/.codex`.
+pub fn codex_home() -> PathBuf {
+    match std::env::var("CODEX_HOME") {
+        Ok(home) if !home.is_empty() => PathBuf::from(home),
+        _ => home_dir().join(".codex"),
+    }
+}
+
+pub fn codex_config_toml_path() -> PathBuf {
+    codex_home().join("config.toml")
+}
+
+/// Catalog file next to config.toml: `$CODEX_HOME/<id>-models.json` or
+/// `~/.codex/<id>-models.json`.
+pub fn codex_models_json_path(provider_id: &str) -> PathBuf {
+    codex_home().join(format!("{provider_id}-models.json"))
+}
+
+/// TOML `model_catalog_json` value matching `codex_models_json_path`.
+pub fn codex_models_json_toml_value(provider_id: &str) -> String {
+    match std::env::var("CODEX_HOME") {
+        Ok(home) if !home.is_empty() => {
+            let _home = home;
+            format!("$CODEX_HOME/{provider_id}-models.json")
+        }
+        _ => format!("~/.codex/{provider_id}-models.json"),
+    }
+}

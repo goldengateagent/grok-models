@@ -40,6 +40,9 @@ fn setup_test_home() {
     let home = std::env::temp_dir().join(format!("gm-harness-home-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("create test GROK_HOME");
     std::env::set_var("GROK_HOME", &home);
+    let codex = std::env::temp_dir().join(format!("gm-harness-codex-{}", std::process::id()));
+    std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
+    std::env::set_var("CODEX_HOME", &codex);
 }
 
 fn main() {

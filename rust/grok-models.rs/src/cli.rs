@@ -16,6 +16,7 @@ pub struct Args {
     pub models: bool,
     pub providers: bool,
     pub provider: Option<String>,
+    pub codex: Option<String>,
 }
 
 const HELP: &str = "\
@@ -42,6 +43,7 @@ examples:
   grok-models --enable opencode-go/glm-5.3 enable a model
   grok-models --disable opencode-go/glm-5.3
   grok-models --disable-all
+  grok-models --codex openrouter           write Codex config for this provider on sync (or 'disabled')
   grok-models --sync                       refresh from models.dev; rewrite config.toml
   grok-models --import                     pull [model.*] from an existing config.toml";
 
@@ -59,6 +61,7 @@ pub fn print_help() {
     println!("  --enable TARGET          Enable provider or provider/model (repeatable)");
     println!("  --disable TARGET         Disable provider or provider/model (repeatable)");
     println!("  --disable-all            Disable every model in every provider");
+    println!("  --codex PROVIDER         Write Codex config for this enabled provider on sync (or 'disabled')");
     println!("  --sync                   Refresh providers.json from models.dev; rewrite config.toml");
     println!("  --import                 Import providers/models from existing config.toml [model.*]");
     println!("  -h, --help               Show this help and exit");
@@ -78,6 +81,7 @@ pub fn parse(argv: &[String]) -> Res<Args> {
                 "--enable" => args.enable.push(val),
                 "--disable" => args.disable.push(val),
                 "--provider" => args.provider = Some(val),
+                "--codex" => args.codex = Some(val),
                 other => return fail(format!("unknown flag {other}")),
             }
             Ok(())
@@ -86,7 +90,7 @@ pub fn parse(argv: &[String]) -> Res<Args> {
         // --foo=bar form
         if let Some((name, val)) = arg.split_once('=') {
             match name {
-                "--add-provider" | "--search" | "--enable" | "--disable" | "--provider" => {
+                "--add-provider" | "--search" | "--enable" | "--disable" | "--provider" | "--codex" => {
                     consume_value(&mut a, val.to_string(), name)?;
                     i += 1;
                     continue;
@@ -101,7 +105,7 @@ pub fn parse(argv: &[String]) -> Res<Args> {
         }
 
         match arg.as_str() {
-            "--add-provider" | "--search" | "--enable" | "--disable" | "--provider" => {
+            "--add-provider" | "--search" | "--enable" | "--disable" | "--provider" | "--codex" => {
                 let i_next = i + 1;
                 if i_next >= argv.len() {
                     return fail(format!("{arg} requires a value"));
@@ -167,6 +171,9 @@ pub fn parse(argv: &[String]) -> Res<Args> {
     if a.models {
         group_flags.push("--models");
     }
+    if a.codex.is_some() {
+        group_flags.push("--codex");
+    }
     if group_flags.len() > 1 {
         return fail(format!(
             "the following arguments are mutually exclusive: {}",
@@ -201,6 +208,14 @@ mod tests {
         let p = parse(&argv).unwrap();
         assert_eq!(p.enable, vec!["opencode", "foo/bar"]);
         assert_eq!(p.disable, vec!["openrouter/x"]);
+    }
+
+    #[test]
+    fn parses_codex() {
+        let p = parse(&a(&["--codex", "openrouter"])).unwrap();
+        assert_eq!(p.codex.as_deref(), Some("openrouter"));
+        let p = parse(&a(&["--codex=disabled"])).unwrap();
+        assert_eq!(p.codex.as_deref(), Some("disabled"));
     }
 
     #[test]

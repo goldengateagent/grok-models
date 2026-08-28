@@ -49,6 +49,9 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     if !args.enable.is_empty() || !args.disable.is_empty() {
         return commands::cmd_toggle(&args.enable, &args.disable);
     }
+    if let Some(raw) = args.codex {
+        return commands::cmd_codex(&raw);
+    }
     if args.sync {
         return commands::cmd_sync();
     }

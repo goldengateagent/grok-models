@@ -91,8 +91,8 @@ pub enum Key {
 /// Provider ids highlighted in the Add Provider screen's "Suggested" section.
 /// Anything already configured lands in the "Added" section above it; the rest
 /// are listed unhighlighted below. Mirrors `SUGGESTED_PROVIDER_IDS` in Python.
-pub const SUGGESTED_PROVIDER_IDS: [&str; 4] =
-    ["opencode", "opencode-go", "openrouter", "ollama-cloud"];
+pub const SUGGESTED_PROVIDER_IDS: [&str; 5] =
+    ["opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Paint {
@@ -674,6 +674,9 @@ fn pin_model_cursor_to_scroll(
         .or_else(|| models.len().checked_sub(1));
 }
 
+/// Explanatory note shown directly under the heading on the Codex Config page.
+const CODEX_CONFIG_INFO: &str = "$CODEX_HOME/config.toml and $CODEX_HOME/<provider>-models.json are updated to enable this provider's enabled models. Codex only allows one configured provider by setting:\n\n  model_provider = <provider>\n  model_catalog_json = <provider>-models.json\n\nDisabling removes this config from config.toml and deletes its models json file.";
+
 pub fn select_win<S: Stdscr>(
     stdscr: &mut S,
     options: &[String],
@@ -716,10 +719,69 @@ pub fn select_win<S: Stdscr>(
     loop {
         stdscr.erase();
         let (h, w) = stdscr.getmaxyx();
+        // Codex Config page: explanatory note directly under the heading.
+        let mut info_lines: Vec<String> = Vec::new();
+        let mut is_codex_config = false;
+        if title.trim() == "Codex Config" {
+            is_codex_config = true;
+            let iw = (w.max(1) as usize).saturating_sub(4);
+            for para in CODEX_CONFIG_INFO.split('\n') {
+                if para.is_empty() {
+                    info_lines.push(String::new());
+                    continue;
+                }
+                let mut cur = String::new();
+                for word in para.split(' ') {
+                    let cand = if cur.is_empty() {
+                        word.to_string()
+                    } else {
+                        format!("{cur} {word}")
+                    };
+                    if str_cols(&cand) as usize <= iw {
+                        cur = cand;
+                    } else {
+                        if !cur.is_empty() {
+                            info_lines.push(std::mem::take(&mut cur));
+                        }
+                        cur = word.to_string();
+                    }
+                }
+                if !cur.is_empty() {
+                    info_lines.push(cur);
+                }
+            }
+        }
+        let info_h = info_lines.len();
         paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
         draw_header(stdscr, &format!("  {title}"));
+        // Blank row padding under the heading on the Codex Config page only.
+        if is_codex_config {
+            stdscr.addstr(
+                1,
+                0,
+                &" ".repeat((w.max(1) as usize).saturating_sub(1)),
+                Paint::plain(tn_color(P::Text), bg_color(P::Text)),
+            );
+        }
+        let info_row0 = if is_codex_config { 2 } else { 1 };
+        for (i, line) in info_lines.iter().enumerate() {
+            stdscr.addstr(
+                info_row0 + i as i32,
+                2,
+                &clip_cols(line, (w.max(1) as usize).saturating_sub(3)),
+                Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
+            );
+        }
 
-        let list_h = ((h - 4).max(1)) as usize;
+        // list_top pushes the list below the info text + padding row when
+        // present. Original layout (list_top = 2) is preserved for pages
+        // without info text (all pages other than Codex Config).
+        let list_top: usize = if is_codex_config { 3 + info_h } else { 2 };
+        let list_h: usize = if is_codex_config {
+            ((h - 5 - info_h as i32).max(1)) as usize
+        } else {
+            ((h - 4).max(1)) as usize
+        };
         if current < top {
             top = current;
         }
@@ -737,7 +799,7 @@ pub fn select_win<S: Stdscr>(
                 let trial_sep = 2 + n as i32 + 1; // separator after the shift
                 let avail_bottom = h - 5;
                 if trial_sep + 1 <= avail_bottom {
-                    let rule_y = 2 + (before - top) as i32;
+                    let rule_y = list_top as i32 + (before - top) as i32;
                     let rule = "─".repeat((w.max(1) as usize).saturating_sub(1));
                     stdscr.addstr(rule_y, 0, &rule, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
                     true
@@ -765,9 +827,9 @@ pub fn select_win<S: Stdscr>(
                 break;
             }
             let y = if rule_drawn && idx >= section_sep_before.unwrap_or(usize::MAX) {
-                2 + row as i32 + 1
+                list_top as i32 + row as i32 + 1
             } else {
-                2 + row as i32
+                list_top as i32 + row as i32
             };
             let is_sel = idx == current;
             let row_paint = if is_sel {
@@ -912,13 +974,16 @@ pub fn select_win<S: Stdscr>(
             }
         }
 
-        // Separator line (pushed down one row while the rule is shown)
-        let mut sep_y = 2 + (n.min(h as usize - 4) as i32);
+        // Separator line (pushed down one row while the rule is shown).
+        // Skipped on the Codex Config page, which has no footer below it.
+        let mut sep_y = list_top as i32 + (n.min((h as usize).saturating_sub(4 + info_h)) as i32);
         if rule_drawn {
             sep_y += 1;
         }
-        let sep = "─".repeat((w.max(1) as usize).saturating_sub(1));
-        stdscr.addstr(sep_y, 0, &sep, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+        if !is_codex_config {
+            let sep = "─".repeat((w.max(1) as usize).saturating_sub(1));
+            stdscr.addstr(sep_y, 0, &sep, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+        }
 
         // Models preview: fill the empty space below the list (the --config
         // main menu) with the enabled-models listing, styled like --models.
@@ -1168,12 +1233,12 @@ pub struct ModelSearch<'a> {
 /// Behavior contract for a filter-list screen, mirroring the callback set
 /// python passes into `_curses_filter_list_win`.
 pub trait FilterList {
-    type Entry;
+    type Entry: PartialEq + Clone;
     /// (entries, query) -> (ordered entries, separators). Separators are
     /// (index before which to insert a `─` rule occupying its own row).
-    fn compute_view(&self, entries: &[Self::Entry], query: &str) -> (Vec<Self::Entry>, Vec<(usize, P)>);
+    fn compute_view(&mut self, entries: &[Self::Entry], query: &str) -> (Vec<Self::Entry>, Vec<(usize, P)>);
     /// (entry, is_selected) -> colored segments for the row.
-    fn render(&self, entry: &Self::Entry, is_selected: bool) -> Vec<(String, P)>;
+    fn render(&mut self, entry: &Self::Entry, is_selected: bool) -> Vec<(String, P)>;
     /// Enter on an entry: return true to keep the window open, false to close.
     /// Receives the active stdscr so models can draw overlays (inline errors).
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &Self::Entry) -> bool;
@@ -1236,18 +1301,40 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
     let mut current = 0usize;
     let mut top = 0usize;
     let mut snap_to_current = false;
+    // Cache the computed view so arrow-key navigation (which leaves the query
+    // untouched) reuses it instead of re-filtering/sorting the whole catalog
+    // every keystroke. After a toggle the recompute runs, the toggled item
+    // leaves its old `filtered` index, and the next item in its section
+    // slides up to occupy that index. `current` already points at the
+    // right neighbor — no adjustment is needed.
+    let mut cached_q: Option<String> = None;
+    let mut cached_view: Option<(Vec<M::Entry>, Vec<(usize, P)>)> = None;
+    let mut dirty = true;
     loop {
-        let (filtered, separators) = model.compute_view(entries, &query);
+        if dirty || cached_q.as_deref() != Some(query.as_str()) {
+            cached_view = Some(model.compute_view(entries, &query));
+            cached_q = Some(query.clone());
+            dirty = false;
+        }
+        let (filtered, separators) = cached_view.as_ref().unwrap();
         if filtered.is_empty() {
             current = 0;
         } else if current >= filtered.len() {
             current = filtered.len() - 1;
         }
-        let view = build_filter_view_rows(filtered.len(), &separators);
-        let cur_vis = view
-            .iter()
-            .position(|r| matches!(r, FilterViewRow::Item(i) if *i == current))
-            .unwrap_or(0);
+        let view = build_filter_view_rows(filtered.len(), separators);
+        // Map filtered-index -> visual-row in O(N) once, then look up
+        // `current` in O(1). The previous `position()` scan ran on every
+        // frame, which is the per-frame hot path over a 10k-row catalog.
+        let mut pos_of: Vec<usize> = vec![0; filtered.len()];
+        for (vi, row) in view.iter().enumerate() {
+            if let FilterViewRow::Item(i) = row {
+                if *i < pos_of.len() {
+                    pos_of[*i] = vi;
+                }
+            }
+        }
+        let cur_vis = pos_of.get(current).copied().unwrap_or(0);
         stdscr.erase();
         let (h, w) = stdscr.getmaxyx();
         paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
@@ -1365,8 +1452,27 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                 top = 0;
             }
             Key::Enter => {
-                if !filtered.is_empty() && !model.on_enter(stdscr, &filtered[current]) {
-                    return;
+                if !filtered.is_empty() {
+                    if !model.on_enter(stdscr, &filtered[current]) {
+                        return;
+                    }
+                    dirty = true;
+                    // After a toggle, move the cursor one row inside the
+                    // section the toggled item just left: disable from the
+                    // enabled side moves up (current - 1), enable from the
+                    // disabled side moves down (current + 1). The chevron
+                    // separator marks the boundary between the two
+                    // sections.
+                    let chev_idx = separators
+                        .iter()
+                        .find_map(|(i, p)| if *p == P::Chevron { Some(*i) } else { None });
+                    if chev_idx.map_or(false, |i| current < i) {
+                        if current > 0 {
+                            current -= 1;
+                        }
+                    } else if current + 1 < filtered.len() {
+                        current += 1;
+                    }
                 }
             }
             Key::Char(c) if c.is_ascii_graphic() || c == ' ' => {
@@ -1432,7 +1538,7 @@ struct ModelPicker<'a> {
 impl<'a> FilterList for ModelPicker<'a> {
     type Entry = String;
 
-    fn compute_view(&self, _entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
+    fn compute_view(&mut self, _entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
         let sorted = core::sort_model_indices(self.ids, self.models, Some(query));
         let ordered: Vec<String> = sorted.filtered.iter().map(|&i| self.ids[i].clone()).collect();
         let mut separators: Vec<(usize, P)> = Vec::new();
@@ -1446,7 +1552,7 @@ impl<'a> FilterList for ModelPicker<'a> {
         (ordered, separators)
     }
 
-    fn render(&self, mid: &String, _is_sel: bool) -> Vec<(String, P)> {
+    fn render(&mut self, mid: &String, _is_sel: bool) -> Vec<(String, P)> {
         let m = self.models.get(mid);
         let enabled = m.map(|v| crate::get_bool_val(v, "enabled", true)).unwrap_or(false);
         let is_free = mid.to_lowercase().contains("free");
@@ -1580,6 +1686,11 @@ struct AddProviderPicker<'a> {
     api: Value,
     added: Option<String>,
     status: std::rc::Rc<RefCell<Option<String>>>,
+    // Cache for padded_labels(), keyed on (providers_count, api_count).
+    // Recomputed only when the providers doc grows or the api key set changes,
+    // so per-row render calls are O(1) HashMap lookups instead of an O(N)
+    // scan of the full models.dev catalog.
+    label_cache: Option<(usize, usize, std::collections::HashMap<String, String>)>,
 }
 
 fn provider_matches(pid: &str, name: &str, term_l: &str) -> bool {
@@ -1599,7 +1710,26 @@ impl<'a> AddProviderPicker<'a> {
             .collect()
     }
 
-    fn padded_labels(&self) -> std::collections::HashMap<String, String> {
+    fn padded_labels(&mut self) -> &std::collections::HashMap<String, String> {
+        let providers_count = self
+            .doc
+            .get("providers")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let api_count = self.api.as_object().map(|o| o.len()).unwrap_or(0);
+        let cache_hit = self
+            .label_cache
+            .as_ref()
+            .is_some_and(|(pc, ac, _)| *pc == providers_count && *ac == api_count);
+        if !cache_hit {
+            let map = self.compute_padded_labels();
+            self.label_cache = Some((providers_count, api_count, map));
+        }
+        &self.label_cache.as_ref().expect("cache populated above").2
+    }
+
+    fn compute_padded_labels(&self) -> std::collections::HashMap<String, String> {
         let added = self.added_ids();
         let mut rows: Vec<(String, String, bool)> = Vec::new();
         if let Some(obj) = self.api.as_object() {
@@ -1643,7 +1773,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
     type Entry = (String, String);
 
     fn compute_view(
-        &self,
+        &mut self,
         entries: &[(String, String)],
         query: &str,
     ) -> (Vec<(String, String)>, Vec<(usize, P)>) {
@@ -1695,7 +1825,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         (ordered, separators)
     }
 
-    fn render(&self, entry: &(String, String), _is_sel: bool) -> Vec<(String, P)> {
+    fn render(&mut self, entry: &(String, String), _is_sel: bool) -> Vec<(String, P)> {
         let (pid, _name) = entry;
         let added = self.added_ids().contains(pid);
         let suggested = SUGGESTED_PROVIDER_IDS.contains(&pid.as_str()) && !added;
@@ -1792,6 +1922,7 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
         api,
         added: None,
         status: std::rc::Rc::clone(&status_cell),
+        label_cache: None,
     };
     let status_for_fn = std::rc::Rc::clone(&status_cell);
     filter_list_win_with(
@@ -1977,11 +2108,36 @@ struct AddModelPicker<'a> {
     doc: &'a mut Value,
     api: Value,
     status: Option<String>,
+    // Cache of (pid, mid) combos that are enabled in providers.json, so render()
+    // does O(1) lookups instead of a linear scan per row per keystroke.
+    enabled_cache: std::collections::HashSet<(String, String)>,
 }
 
 impl<'a> AddModelPicker<'a> {
     fn is_enabled(&self, pid: &str, mid: &str) -> bool {
-        combo_enabled(self.doc, pid, mid)
+        self.enabled_cache.contains(&(pid.to_string(), mid.to_string()))
+    }
+
+    fn refresh_enabled_cache(&mut self) {
+        let mut set: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
+            for p in arr {
+                if !p.is_object() {
+                    continue;
+                }
+                let Some(pid) = p.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(mm) = p.get("models").and_then(Value::as_object) {
+                    for (mid, m) in mm {
+                        if m.is_object() && crate::get_bool_val(m, "enabled", true) {
+                            set.insert((pid.to_string(), mid.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        self.enabled_cache = set;
     }
 }
 
@@ -1989,34 +2145,40 @@ impl<'a> FilterList for AddModelPicker<'a> {
     type Entry = (String, String, String, String);
 
     fn compute_view(
-        &self,
+        &mut self,
         entries: &[(String, String, String, String)],
         query: &str,
     ) -> (Vec<(String, String, String, String)>, Vec<(usize, P)>) {
+        // Refresh enabled-state cache once per redraw; render() does O(1) lookups.
+        self.refresh_enabled_cache();
         // Searchable: model display name and model id only.
         let term_l = query.to_lowercase();
-        let mut ordered: Vec<_> = entries
+        // Precompute the sort key once per entry so the sort does O(1) tuple
+        // comparisons instead of allocating (lowercase + clone) on every
+        // comparison — a large cost in debug builds over a big catalog.
+        let mut keyed: Vec<(
+            (u8, u8, String, String, String),
+            (String, String, String, String),
+        )> = entries
             .iter()
             .filter(|(_, mid, mname, _)| {
                 term_l.is_empty()
                     || mname.to_lowercase().contains(&term_l)
                     || mid.to_lowercase().contains(&term_l)
             })
-            .cloned()
+            .map(|(pid, mid, mname, pname)| {
+                let en = if self.is_enabled(pid, mid) { 0u8 } else { 1 };
+                let free = if mid.to_lowercase().contains("free") { 0u8 } else { 1 };
+                let key = (en, free, mname.to_lowercase(), pid.clone(), mid.clone());
+                (
+                    key,
+                    (pid.clone(), mid.clone(), mname.clone(), pname.clone()),
+                )
+            })
             .collect();
-        ordered.sort_by(|a, b| {
-            let a_en = if self.is_enabled(&a.0, &a.1) { 0u8 } else { 1 };
-            let b_en = if self.is_enabled(&b.0, &b.1) { 0u8 } else { 1 };
-            let a_free = if a.1.to_lowercase().contains("free") { 0u8 } else { 1 };
-            let b_free = if b.1.to_lowercase().contains("free") { 0u8 } else { 1 };
-            (a_en, a_free, a.2.to_lowercase(), a.0.clone(), a.1.clone()).cmp(&(
-                b_en,
-                b_free,
-                b.2.to_lowercase(),
-                b.0.clone(),
-                b.1.clone(),
-            ))
-        });
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        let ordered: Vec<(String, String, String, String)> =
+            keyed.into_iter().map(|(_, e)| e).collect();
         let enabled_count = ordered
             .iter()
             .filter(|(pid, mid, _, _)| self.is_enabled(pid, mid))
@@ -2037,7 +2199,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
     }
 
     fn render(
-        &self,
+        &mut self,
         entry: &(String, String, String, String),
         _is_sel: bool,
     ) -> Vec<(String, P)> {
@@ -2066,7 +2228,30 @@ impl<'a> FilterList for AddModelPicker<'a> {
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String, String, String)) -> bool {
         let (pid, mid, mname, pname) = entry;
         if combo_enabled(self.doc, pid, mid) {
-            return true; // already enabled; inert row
+            // Already enabled: disable it. The model stays in the catalog
+            // (from models.dev) so it visibly moves into the disabled or
+            // free-disabled section.
+            let Some(slot) = find_by_id_mut(self.doc, pid) else {
+                inline_error_win(
+                    stdscr,
+                    &format!("Disable failed: provider {pid:?} missing"),
+                );
+                return true; // stay open
+            };
+            let mut disabled = false;
+            if let Some(models) = slot.get_mut("models").and_then(Value::as_object_mut) {
+                if let Some(m) = models.get_mut(mid) {
+                    if let Some(obj) = m.as_object_mut() {
+                        obj.insert("enabled".into(), Value::Bool(false));
+                        disabled = true;
+                    }
+                }
+            }
+            if disabled {
+                let _ = jsonio::dump_providers(&crate::paths::providers_path(), self.doc);
+                self.status = Some(format!("Disabled {mname} ({pname}) - {pid}/{mid}."));
+            }
+            return true; // stay open
         }
         let existing: Vec<String> = usable(self.doc)
             .iter()
@@ -2122,7 +2307,10 @@ impl<'a> FilterList for AddModelPicker<'a> {
             Some(url) => crate::sync::live_fetch_error_status(&url),
             None => format!("{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."),
         });
-        false // close back to the main menu
+        // Stay open so the user can keep adding models; ESC returns to the
+        // main menu, which then shows the last confirmation in its status
+        // bar.
+        true
     }
 }
 
@@ -2140,7 +2328,7 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
         }
     };
     let catalog = build_add_model_catalog(&api, doc);
-    let mut picker = AddModelPicker { doc, api, status: None };
+    let mut picker = AddModelPicker { doc, api, status: None, enabled_cache: Default::default() };
     filter_list_win_with(
         stdscr,
         &catalog,
@@ -2400,6 +2588,11 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
             token_col,
         ));
+        labels.push(crate::core::pad_state_label(
+            crate::core::CODEX_CONFIG_LABEL,
+            &format!("[{}]", crate::jsonio::codex_status_token(doc)),
+            token_col,
+        ));
         match doc.get("last_updated").and_then(Value::as_str) {
             Some(ts) if !ts.is_empty() => {
                 labels.push(crate::core::pad_state_label(
@@ -2417,7 +2610,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         // trailing block; Enter lands on it as SelectOutcome::Picked.
         let pi = match select_win(stdscr,
             &labels,
-            "Select Provider",
+            "Select Provider (changes sync on exit)",
             false,
             &[],
             false,
@@ -2449,7 +2642,6 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 i
             }
         };
-        menu_cursor = 0;
         if pi == ordered.len() {
             // "Model Descriptions [enabled/disabled]" — global flag.
             let new_val = !descriptions_on;
@@ -2466,6 +2658,70 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 1 {
+            // Provider rows share the main provider-list layout.
+            let enabled: Vec<Map<String, Value>> = doc
+                .get("providers")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|p| {
+                            p.is_object()
+                                && p.get("id").is_some()
+                                && p.get("enabled")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true)
+                        })
+                        .filter_map(|p| p.as_object().cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut values: Vec<Option<String>> = vec![None];
+            for p in &enabled {
+                values.push(p.get("id").and_then(Value::as_str).map(|s| s.to_string()));
+            }
+            let mut choices: Vec<String> = vec!["disabled".to_string()];
+            choices.extend(crate::core::provider_menu_labels(&enabled));
+            let current = crate::jsonio::codex_status_token(doc);
+            let initial = if current == "disabled" {
+                0
+            } else if let Some(pos) =
+                values.iter().position(|v| v.as_deref() == Some(current.as_str()))
+            {
+                pos
+            } else {
+                0
+            };
+            match select_win(
+                stdscr,
+                &choices,
+                "Codex Config",
+                false,
+                &[],
+                true,
+                None,
+                None,
+                None,
+                None,
+                initial,
+                None,
+                None,
+            ) {
+                Some(SelectOutcome::Picked(i)) => {
+                    let sel = values[i].clone();
+                    crate::jsonio::set_codex_selection(doc, sel.as_deref());
+                    let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                    status_msg = Some(format!(
+                        "Codex Config {}",
+                        crate::jsonio::codex_status_token(doc)
+                    ));
+                    changed = true;
+                }
+                _ => {}
+            }
+            menu_cursor = pi;
+            continue;
+        }
+        if pi == ordered.len() + 2 {
             match crate::sync::update_providers_json_with(true) {
                 Ok(stats) => {
                     if let Ok(fresh) = jsonio::load_providers() {
@@ -2488,26 +2744,29 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 2 {
+        if pi == ordered.len() + 3 {
             // "➕ Add Provider…" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
                 status_msg = Some(msg);
                 changed = true;
             }
+            menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 3 {
+        if pi == ordered.len() + 4 {
             // "➕ Add Model…" — cross-provider modal; auto-adds a missing
             // provider and enables just that model.
             if let Some(msg) = add_model_win(stdscr, doc) {
                 status_msg = Some(msg);
                 changed = true;
             }
+            menu_cursor = pi;
             continue;
         }
         status_msg = None;
         let mut action_cursor = 0usize;
         let mut target = ordered[pi].clone();
+        menu_cursor = pi;
         loop {
             let enabled = crate::get_bool_val(&Value::Object(target.clone()), "enabled", true);
             let current_base =
@@ -2660,6 +2919,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         crate::sync::update_config_toml_with(true)?;
                         changed = true;
                     }
+                    menu_cursor = 0;
                     break;
                 }
                 _ => break,
@@ -3207,6 +3467,10 @@ mod tests {
                 .join(format!("gm-unit-home-{}", std::process::id()));
             std::fs::create_dir_all(&home).expect("create test GROK_HOME");
             std::env::set_var("GROK_HOME", &home);
+            let codex = std::env::temp_dir()
+                .join(format!("gm-unit-codex-{}", std::process::id()));
+            std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
+            std::env::set_var("CODEX_HOME", &codex);
         });
     }
 
@@ -3297,7 +3561,7 @@ mod tests {
     }
     impl FilterList for CountList {
         type Entry = String;
-        fn compute_view(&self, entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
+        fn compute_view(&mut self, entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
             let q = query.to_lowercase();
             (
                 entries
@@ -3308,7 +3572,7 @@ mod tests {
                 vec![],
             )
         }
-        fn render(&self, entry: &String, _is_selected: bool) -> Vec<(String, P)> {
+        fn render(&mut self, entry: &String, _is_selected: bool) -> Vec<(String, P)> {
             vec![(format!("  {entry}"), P::Text)]
         }
         fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, _entry: &String) -> bool {
@@ -3368,13 +3632,13 @@ mod tests {
     impl FilterList for SepList {
         type Entry = String;
         fn compute_view(
-            &self,
+            &mut self,
             entries: &[String],
             _query: &str,
         ) -> (Vec<String>, Vec<(usize, P)>) {
             (entries.to_vec(), vec![(1, P::Chevron), (2, P::Free)])
         }
-        fn render(&self, entry: &String, is_selected: bool) -> Vec<(String, P)> {
+        fn render(&mut self, entry: &String, is_selected: bool) -> Vec<(String, P)> {
             vec![(
                 format!("  {entry}"),
                 if is_selected { P::Selected } else { P::Text },
@@ -3420,6 +3684,101 @@ mod tests {
             beta_paints.iter().any(|p| p.bg == bg_color(P::Selected)),
             "one Down should select the next model, not land on a separator: {beta_paints:?}"
         );
+    }
+
+    /// When the user enables a model that is in the middle of the disabled
+    /// section, the cursor moves down one row (`current + 1`). With 6
+    /// disabled models and the cursor on m5 (index 4), after enabling m5
+    /// the cursor lands on the row below in the new view (m6).
+    #[test]
+    fn enable_mid_list_disabled_moves_to_down_neighbor() {
+        use serde_json::json;
+        // Six disabled models, no enabled models. No separators in the
+        // view because there is no enabled section to mark and no free
+        // models to mark either. The disabled section is `[0..6)`.
+        let ids = vec![
+            "m1".to_string(),
+            "m2".to_string(),
+            "m3".to_string(),
+            "m4".to_string(),
+            "m5".to_string(),
+            "m6".to_string(),
+        ];
+        let mut models = json!({
+            "m1": { "name": "M1", "enabled": false },
+            "m2": { "name": "M2", "enabled": false },
+            "m3": { "name": "M3", "enabled": false },
+            "m4": { "name": "M4", "enabled": false },
+            "m5": { "name": "M5", "enabled": false },
+            "m6": { "name": "M6", "enabled": false },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        // Script: down 4 times to land on m5 (m1=0, m2=1, m3=2, m4=3,
+        // m5=4). Enter to enable m5. Then Esc to exit. The frame
+        // rendered after the Enter redraw is the one we inspect.
+        let mut f = FakeStdscr::new(20, 80);
+        f.script(Key::Down);
+        f.script(Key::Down);
+        f.script(Key::Down);
+        f.script(Key::Down);
+        f.script(Key::Enter);
+        f.script(Key::Esc);
+        let mut picker = ModelPicker {
+            ids: &ids,
+            models: &mut models,
+            pid: "test-pid".into(),
+            pname: "Test Provider".into(),
+            changed: false,
+        };
+        filter_list_win(
+            &mut f,
+            &ids,
+            "Configure Model",
+            &[("ESC".into(), "back".into())],
+            &mut picker,
+        );
+        // The toggled model (m5) should now be enabled.
+        let m5_enabled = models
+            .get("m5")
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(m5_enabled, "m5 should be enabled after Enter");
+        // Find the y of the last Selected-bg fill line in the recorded
+        // calls. A fill line is an addstr whose string is all nbsp
+        // characters. The selected row's fill uses the Selected bg.
+        let calls = f.recorded();
+        let sel_bg = bg_color(P::Selected);
+        let selected_y: Option<i32> = calls
+            .iter()
+            .rev()
+            .find_map(|(y, _, t, p)| {
+                if !t.is_empty()
+                    && t.chars().all(|c| c == '\u{00a0}')
+                    && p.bg == sel_bg
+                {
+                    Some(*y)
+                } else {
+                    None
+                }
+            });
+        // Find the y of each model name in the last frame.
+        let find_y_of = |needle: &str| -> Option<i32> {
+            calls
+                .iter()
+                .rev()
+                .find(|(_, _, t, _)| t.contains(needle))
+                .map(|(y, _, _, _)| *y)
+        };
+        let m5_y = find_y_of("M5");
+        let m6_y = find_y_of("M6");
+        assert_eq!(
+            selected_y, m6_y,
+            "after enabling m5, the cursor should move down one row to m6: sel_y={selected_y:?} m5_y={m5_y:?} m6_y={m6_y:?}"
+        );
+        let _ = m5_y;
     }
 
     #[test]
@@ -3612,6 +3971,7 @@ mod tests {
                 api,
                 added: None,
                 status: std::rc::Rc::new(RefCell::new(None)),
+                label_cache: None,
             };
             let entries: Vec<(String, String)> = vec![
                 ("anthropic".into(), "Anthropic".into()),
@@ -3692,6 +4052,7 @@ mod tests {
             api,
             added: None,
             status: std::rc::Rc::new(RefCell::new(None)),
+            label_cache: None,
         };
         let entry = ("openrouter".to_string(), "OpenRouter".to_string());
         let keep = picker.on_enter(&mut FakeStdscr::new(20, 80), &entry);
@@ -3830,7 +4191,7 @@ mod tests {
             }}
         });
         let catalog = build_add_model_catalog(&api, &doc);
-        let mut picker = AddModelPicker { doc: &mut doc, api, status: None };
+        let mut picker = AddModelPicker { doc: &mut doc, api, status: None, enabled_cache: Default::default() };
         let (ordered, seps) = picker.compute_view(&catalog, "");
         assert_eq!(
             ordered.iter().map(|(p, m, _, _)| (p.as_str(), m.as_str())).collect::<Vec<_>>(),
@@ -3856,13 +4217,31 @@ mod tests {
         assert_eq!(rest_row[3], ("beta".into(), P::Text));
 
         let mut f = FakeStdscr::new(20, 80);
+        // Enter on an already-enabled row disables it. The picker stays
+        // open so the user can keep toggling models in the same session.
         assert!(
             picker.on_enter(&mut f, &ordered[0]),
-            "Enter on an already-enabled row must stay open and stay inert"
+            "Enter on an already-enabled row must keep the modal open"
         );
         assert_eq!(
             picker.doc["providers"][0]["models"]["alpha"]["enabled"],
-            serde_json::json!(true)
+            serde_json::json!(false),
+            "Enter on an already-enabled row must disable the model"
+        );
+        // Pressing Enter again on the now-disabled row enables it back.
+        let (ordered2, _) = picker.compute_view(&catalog, "");
+        let alpha2 = ordered2
+            .iter()
+            .find(|(p, m, _, _)| p == "zeta" && m == "alpha")
+            .expect("alpha still in the catalog");
+        assert!(
+            picker.on_enter(&mut f, &alpha2),
+            "Enter on a disabled row must keep the modal open"
+        );
+        assert_eq!(
+            picker.doc["providers"][0]["models"]["alpha"]["enabled"],
+            serde_json::json!(true),
+            "Enter on a disabled row must enable the model"
         );
     }
 
@@ -4654,9 +5033,9 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        // provider → Descriptions → Update Model List → Add Provider →
-        // Add Model → first Enabled Models row.
-        for _ in 0..5 {
+        // provider → Descriptions → Codex Config → Update Model List →
+        // Add Provider → Add Model → first Enabled Models row.
+        for _ in 0..6 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // open reasoning picker
@@ -4698,7 +5077,7 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        for _ in 0..5 {
+        for _ in 0..6 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // (none) — no picker
@@ -4715,6 +5094,57 @@ use serde_json::json;
             last.3.bg,
             bg_color(P::Selected),
             "cursor must stay on the enabled model after Enter on (none)"
+        );
+    }
+
+    #[test]
+    fn config_flow_codex_picker_selects_enabled_provider_or_disabled() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "name": "OpenRouter",
+                    "enabled": true,
+                    "models": { "openrouter/free": { "name": "Free", "enabled": true } }
+                },
+                {
+                    "id": "ollama-cloud",
+                    "name": "Ollama Cloud",
+                    "enabled": false,
+                    "models": { "gemma4:31b": { "name": "Gemma", "enabled": true } }
+                }
+            ]
+        });
+        let mut f = FakeStdscr::new(30, 80);
+        // openrouter, ollama-cloud, Descriptions, Codex Config
+        for _ in 0..3 {
+            f.script(Key::Down);
+        }
+        f.script(Key::Enter); // picker: disabled, openrouter
+        f.script(Key::Down);
+        f.script(Key::Enter);
+        f.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(res.is_ok(), "codex picker errored: {:?}", res.err());
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(true));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+
+        let mut f2 = FakeStdscr::new(30, 80);
+        for _ in 0..3 {
+            f2.script(Key::Down);
+        }
+        f2.script(Key::Enter); // picker starts on openrouter
+        f2.script(Key::Up); // disabled
+        f2.script(Key::Enter);
+        f2.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f2, &mut doc);
+        assert!(res.is_ok(), "codex disable picker errored: {:?}", res.err());
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(
+            doc["codex_model_provider"], "openrouter",
+            "picker disable must keep the remembered provider; only sync clears it"
         );
     }
 }

@@ -455,6 +455,376 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
     Ok(stats)
 }
 
+fn toml_quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn toml_key(ident: &str) -> String {
+    if ident
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        ident.to_string()
+    } else {
+        toml_quoted(ident)
+    }
+}
+
+fn codex_provider_name(fields: &Map<String, Value>, pid: &str) -> String {
+    let name = fields.get("name").and_then(Value::as_str).unwrap_or("");
+    if name.ends_with(')') {
+        if let Some(open) = name.rfind('(') {
+            let inner = name[open + 1..name.len() - 1].trim();
+            if !inner.is_empty() {
+                return inner.to_string();
+            }
+        }
+    }
+    pid.to_string()
+}
+
+fn is_codex_managed_key(stripped: &str) -> bool {
+    stripped.starts_with("model =")
+        || stripped.starts_with("model_provider =")
+        || stripped.starts_with("model_catalog_json =")
+}
+
+fn codex_owned_provider_ids(doc: &Value, extra_pid: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
+        for p in arr {
+            if let Some(pid) = p.get("id").and_then(Value::as_str) {
+                if !pid.is_empty() && !out.iter().any(|e| e == pid) {
+                    out.push(pid.to_string());
+                }
+            }
+        }
+    }
+    if !extra_pid.is_empty() && !out.iter().any(|e| e == extra_pid) {
+        out.push(extra_pid.to_string());
+    }
+    out
+}
+
+fn strip_codex_managed_sections(text: &str, provider_ids: &[String]) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let owned: HashSet<&str> = provider_ids.iter().map(String::as_str).collect();
+    let mut out = String::new();
+    let mut in_root = true;
+    let mut skip = false;
+    for line in text.split_inclusive('\n') {
+        let stripped = line.trim();
+        if stripped.starts_with('[') && stripped.ends_with(']') {
+            in_root = false;
+            skip = false;
+            let header = stripped.trim_start_matches('[').trim_end_matches(']').trim();
+            if let Some(rest) = header.strip_prefix("model_providers.") {
+                let pid = rest.trim().trim_matches('"');
+                if owned.contains(pid) {
+                    skip = true;
+                    continue;
+                }
+            }
+        }
+        if skip {
+            continue;
+        }
+        if in_root && is_codex_managed_key(stripped) {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn emit_codex_provider_table(pid: &str, fields: &Map<String, Value>) -> String {
+    let backend = fields
+        .get("api_backend")
+        .and_then(Value::as_str)
+        .unwrap_or("chat_completions");
+    // Codex dropped `wire_api = "chat"`; OpenAI-compatible providers use
+    // `responses` (https://github.com/openai/codex/discussions/7782).
+    let wire = if backend == "chat_completions" {
+        "responses"
+    } else {
+        backend
+    };
+    let base = fields.get("base_url").and_then(Value::as_str).unwrap_or("");
+    let env = fields.get("env_key").and_then(Value::as_str).unwrap_or("");
+    format!(
+        "[model_providers.{}]\nname = {}\nbase_url = {}\nenv_key = {}\nwire_api = {}\n",
+        toml_key(pid),
+        toml_quoted(&codex_provider_name(fields, pid)),
+        toml_quoted(base),
+        toml_quoted(env),
+        toml_quoted(wire),
+    )
+}
+
+fn find_provider<'a>(doc: &'a Value, pid: &str) -> Option<&'a Map<String, Value>> {
+    doc.get("providers")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
+        .and_then(Value::as_object)
+}
+
+fn first_enabled_model_id(provider: &Map<String, Value>) -> Option<String> {
+    let models = provider.get("models")?.as_object()?;
+    for (mid, m) in models {
+        let enabled = m
+            .as_object()
+            .and_then(|o| o.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if enabled {
+            return Some(mid.clone());
+        }
+    }
+    None
+}
+
+fn context_window_int(entry: &Map<String, Value>) -> i64 {
+    match entry.get("context_window") {
+        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)).unwrap_or(128000),
+        Some(Value::String(s)) => s.parse().unwrap_or(128000),
+        _ => 128000,
+    }
+}
+
+fn catalog_reasoning_levels(entry: &Map<String, Value>) -> (Vec<Value>, Option<String>) {
+    let mut levels = Vec::new();
+    let mut default = None;
+    if let Some(arr) = entry.get("reasoning_efforts").and_then(Value::as_array) {
+        for item in arr {
+            let Some(obj) = item.as_object() else { continue };
+            let effort = obj
+                .get("value")
+                .or_else(|| obj.get("effort"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if effort.is_empty() {
+                continue;
+            }
+            let desc = obj
+                .get("label")
+                .or_else(|| obj.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or(effort);
+            levels.push(serde_json::json!({
+                "effort": effort,
+                "description": desc,
+            }));
+            if obj.get("default").and_then(Value::as_bool).unwrap_or(false) {
+                default = Some(effort.to_string());
+            }
+        }
+    }
+    if let Some(stored) = entry.get("reasoning_effort").and_then(Value::as_str) {
+        if !stored.is_empty() {
+            default = Some(stored.to_string());
+        }
+    }
+    (levels, default)
+}
+
+fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
+    let mut models_out = Vec::new();
+    let empty = Map::new();
+    let models = provider
+        .get("models")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    for (i, (mid, m)) in models.iter().enumerate() {
+        let entry = m.as_object().cloned().unwrap_or_default();
+        if !entry.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+            continue;
+        }
+        let display = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(mid);
+        let description = entry
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let ctx = context_window_int(&entry);
+        let (levels, default_level) = catalog_reasoning_levels(&entry);
+        let mut item = serde_json::json!({
+            "slug": mid,
+            "display_name": display,
+            "description": description,
+            "context_window": ctx,
+            "max_context_window": ctx,
+            "supported_reasoning_levels": levels,
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": i,
+            "base_instructions": "",
+            "supports_reasoning_summaries": crate::truthy(entry.get("supports_reasoning_effort")),
+            "default_reasoning_summary": "none",
+            "support_verbosity": false,
+            "truncation_policy": { "mode": "tokens", "limit": 10000 },
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text"],
+        });
+        if let Some(def) = default_level {
+            item.as_object_mut()
+                .unwrap()
+                .insert("default_reasoning_level".into(), Value::String(def));
+        }
+        models_out.push(item);
+    }
+    serde_json::json!({ "models": models_out })
+}
+
+fn write_codex_model_catalog(provider_id: &str, provider: &Map<String, Value>) -> Res<std::path::PathBuf> {
+    let path = paths::codex_models_json_path(provider_id);
+    let payload = emit_codex_model_catalog(provider);
+    jsonio::dump_json(&path, &payload)?;
+    Ok(path)
+}
+
+fn remove_codex_model_catalog(provider_id: &str) -> Res<()> {
+    if provider_id.is_empty() {
+        return Ok(());
+    }
+    let path = paths::codex_models_json_path(provider_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(crate::SyncError(format!(
+            "failed to remove {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String, Value> {
+    let pname = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(pid);
+    let mut fields = Map::new();
+    fields.insert("name".into(), Value::String(format!("x ({pname})")));
+    fields.insert(
+        "base_url".into(),
+        Value::String(
+            provider
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+    );
+    fields.insert(
+        "env_key".into(),
+        Value::String(core::first_env_key(&Value::Object(provider.clone()))),
+    );
+    fields.insert("api_backend".into(), Value::String("chat_completions".into()));
+    fields
+}
+
+/// Sibling of `write_config_toml`: emit one Codex provider block at the top
+/// of `$CODEX_HOME/config.toml`, plus the matching model catalog JSON.
+///
+/// Called when write is on, or once after disable/delete while
+/// `codex_model_provider` is still set. That field is the Codex-side
+/// memory of which table to clear; `removed_providers` is Grok-only.
+pub fn codex_config_toml(
+    doc: &mut Value,
+    _provider_ids: &[String],
+    _tables: &[(String, Map<String, Value>)],
+    _removed_keys: &HashSet<String>,
+) -> Res<std::path::PathBuf> {
+    let flag = doc
+        .get("write_codex_config_toml")
+        .and_then(Value::as_bool)
+        .unwrap_or(crate::jsonio::WRITE_CODEX_CONFIG_TOML_DEFAULT);
+    let mut pid = jsonio::codex_model_provider_id(doc);
+    let remembered = pid.clone();
+    // One-shot cleanup after disable or delete of the Codex provider:
+    // drop the remembered provider, then strip the old block.
+    if !flag && !pid.is_empty() {
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert("codex_model_provider".into(), Value::String(String::new()));
+        }
+        jsonio::dump_providers(&paths::providers_path(), doc)?;
+        pid.clear();
+    }
+    let owned = codex_owned_provider_ids(doc, &remembered);
+    let path = paths::codex_config_toml_path();
+    let provider = if pid.is_empty() {
+        None
+    } else {
+        find_provider(doc, &pid)
+    };
+    let first_mid = provider.and_then(first_enabled_model_id);
+    let should_emit = flag && provider.is_some() && first_mid.is_some();
+
+    if !should_emit {
+        remove_codex_model_catalog(&remembered)?;
+    }
+
+    if !path.exists() && !should_emit {
+        return Ok(path);
+    }
+
+    if path.exists() {
+        let bak = path.with_file_name(format!(
+            "{}.bak",
+            path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+        ));
+        std::fs::copy(&path, &bak).map_err(|e| {
+            crate::SyncError(format!("failed to write {}: {}", bak.display(), e))
+        })?;
+    }
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let kept = strip_codex_managed_sections(&existing, &owned)
+        .trim_matches('\n')
+        .to_string();
+
+    let prefix = if should_emit {
+        let pid = pid.as_str();
+        let provider = provider.unwrap();
+        let first_mid = first_mid.unwrap();
+        write_codex_model_catalog(pid, provider)?;
+        let catalog = paths::codex_models_json_toml_value(pid);
+        let fields = codex_provider_fields(provider, pid);
+        Some(format!(
+            "model = {}\nmodel_provider = {}\nmodel_catalog_json = {}\n\n{}",
+            toml_quoted(&first_mid),
+            toml_quoted(pid),
+            toml_quoted(&catalog),
+            emit_codex_provider_table(pid, &fields).trim_end()
+        ))
+    } else {
+        None
+    };
+
+    let text = match (prefix.as_deref(), kept.is_empty()) {
+        (Some(p), false) => format!("{p}\n\n{kept}\n"),
+        (Some(p), true) => format!("{p}\n"),
+        (None, false) => format!("{kept}\n"),
+        (None, true) => String::new(),
+    };
+    if !text.is_empty() {
+        toml_out::validate_toml_text(&text)?;
+    }
+    jsonio::atomic_write(&path, &text)?;
+    Ok(path)
+}
+
 /// Write phase (2 of 2): load providers.json from disk and render
 /// config.toml from it alone — enabled providers, table fields, table
 /// ownership, and pending deletions are all derived from the file.
@@ -609,12 +979,23 @@ tables will have an empty base_url",
         }
     }
 
+    let managed_ids: Vec<String> = managed.into_iter().collect();
     let path = toml_out::write_config_toml(
         &paths::config_toml_path(),
-        &managed.into_iter().collect::<Vec<String>>(),
+        &managed_ids,
         &tables,
         &removed_keys,
     )?;
+    if crate::jsonio::reset_codex_if_invalid(&mut doc) {
+        jsonio::dump_providers(&paths::providers_path(), &mut doc)?;
+    }
+    let write_codex = doc
+        .get("write_codex_config_toml")
+        .and_then(Value::as_bool)
+        .unwrap_or(crate::jsonio::WRITE_CODEX_CONFIG_TOML_DEFAULT);
+    if write_codex || !jsonio::codex_model_provider_id(&doc).is_empty() {
+        codex_config_toml(&mut doc, &managed_ids, &tables, &removed_keys)?;
+    }
 
     // The deletion list has been consumed; clear it so it isn't reprocessed
     // forever, and persist that.
@@ -771,6 +1152,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("create test GROK_HOME");
         std::env::set_var("GROK_HOME", &home);
+        let codex = std::env::temp_dir().join(format!("gm-sync-test-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex);
 
         let api = fixture_api();
         // Enable all three catalog models up front so sync reconciles them
@@ -875,6 +1259,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("create test GROK_HOME");
         std::env::set_var("GROK_HOME", &home);
+        let codex = std::env::temp_dir().join(format!("gm-delete-test-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex);
 
         // Catalog knows only "plain"; "live_only" simulates a model that came
         // from the provider /models endpoint.
@@ -980,5 +1367,231 @@ mod tests {
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
         assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");
+    }
+
+    fn isolate_codex_homes(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let pid = std::process::id();
+        let grok = std::env::temp_dir().join(format!("gm-codex-{tag}-grok-{pid}"));
+        let codex = std::env::temp_dir().join(format!("gm-codex-{tag}-codex-{pid}"));
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+        (grok, codex)
+    }
+
+    fn two_provider_doc() -> Value {
+        serde_json::json!({
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "name": "OpenRouter",
+                    "enabled": true,
+                    "env_key": "OPENROUTER_API_KEY",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "models": {
+                        "openrouter/free": { "name": "Free", "enabled": true }
+                    }
+                },
+                {
+                    "id": "ollama-cloud",
+                    "name": "Ollama Cloud",
+                    "enabled": true,
+                    "env_key": "OLLAMA_API_KEY",
+                    "base_url": "https://ollama.com/v1",
+                    "models": {
+                        "gemma4:31b": { "name": "Gemma", "enabled": true },
+                        "deepseek-v4-flash:preview": { "name": "DeepSeek", "enabled": true }
+                    }
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn codex_config_toml_writes_when_flag_set_and_skips_when_false() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("flag");
+
+        let mut doc = two_provider_doc();
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        assert!(
+            !paths::codex_config_toml_path().exists(),
+            "flag off must not write Codex config.toml"
+        );
+
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        let text = std::fs::read_to_string(paths::codex_config_toml_path()).expect("codex toml");
+        assert!(
+            text.contains("[model_providers.openrouter]"),
+            "missing provider table: {text}"
+        );
+        assert!(!text.contains("[model_providers.ollama-cloud]"), "{text}");
+        assert!(text.contains("model = \"openrouter/free\""), "{text}");
+        assert!(text.contains("model_provider = \"openrouter\""), "{text}");
+        assert!(
+            text.contains("model_catalog_json = \"$CODEX_HOME/openrouter-models.json\""),
+            "{text}"
+        );
+        assert!(text.contains("env_key = \"OPENROUTER_API_KEY\""), "{text}");
+        assert!(text.contains("wire_api = \"responses\""), "{text}");
+        let catalog_path = paths::codex_models_json_path("openrouter");
+        let catalog = std::fs::read_to_string(&catalog_path).expect("catalog");
+        assert!(catalog.contains("\"slug\": \"openrouter/free\""), "{catalog}");
+    }
+
+
+    #[test]
+    fn codex_config_toml_only_writes_selected_provider_and_first_enabled_model() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("one");
+
+        let mut doc = two_provider_doc();
+        jsonio::set_codex_selection(&mut doc, Some("ollama-cloud"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        let text = std::fs::read_to_string(paths::codex_config_toml_path()).expect("codex toml");
+        assert!(text.contains("[model_providers.ollama-cloud]"), "{text}");
+        assert!(!text.contains("[model_providers.openrouter]"), "{text}");
+        assert!(text.contains("model_provider = \"ollama-cloud\""), "{text}");
+        // models are dump-sorted by display name: DeepSeek then Gemma
+        assert!(
+            text.contains("model = \"deepseek-v4-flash:preview\"")
+                || text.contains("model = \"gemma4:31b\""),
+            "{text}"
+        );
+        let catalog = std::fs::read_to_string(paths::codex_models_json_path("ollama-cloud"))
+            .expect("catalog");
+        assert!(catalog.contains("\"slug\": \"gemma4:31b\""), "{catalog}");
+        assert!(
+            catalog.contains("\"slug\": \"deepseek-v4-flash:preview\""),
+            "{catalog}"
+        );
+        assert!(!catalog.contains("openrouter/free"), "{catalog}");
+    }
+
+    #[test]
+    fn codex_config_toml_skips_when_selected_provider_has_no_enabled_models() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("nomodels");
+
+        let mut doc = two_provider_doc();
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        doc["providers"][0]["models"]["openrouter/free"]["enabled"] = Value::Bool(false);
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        // Flag stays (provider still enabled); no Codex block because no models.
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(true));
+        if paths::codex_config_toml_path().exists() {
+            let text = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
+            assert!(
+                !text.contains("[model_providers.openrouter]"),
+                "must not emit a provider table with no models: {text}"
+            );
+            assert!(!text.contains("model = "), "{text}");
+        }
+    }
+
+    #[test]
+    fn update_config_toml_resets_codex_when_provider_disabled() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("disable");
+
+        let mut doc = two_provider_doc();
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        for p in doc["providers"].as_array_mut().unwrap() {
+            if p["id"] == "openrouter" {
+                p["enabled"] = Value::Bool(false);
+            }
+        }
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+        update_config_toml().unwrap();
+        let loaded = jsonio::load_providers().unwrap();
+        assert_eq!(loaded["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(loaded["codex_model_provider"], "");
+        if paths::codex_config_toml_path().exists() {
+            let text = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
+            assert!(!text.contains("[model_providers.openrouter]"), "{text}");
+            assert!(!text.contains("model = "), "{text}");
+        }
+    }
+
+    #[test]
+    fn disable_clears_codex_toml_once_then_leaves_user_edits() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("once");
+
+        let mut doc = two_provider_doc();
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        let text = std::fs::read_to_string(paths::codex_config_toml_path()).expect("codex toml");
+        assert!(text.contains("[model_providers.openrouter]"), "{text}");
+
+        jsonio::set_codex_selection(&mut doc, None);
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+        update_config_toml().unwrap();
+        let loaded = jsonio::load_providers().unwrap();
+        assert_eq!(loaded["codex_model_provider"], "");
+        let cleared = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
+        assert!(!cleared.contains("[model_providers.openrouter]"), "{cleared}");
+        assert!(!cleared.contains("model = "), "{cleared}");
+        assert!(
+            !paths::codex_models_json_path("openrouter").exists(),
+            "catalog json must be deleted on disable"
+        );
+
+        let manual = "# user edit after disable\napproval_policy = \"untrusted\"\n";
+        std::fs::write(paths::codex_config_toml_path(), manual).unwrap();
+        update_config_toml().unwrap();
+        let after = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
+        assert_eq!(after, manual, "later writes must not re-enter Codex cleanup");
+    }
+
+    #[test]
+    fn delete_codex_provider_clears_table_and_catalog_like_disable() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("delprov");
+
+        let mut doc = two_provider_doc();
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        assert!(paths::codex_models_json_path("openrouter").exists());
+        let with_user = format!(
+            "{}\n[projects.\"/tmp/proj\"]\ntrust_level = \"trusted\"\n\n[model_providers.openai]\nname = \"OpenAI\"\n",
+            std::fs::read_to_string(paths::codex_config_toml_path()).unwrap()
+        );
+        std::fs::write(paths::codex_config_toml_path(), with_user).unwrap();
+
+        let providers = doc["providers"].as_array_mut().unwrap();
+        providers.retain(|p| p["id"] != "openrouter");
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(doc["codex_model_provider"], "openrouter");
+
+        update_config_toml().unwrap();
+        let loaded = jsonio::load_providers().unwrap();
+        assert_eq!(loaded["write_codex_config_toml"], Value::Bool(false));
+        assert_eq!(loaded["codex_model_provider"], "");
+        let text = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
+        assert!(!text.contains("[model_providers.openrouter]"), "{text}");
+        assert!(!text.contains("model = "), "{text}");
+        assert!(text.contains("[model_providers.openai]"), "{text}");
+        assert!(text.contains("trust_level = \"trusted\""), "{text}");
+        assert!(
+            !paths::codex_models_json_path("openrouter").exists(),
+            "catalog json must be deleted with the provider table"
+        );
     }
 }

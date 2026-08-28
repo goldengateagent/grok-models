@@ -26,6 +26,18 @@ from pathlib import Path
 GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 PROVIDERS_PATH = GROK_HOME / "providers.json"
 CONFIG_TOML_PATH = GROK_HOME / "config.toml"
+
+
+def codex_home() -> Path:
+    """`$CODEX_HOME` if set, else `~/.codex`. Read at call time."""
+    raw = os.environ.get("CODEX_HOME")
+    if raw:
+        return Path(raw)
+    return Path.home() / ".codex"
+
+
+def codex_config_toml_path() -> Path:
+    return codex_home() / "config.toml"
 MODELS_DEV_URL = "https://models.dev/api.json"
 # When True, add-provider and sync take model ids from GET {base_url}/models
 # (OpenAI list). When False, the models.dev provider `models` object is the list.
@@ -90,6 +102,8 @@ def dump_json(path: Path, obj: object) -> None:
 # display name.
 TOP_LEVEL_KEY_ORDER = (
     "include_descriptions",
+    "write_codex_config_toml",
+    "codex_model_provider",
     "last_updated",
     "providers",
     "removed_providers",
@@ -106,13 +120,15 @@ MODEL_KEY_ORDER = (
 )
 
 INCLUDE_DESCRIPTIONS_DEFAULT = False
+WRITE_CODEX_CONFIG_TOML_DEFAULT = False
+CODEX_MODEL_PROVIDER_DEFAULT = ""
 
 CODE_PANEL_PAD_X = 1  # horizontal padding inside black code panels
 
 # Provider ids highlighted in the Add Provider screen's "Suggested" section.
 # Anything already configured lands in the "Added" section above it; the rest
 # are listed unhighlighted below. Single source of truth for both sections.
-SUGGESTED_PROVIDER_IDS = ("opencode", "opencode-go", "openrouter", "ollama-cloud")
+SUGGESTED_PROVIDER_IDS = ("opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud")
 
 
 def catalog_description(minfo: object) -> str | None:
@@ -187,6 +203,7 @@ def dump_providers(path: Path, doc: dict) -> None:
     A–Z by display name, models A–Z by display name, field key order. The
     in-memory `doc` is updated to match the file so later reads of `doc` are
     file order. Provider dict identities are kept so TUI `selected` stays live."""
+    reset_codex_if_invalid(doc)
     providers = doc.get("providers")
     if not isinstance(providers, list):
         providers = []
@@ -202,6 +219,85 @@ def dump_providers(path: Path, doc: dict) -> None:
     dump_json(path, ordered)
     doc.clear()
     doc.update(ordered)
+
+
+def enabled_provider_ids(doc: dict) -> list[str]:
+    """Ids of configured providers with enabled=True, in file order."""
+    out: list[str] = []
+    for p in doc.get("providers") or []:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id")
+        if isinstance(pid, str) and pid and bool(p.get("enabled", True)):
+            out.append(pid)
+    return out
+
+
+def find_provider(doc: dict, pid: str) -> dict | None:
+    for p in doc.get("providers") or []:
+        if isinstance(p, dict) and p.get("id") == pid:
+            return p
+    return None
+
+
+def first_enabled_model_id(provider: dict) -> str | None:
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        return None
+    for mid, m in models.items():
+        if bool(m.get("enabled", True)) if isinstance(m, dict) else True:
+            return mid
+    return None
+
+
+def codex_model_provider_id(doc: dict) -> str:
+    raw = doc.get("codex_model_provider", CODEX_MODEL_PROVIDER_DEFAULT)
+    return raw if isinstance(raw, str) else ""
+
+
+def set_codex_selection(doc: dict, pid: str | None) -> None:
+    """Persist the Codex provider pick. None / '' disables writing but
+    leaves `codex_model_provider` so the next config write can clear the
+    previously emitted Codex block once."""
+    if pid:
+        doc["write_codex_config_toml"] = True
+        doc["codex_model_provider"] = pid
+    else:
+        doc["write_codex_config_toml"] = False
+
+
+def reset_codex_if_invalid(doc: dict) -> bool:
+    """If write is on but the configured provider is missing or disabled,
+    turn write off and keep `codex_model_provider` for a one-shot cleanup.
+    Does not invent keys when already unset. Returns True when changed."""
+    flag = bool(doc.get("write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT))
+    pid = codex_model_provider_id(doc)
+    if not flag:
+        return False
+    if pid and pid in enabled_provider_ids(doc):
+        return False
+    doc["write_codex_config_toml"] = False
+    return True
+
+
+def codex_status_token(doc: dict) -> str:
+    """Main-menu state token: provider id, or 'disabled'."""
+    if not bool(doc.get("write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT)):
+        return "disabled"
+    raw = doc.get("codex_model_provider", CODEX_MODEL_PROVIDER_DEFAULT)
+    pid = raw if isinstance(raw, str) else ""
+    return pid if pid else "disabled"
+
+
+def codex_models_json_path(provider_id: str) -> Path:
+    """Catalog file next to config.toml: `$CODEX_HOME/<id>-models.json` or `~/.codex/<id>-models.json`."""
+    return codex_home() / f"{provider_id}-models.json"
+
+
+def codex_models_json_toml_value(provider_id: str) -> str:
+    if os.environ.get("CODEX_HOME"):
+        return f"$CODEX_HOME/{provider_id}-models.json"
+    return f"~/.codex/{provider_id}-models.json"
 
 
 def _code_line_segments(
@@ -1078,6 +1174,17 @@ def _curses_getch(stdscr):
         stdscr.nodelay(False)
 
 
+CODEX_CONFIG_INFO = (
+    "$CODEX_HOME/config.toml and $CODEX_HOME/<provider>-models.json are "
+    "updated to enable this provider's enabled models. Codex only allows "
+    "one configured provider by setting:\n"
+    "\n"
+    "  model_provider = <provider>\n"
+    "  model_catalog_json = <provider>-models.json\n\n"
+    "Disabling removes this config from config.toml and deletes its models json file."
+)
+
+
 def _curses_select_win(
     stdscr,
     options: list[str],
@@ -1140,8 +1247,39 @@ def _curses_select_win(
         
         # Header bar
         _curses_draw_header(stdscr, f"  {title}")
-        
-        list_top = 2
+
+        # Codex Config page: explanatory note directly under the heading.
+        info_lines = []
+        if title.strip() == "Codex Config":
+            for para in CODEX_CONFIG_INFO.split("\n"):
+                if not para:
+                    info_lines.append("")
+                    continue
+                cur = ""
+                for w in para.split(" "):
+                    cand = (cur + " " + w).strip() if cur else w
+                    if _str_cols(cand) <= max(1, width - 4):
+                        cur = cand
+                    else:
+                        if cur:
+                            info_lines.append(cur)
+                        cur = w
+                if cur:
+                    info_lines.append(cur)
+        info_h = len(info_lines)
+        # Row offset for info text: 2, leaving a blank padding row under the
+        # header (row 1). This restores the original main-page layout; Codex
+        # Config keeps its note at the same offset.
+        info_row_base = 2
+        for i, line in enumerate(info_lines):
+            try:
+                stdscr.addstr(info_row_base + i, 2, _clip_cols(line, width - 3), curses.color_pair(P.MUTED))
+            except curses.error:
+                pass
+
+        # Codex Config gets an extra blank row between the note and the list
+        # of items, matching the Rust layout.
+        list_top = info_row_base + info_h + (1 if title.strip() == "Codex Config" else 0)
         list_h = max(1, height - list_top - 2)
         if current < top:
             top = current
@@ -1157,7 +1295,7 @@ def _curses_select_win(
         if section_sep_before is not None and n + 1 <= list_h:
             trial_sep = 2 + n + 1  # separator after the shift
             if trial_sep + 1 <= height - 5:
-                rule_row = 2 + (section_sep_before - top)
+                rule_row = list_top + (section_sep_before - top)
                 try:
                     stdscr.addstr(rule_row, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
                 except curses.error:
@@ -1176,7 +1314,7 @@ def _curses_select_win(
             idx = top + row
             if idx >= n:
                 break
-            y = 2 + row if rule_row is None or idx < section_sep_before else 2 + row + 1
+            y = list_top + row if rule_row is None or idx < section_sep_before else list_top + row + 1
             opt = options[idx]
             if multi:
                 mark = "●" if idx in state else "○"
@@ -1194,7 +1332,7 @@ def _curses_select_win(
                 # then the label. A chevron sits right-aligned on expandable rows.
                 row_bg = curses.color_pair(P.SELECTED if is_sel else P.TEXT)
                 stdscr.addstr(y, 0, "\u00a0" * (width - 1), row_bg)
-                label_attr = row_bg | curses.A_BOLD if is_sel and not multi else row_bg
+                label_attr = row_bg
                 # Colorize a [enabled]/[disabled] token green/red. The token may
                 # be followed by a trailing decorative icon, so locate it by
                 # search rather than requiring it at the very end of the line.
@@ -1216,9 +1354,7 @@ def _curses_select_win(
                     pos = line.index(token)
                     head = line[:pos]
                     tail = line[pos + len(token):]
-                    tok_attr = curses.color_pair(tcolor) | (
-                        curses.A_BOLD if is_sel else 0
-                    )
+                    tok_attr = curses.color_pair(tcolor)
                     _addstr_cols(stdscr, y, 0, _clip_cols(head, width - 2), label_attr)
                     hx = _str_cols(head)
                     _addstr_cols(
@@ -1308,14 +1444,16 @@ def _curses_select_win(
                 except curses.error:
                     pass
 
-        # Separator line (pushed down one row while the rule is shown)
-        sep_y = 2 + min(n, height - 4)
+        # Separator line (pushed down one row while the rule is shown).
+        # Skipped on the Codex Config page, which has no footer below it.
+        sep_y = list_top + min(n, height - 4)
         if rule_row is not None:
             sep_y += 1
-        try:
-            stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
-        except curses.error:
-            pass
+        if title.strip() != "Codex Config":
+            try:
+                stdscr.addstr(sep_y, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON))
+            except curses.error:
+                pass
 
         # Models preview: fill the empty space below the list (the --config
         # main menu) with the enabled-models listing, styled like --models.
@@ -1499,11 +1637,12 @@ def _curses_select_win(
             # between the buffer and the closing bracket (terminal-independent).
             buf = list(inline_edit["get"]())
             _, edit_w = stdscr.getmaxyx()
-            row_y = 2 + (current - top)
+            row_y = list_top + (current - top)
             prefix = options[current].split("[", 1)[0]
+            row_prefix = "  ▸ "
             _curses_draw_legend(stdscr, [("Enter", "save"), ("ESC", "cancel")])
             while True:
-                open_text = f"{prefix}[{''.join(buf)}"[: max(1, edit_w - 3)]
+                open_text = f"{row_prefix}{prefix}[{''.join(buf)}"[: max(1, edit_w - 3)]
                 try:
                     stdscr.addstr(
                         row_y, 0, " " * (edit_w - 1), curses.color_pair(P.SELECTED)
@@ -1719,18 +1858,33 @@ def _curses_filter_list_win(
     current = 0
     top = 0
     snap_to_current = False
+    # Cache the computed view so arrow-key navigation (which leaves the query
+    # untouched) reuses it instead of re-filtering/sorting the whole catalog
+    # every keystroke. After a toggle the recompute runs, the toggled item
+    # leaves its old `filtered` index, and the next item in its section
+    # slides up to occupy that index. `current` already points at the
+    # right neighbor — no adjustment is needed.
+    _view_q = None
+    _view = None
+    _view_dirty = True
     while True:
-        filtered, separators = compute_view(entries, query)
+        if query != _view_q or _view_dirty:
+            filtered, separators = compute_view(entries, query)
+            _view_q = query
+            _view = (filtered, separators)
+            _view_dirty = False
+        else:
+            filtered, separators = _view
         if not filtered:
             current = 0
         elif current >= len(filtered):
             current = len(filtered) - 1
         view = _filter_list_view_rows(filtered, separators)
-        cur_vis = 0
-        for vi, row in enumerate(view):
-            if row[0] == "item" and row[1] == current:
-                cur_vis = vi
-                break
+        # Map filtered-index -> visual-row in O(N) once, then look up
+        # `current` in O(1). The previous tuple-equality loop scanned the
+        # full view on every frame, which added up over a 10k-row catalog.
+        _pos_of = {row[1]: vi for vi, row in enumerate(view) if row[0] == "item"}
+        cur_vis = _pos_of.get(current, 0)
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         _curses_theme_bkgd(stdscr)
@@ -1848,6 +2002,19 @@ def _curses_filter_list_win(
             if filtered and on_enter is not None:
                 if not on_enter(filtered[current]):
                     return
+                _view_dirty = True
+                # After a toggle, move the cursor one row inside the
+                # section the toggled item just left: disable from the
+                # enabled side moves up (current - 1), enable from the
+                # disabled side moves down (current + 1). The chevron
+                # separator marks the boundary between the two
+                # sections.
+                _chev = next((i for i, p in separators if p == P.CHEVRON), None)
+                if _chev is not None and current < _chev:
+                    if current > 0:
+                        current -= 1
+                elif current + 1 < len(filtered):
+                    current += 1
         elif 32 <= ch <= 126:
             query += chr(ch)
             current = 0
@@ -2038,25 +2205,33 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
             separators.append((free_sep_idx, P.FREE))
         return ordered, separators
 
+    _labels_cache: dict[str, str] = {}
+    _cache_providers_len = -1
+
     def padded_labels() -> dict[str, str]:
-        rows = []
-        for pid, name in catalog:
-            p = next(
-                (
-                    pr
-                    for pr in providers_doc.get("providers", [])
-                    if isinstance(pr, dict) and pr.get("id") == pid
-                ),
-                None,
-            )
-            if p is not None:
-                pname = p.get("name") or name or pid
-                enabled = bool(p.get("enabled", True))
-            else:
-                pname = name or pid
-                enabled = False
-            rows.append((pname, pid, enabled))
-        return {pid: lab for (_n, pid, _e), lab in zip(rows, _format_provider_id_rows(rows))}
+        nonlocal _labels_cache, _cache_providers_len
+        cur_len = len(providers_doc.get("providers", []))
+        if cur_len != _cache_providers_len:
+            rows = []
+            for pid, name in catalog:
+                p = next(
+                    (
+                        pr
+                        for pr in providers_doc.get("providers", [])
+                        if isinstance(pr, dict) and pr.get("id") == pid
+                    ),
+                    None,
+                )
+                if p is not None:
+                    pname = p.get("name") or name or pid
+                    enabled = bool(p.get("enabled", True))
+                else:
+                    pname = name or pid
+                    enabled = False
+                rows.append((pname, pid, enabled))
+            _labels_cache = {pid: lab for (_n, pid, _e), lab in zip(rows, _format_provider_id_rows(rows))}
+            _cache_providers_len = cur_len
+        return _labels_cache
 
     def render(entry, _is_sel):
         pid, _name = entry
@@ -2183,8 +2358,27 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
 
     result = {"status": None}
 
+    # Cache enabled combos for the lifetime of one redraw so render() does
+    # O(1) lookups instead of a linear scan through providers.json per row.
+    _enabled_cache: set[tuple[str, str]] = set()
+    _cache_providers_len = -1
+
+    def _refresh_cache():
+        nonlocal _enabled_cache, _cache_providers_len
+        cur_len = len(providers_doc.get("providers", []))
+        if cur_len != _cache_providers_len:
+            _enabled_cache = {
+                (p.get("id"), mid)
+                for p in providers_doc.get("providers", [])
+                if isinstance(p, dict)
+                for mid, m in (p.get("models") if isinstance(p.get("models"), dict) else {}).items()
+                if isinstance(m, dict) and bool(m.get("enabled", True))
+            }
+            _cache_providers_len = cur_len
+
     def is_enabled(entry):
-        return _combo_enabled(providers_doc, entry[0], entry[1])
+        _refresh_cache()
+        return (entry[0], entry[1]) in _enabled_cache
 
     def is_free(entry):
         return "free" in entry[1].lower()
@@ -2237,11 +2431,38 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
 
     def enable(entry):
         pid, mid, mname, pname = entry
-        if is_enabled(entry):
-            return True  # already enabled here; inert row
         existing = {
             p.get("id") for p in providers_doc["providers"] if isinstance(p, dict)
         }
+        provider = next(
+            (
+                p
+                for p in providers_doc["providers"]
+                if isinstance(p, dict) and p.get("id") == pid
+            ),
+            None,
+        )
+        nonlocal _cache_providers_len
+        if is_enabled(entry):
+            # Already enabled: disable it. The model stays in the catalog
+            # (from models.dev) so it visibly moves into the disabled
+            # section, or the free-disabled section if it matches "free".
+            if provider is None:
+                _curses_inline_error_win(
+                    stdscr, f"Disable failed: provider {pid!r} missing"
+                )
+                return True  # stay open
+            models = provider.setdefault("models", {})
+            m = models.get(mid)
+            if not isinstance(m, dict):
+                m = models[mid] = {}
+            m["enabled"] = False
+            _cache_providers_len = -1
+            dump_providers(PROVIDERS_PATH, providers_doc)
+            result["status"] = f"Disabled {mname} ({pname}) - {pid}/{mid}."
+            return True  # stay open
+        # Disabled: enable it (adding the provider first if it isn't in
+        # providers.json yet).
         added = False
         fetch_err_url = None
         if pid not in existing:
@@ -2258,14 +2479,14 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
                     if isinstance(p, dict) and p.get("id")
                 ]
                 added = True
-        provider = next(
-            (
-                p
-                for p in providers_doc["providers"]
-                if isinstance(p, dict) and p.get("id") == pid
-            ),
-            None,
-        )
+            provider = next(
+                (
+                    p
+                    for p in providers_doc["providers"]
+                    if isinstance(p, dict) and p.get("id") == pid
+                ),
+                None,
+            )
         if provider is None:
             _curses_inline_error_win(stdscr, f"Enable failed: provider {pid!r} missing")
             return True  # stay open
@@ -2274,13 +2495,19 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         if not isinstance(m, dict):
             m = models[mid] = {}
         m["enabled"] = True
+        # Invalidate the per-redraw enabled-cache so the next compute_view
+        # sees the freshly-enabled model and sorts it into the Enabled
+        # section, not the disabled section.
+        _cache_providers_len = -1
         dump_providers(PROVIDERS_PATH, providers_doc)
         prefix = f"Added provider '{pid}'. " if added else ""
         if fetch_err_url:
             result["status"] = live_fetch_error_status(fetch_err_url)
         else:
             result["status"] = f"{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."
-        return False  # close back to the main menu
+        # Stay open so the user can keep toggling; ESC returns to the main
+        # menu, which then shows the last action in its status bar.
+        return True
 
     _curses_filter_list_win(
         catalog, stdscr,
@@ -2295,6 +2522,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         render=render,
         on_enter=enable,
         bottom_padding=0,
+        status_fn=lambda: result["status"],
     )
     return result["status"]
 
@@ -2388,6 +2616,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             token_col = _provider_state_token_col(ordered)
             desc = "enabled" if descriptions_on else "disabled"
             labels.append(_pad_state_label(_MODEL_DESC_LABEL, f"[{desc}]", token_col))
+            cstat = codex_status_token(providers_doc)
+            labels.append(_pad_state_label(_CODEX_CONFIG_LABEL, f"[{cstat}]", token_col))
             last_updated = providers_doc.get("last_updated")
             if isinstance(last_updated, str) and last_updated:
                 labels.append(
@@ -2398,7 +2628,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             labels.append("➕ Add Provider…")
             labels.append("➕ Add Model…")
             pi = _curses_select_win(
-                stdscr, labels, "Select Provider",
+                stdscr, labels, "Select Provider (changes sync on exit)",
                 status=status_msg,
                 preview=_build_config_models_preview(providers_doc, sort_by_name),
                 initial=menu_cursor,
@@ -2417,7 +2647,6 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     changed = True
                 continue
             model_focus = None
-            menu_cursor = 0
             if pi is None:
                 return changed
             if pi == len(ordered):
@@ -2429,6 +2658,31 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 menu_cursor = pi  # stay on the toggle row, like Configure Models
                 continue
             if pi == len(ordered) + 1:
+                # Provider rows share the main provider-list layout.
+                enabled = [
+                    p
+                    for p in providers_doc.get("providers", [])
+                    if isinstance(p, dict) and p.get("id") and p.get("enabled", True)
+                ]
+                values = [None] + [p["id"] for p in enabled]
+                choices = ["disabled"] + _provider_menu_labels(enabled)
+                current = codex_status_token(providers_doc)
+                initial = (
+                    0
+                    if current == "disabled" or current not in values
+                    else values.index(current)
+                )
+                picked = _curses_select_win(
+                    stdscr, choices, "Codex Config", initial=initial, back_on_left=True
+                )
+                if picked is not None:
+                    set_codex_selection(providers_doc, values[picked])
+                    dump_providers(PROVIDERS_PATH, providers_doc)
+                    status_msg = f"Codex Config {codex_status_token(providers_doc)}"
+                    changed = True
+                menu_cursor = pi
+                continue
+            if pi == len(ordered) + 2:
                 try:
                     stats = update_providers_json(quiet=True)
                     fresh = load_providers()
@@ -2441,20 +2695,23 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: fetch live model list failed"
                 menu_cursor = pi
                 continue
-            if pi == len(ordered) + 2:
+            if pi == len(ordered) + 3:
                 added_msg = _curses_add_provider_win(providers_doc, providers, stdscr)
                 if added_msg:
                     status_msg = added_msg
                     changed = True
+                menu_cursor = pi
                 continue
-            if pi == len(ordered) + 3:
+            if pi == len(ordered) + 4:
                 enabled_msg = _curses_add_model_win(providers_doc, providers, stdscr)
                 if enabled_msg:
                     status_msg = enabled_msg
                     changed = True
+                menu_cursor = pi
                 continue
             status_msg = None
             selected = ordered[pi]
+            menu_cursor = pi
             action_cursor = 0
             while True:
                 enabled = bool(selected.get("enabled", True))
@@ -2547,6 +2804,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         # with a pending deletion record.
                         update_config_toml(quiet=True)
                         changed = True
+                    menu_cursor = 0
                     break
         return changed
 
@@ -2657,6 +2915,7 @@ _PROVIDER_TOKEN_W = len("[disabled]")
 _PROVIDER_ENV_GAP = 2
 _PROVIDER_ENV_PAD = 1
 _MODEL_DESC_LABEL = "Model Descriptions"
+_CODEX_CONFIG_LABEL = "Codex Config"
 _UPDATE_LIST_LABEL = "Update Model List"
 
 
@@ -2680,6 +2939,7 @@ def _provider_state_token_col(providers: list) -> int:
     return max(
         provider_col,
         len(_MODEL_DESC_LABEL) + 1,
+        len(_CODEX_CONFIG_LABEL) + 1,
         len(_UPDATE_LIST_LABEL) + 1,
     )
 
@@ -2893,13 +3153,18 @@ def render_models_text() -> int:
         return 0
 
     print()
+    env_rows = []
     for provider in providers:
+        if not bool(provider.get("enabled", True)):
+            continue
         env = first_env_key(provider)
         if env:
-            penabled = bool(provider.get("enabled", True))
-            marker = "●" if penabled else "○"
             pname = provider.get("name") or provider["id"]
-            print(f"{marker} Required env var: {env} = {_env_value(env)}  ({pname})")
+            env_rows.append((env, _env_value(env), pname))
+    if env_rows:
+        maxlen = max(len(e) for e, _, _ in env_rows)
+        for env, value, pname in env_rows:
+            print(f"● {env:<{maxlen}} = {value}  ({pname})")
     print(f"Summary: {total_enabled} models enabled")
     return 0
 
@@ -3085,7 +3350,7 @@ def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
     if missing_providers:
         api = fetch_models_dev()
         for pid in missing_providers:
-            add_provider_entry(providers_doc, models_dev, pid)
+            add_provider_entry(providers_doc, api, pid)
 
     resolved_enable = resolve_targets(providers_doc, enable_targets, True)
     resolved_disable = resolve_targets(providers_doc, disable_targets, False)
@@ -3378,6 +3643,289 @@ def write_config_toml(
     return path
 
 
+def _pid_for_table_key(table_key: str, provider_ids: list[str]) -> str | None:
+    matches = [
+        pid
+        for pid in provider_ids
+        if table_key == pid or table_key.startswith(pid + "-")
+    ]
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _toml_key(ident: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", ident):
+        return ident
+    return toml_escape(ident)
+
+
+def _codex_provider_name(fields: dict, pid: str) -> str:
+    name = fields.get("name")
+    if isinstance(name, str) and name.endswith(")") and "(" in name:
+        inner = name[name.rfind("(") + 1 : -1].strip()
+        if inner:
+            return inner
+    return pid
+
+
+def emit_codex_provider_table(pid: str, fields: dict) -> str:
+    backend = fields.get("api_backend") or "chat_completions"
+    # Codex dropped `wire_api = "chat"`; OpenAI-compatible providers use
+    # `responses` (https://github.com/openai/codex/discussions/7782).
+    wire = "responses" if backend == "chat_completions" else str(backend)
+    lines = [
+        f"[model_providers.{_toml_key(pid)}]",
+        f"name = {toml_escape(_codex_provider_name(fields, pid))}",
+        f"base_url = {toml_escape(fields.get('base_url') or '')}",
+        f"env_key = {toml_escape(fields.get('env_key') or '')}",
+        f"wire_api = {toml_escape(wire)}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _is_codex_managed_key(stripped: str) -> bool:
+    return (
+        stripped.startswith("model =")
+        or stripped.startswith("model_provider =")
+        or stripped.startswith("model_catalog_json =")
+    )
+
+
+def _codex_owned_provider_ids(doc: dict, extra_pid: str = "") -> list[str]:
+    """Provider ids this tool may rewrite under [model_providers.*].
+
+    Configured ids from providers.json, plus the remembered Codex provider
+    (so a just-deleted selection can still be stripped). Not removed_providers.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in doc.get("providers") or []:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id")
+        if isinstance(pid, str) and pid and pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    if extra_pid and extra_pid not in seen:
+        out.append(extra_pid)
+    return out
+
+
+def _strip_codex_managed_sections(text: str, provider_ids: list[str]) -> str:
+    """Drop this tool's root Codex keys and owned [model_providers.<id>] tables.
+
+    Root `model` / `model_provider` / `model_catalog_json` (before the first
+    table) and owned provider tables are removed. [projects], [profiles],
+    and any other tables are left untouched.
+    """
+    if not text:
+        return ""
+    owned = set(provider_ids)
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    in_root = True
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_root = False
+            header = stripped[1:-1].strip()
+            pid = None
+            if header.startswith("model_providers."):
+                rest = header.split(".", 1)[1]
+                pid = rest.strip().strip('"')
+            if pid is not None and pid in owned:
+                i += 1
+                while i < len(lines):
+                    nxt = lines[i].strip()
+                    if nxt.startswith("[") and nxt.endswith("]"):
+                        break
+                    i += 1
+                continue
+        elif in_root and _is_codex_managed_key(stripped):
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
+def _codex_catalog_reasoning_levels(entry: dict) -> tuple[list[dict], str | None]:
+    levels: list[dict] = []
+    default = None
+    efforts = entry.get("reasoning_efforts")
+    if isinstance(efforts, list):
+        for item in efforts:
+            if not isinstance(item, dict):
+                continue
+            effort = item.get("value") or item.get("effort")
+            if not isinstance(effort, str) or not effort:
+                continue
+            desc = item.get("label") or item.get("description") or effort
+            levels.append({"effort": effort, "description": str(desc)})
+            if item.get("default"):
+                default = effort
+    stored = entry.get("reasoning_effort")
+    if isinstance(stored, str) and stored:
+        default = stored
+    return levels, default
+
+
+def emit_codex_model_catalog(provider: dict) -> dict:
+    """Codex `model_catalog_json` payload for one provider's enabled models."""
+    models_out: list[dict] = []
+    models = provider.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    for i, (mid, m) in enumerate(models.items()):
+        entry = m if isinstance(m, dict) else {}
+        if not bool(entry.get("enabled", True)):
+            continue
+        name = entry.get("name")
+        display = name if isinstance(name, str) and name else mid
+        desc = entry.get("description")
+        description = desc if isinstance(desc, str) else ""
+        ctx = entry.get("context_window")
+        try:
+            context_window = int(ctx) if ctx is not None else 128000
+        except (TypeError, ValueError):
+            context_window = 128000
+        levels, default_level = _codex_catalog_reasoning_levels(entry)
+        item: dict = {
+            "slug": mid,
+            "display_name": display,
+            "description": description,
+            "context_window": context_window,
+            "max_context_window": context_window,
+            "supported_reasoning_levels": levels,
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": True,
+            "priority": i,
+            "base_instructions": "",
+            "supports_reasoning_summaries": bool(entry.get("supports_reasoning_effort")),
+            "default_reasoning_summary": "none",
+            "support_verbosity": False,
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text"],
+        }
+        if default_level:
+            item["default_reasoning_level"] = default_level
+        models_out.append(item)
+    return {"models": models_out}
+
+
+def write_codex_model_catalog(provider_id: str, provider: dict) -> Path:
+    path = codex_models_json_path(provider_id)
+    payload = emit_codex_model_catalog(provider)
+    try:
+        atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        fail(f"failed to write {path}: {exc}")
+    return path
+
+
+def remove_codex_model_catalog(provider_id: str) -> None:
+    if not provider_id:
+        return
+    path = codex_models_json_path(provider_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        fail(f"failed to remove {path}: {exc}")
+
+
+def _codex_provider_fields(provider: dict, pid: str) -> dict:
+    pname = provider.get("name") or pid
+    return {
+        "name": f"x ({pname})",
+        "base_url": provider.get("base_url") if isinstance(provider.get("base_url"), str) else "",
+        "env_key": first_env_key(provider),
+        "api_backend": "chat_completions",
+    }
+
+
+def codex_config_toml(
+    providers_doc: dict,
+    provider_ids: list[str] | None = None,
+    tables: list[tuple[str, dict]] | None = None,
+    removed_keys: set[str] | None = None,
+) -> Path:
+    """Sibling of write_config_toml: emit one Codex provider block at the
+    top of $CODEX_HOME/config.toml, plus the matching model catalog JSON.
+
+    Called when write is on, or once after disable/delete while
+    `codex_model_provider` is still set. That field is the Codex-side
+    memory of which table to clear; removed_providers is Grok-only.
+    Disable/delete clears the field, strips this tool's root keys and the
+    remembered [model_providers.<id>] table, deletes <id>-models.json,
+    and does not write those keys back.
+    """
+    del provider_ids, tables, removed_keys
+    flag = bool(
+        providers_doc.get("write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT)
+    )
+    pid = codex_model_provider_id(providers_doc)
+    remembered = pid
+    # One-shot cleanup after disable or delete of the Codex provider:
+    # drop the remembered provider, then strip the old block.
+    if not flag and pid:
+        providers_doc["codex_model_provider"] = ""
+        dump_providers(PROVIDERS_PATH, providers_doc)
+        pid = ""
+    owned = _codex_owned_provider_ids(providers_doc, remembered)
+    path = codex_config_toml_path()
+    provider = find_provider(providers_doc, pid) if pid else None
+    first_mid = first_enabled_model_id(provider) if provider else None
+    should_emit = bool(flag and provider and first_mid)
+
+    if not should_emit:
+        remove_codex_model_catalog(remembered)
+
+    if not path.exists() and not should_emit:
+        return path
+
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    kept = _strip_codex_managed_sections(existing, owned).strip("\n")
+
+    prefix = ""
+    if should_emit:
+        write_codex_model_catalog(pid, provider)
+        catalog = codex_models_json_toml_value(pid)
+        fields = _codex_provider_fields(provider, pid)
+        prefix = (
+            f"model = {toml_escape(first_mid)}\n"
+            f"model_provider = {toml_escape(pid)}\n"
+            f"model_catalog_json = {toml_escape(catalog)}\n"
+            f"\n"
+            f"{emit_codex_provider_table(pid, fields).rstrip()}"
+        )
+
+    if prefix and kept:
+        text = f"{prefix}\n\n{kept}\n"
+    elif prefix:
+        text = f"{prefix}\n"
+    elif kept:
+        text = f"{kept}\n"
+    else:
+        text = ""
+    if text:
+        validate_toml_text(text)
+    try:
+        atomic_write(path, text)
+    except OSError as exc:
+        fail(f"failed to write {path}: {exc}")
+    return path
+
+
 def update_providers_json(*, quiet: bool = False) -> dict:
     """Update phase (1 of 2): reconcile every configured provider's model list
     in providers.json against fresh data (live /models with catalog fallback)
@@ -3524,6 +4072,13 @@ def update_config_toml(*, quiet: bool = False) -> Path:
             tables.append((table_model_id(pid, mid), fields))
 
     path = write_config_toml(managed, tables, removed_keys)
+    if reset_codex_if_invalid(providers_doc):
+        dump_providers(PROVIDERS_PATH, providers_doc)
+    flag = bool(
+        providers_doc.get("write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT)
+    )
+    if flag or codex_model_provider_id(providers_doc):
+        codex_config_toml(providers_doc, list(managed), tables, removed_keys)
 
     # The deletion list has been consumed; clear it so it isn't reprocessed
     # forever, and persist that.
@@ -3597,18 +4152,34 @@ def add_provider_entry(
 def cmd_search(term: str) -> int:
     """Search the models.dev provider list; the selected provider is added."""
     api = fetch_models_dev()
-    provider_id = search_providers(models_dev, term)
+    provider_id = search_providers(api, term)
     if provider_id is None:
         return 0
     providers_doc = load_providers()
-    add_provider_entry(providers_doc, models_dev, provider_id)
+    add_provider_entry(providers_doc, api, provider_id)
     return 0
 
 
 def cmd_add_provider(provider_id: str) -> int:
     providers_doc = load_providers()
     api = fetch_models_dev()
-    add_provider_entry(providers_doc, models_dev, provider_id)
+    add_provider_entry(providers_doc, api, provider_id)
+    return 0
+
+
+def cmd_codex(raw: str) -> int:
+    providers_doc = load_providers()
+    pid = raw.strip()
+    if pid == "disabled":
+        set_codex_selection(providers_doc, None)
+        dump_providers(PROVIDERS_PATH, providers_doc)
+        print("Codex Config disabled")
+        return 0
+    if pid not in enabled_provider_ids(providers_doc):
+        fail(f"--codex requires 'disabled' or an enabled provider id (got {pid!r})")
+    set_codex_selection(providers_doc, pid)
+    dump_providers(PROVIDERS_PATH, providers_doc)
+    print(f"Codex Config {pid}")
     return 0
 
 
@@ -3649,10 +4220,12 @@ def cmd_import() -> int:
         print("No [model.*] tables in config.toml; nothing to import.")
         return 0
 
-    # Providers that already exist are skipped by add-provider ("already
-    # exists"); per the revised flow they get enabled so run_sync reconciles
-    # them against the API (adds missing models, drops dead ones) before the
-    # per-model enables run.
+    # add-provider no-ops on a provider id that already exists in
+    # providers.json, so re-call it here for every imported provider and
+    # capture which ids it skipped. Those skipped providers need an
+    # explicit enable so the later run_sync reconciles them against the
+    # models.dev catalog (adds missing models, drops dead ones) before
+    # the per-model enables run.
     providers_doc_before_add = load_providers()
     existing_ids = {
         p.get("id")
@@ -3850,6 +4423,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  grok-models.py --enable opencode-go/glm-5.3 enable a model\n"
             "  grok-models.py --disable opencode-go/glm-5.3\n"
             "  grok-models.py --disable-all\n"
+            "  grok-models.py --codex openrouter           write Codex config for this provider on sync (or 'disabled')\n"
             "  grok-models.py --sync                       refresh from models.dev; rewrite config.toml\n"
             "  grok-models.py --import                     pull [model.*] from an existing config.toml\n"
         ),
@@ -3900,6 +4474,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable every model in every provider",
     )
     group.add_argument(
+        "--codex",
+        metavar="PROVIDER",
+        help="Write Codex config for this enabled provider on sync (or 'disabled')",
+    )
+    group.add_argument(
         "--sync",
         action="store_true",
         help="Refresh providers.json from models.dev; rewrite config.toml",
@@ -3937,6 +4516,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_disable_all()
         if args.enable or args.disable:
             return cmd_toggle(args.enable, args.disable)
+        if args.codex is not None:
+            return cmd_codex(args.codex)
         if args.sync:
             return cmd_sync()
         # Default (no args): straight into the config TUI.
