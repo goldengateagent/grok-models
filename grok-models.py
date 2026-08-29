@@ -109,7 +109,15 @@ TOP_LEVEL_KEY_ORDER = (
     "providers",
     "removed_providers",
 )
-PROVIDER_KEY_ORDER = ("id", "name", "env_key", "base_url", "enabled", "models")
+PROVIDER_KEY_ORDER = (
+    "id",
+    "name",
+    "env_key",
+    "base_url",
+    "enabled",
+    "auth_models_list",
+    "models",
+)
 MODEL_KEY_ORDER = (
     "enabled",
     "name",
@@ -413,19 +421,34 @@ def load_providers() -> dict:
     return data
 
 
-def http_get_json(url: str) -> object:
+def env_api_key(env_key: str) -> str:
+    """Value of `env_key` if that env var is set and non-empty."""
+    if not env_key:
+        return ""
+    return os.environ.get(env_key, "") or ""
+
+
+HTTP_TIMEOUT_SEC = 15
+
+
+def http_get_json(url: str, api_key: str | None = None) -> object:
     headers = {"User-Agent": "grok-models.py", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:300]
         fail(f"HTTP {exc.code} fetching {url}: {body}")
-    except urllib.error.URLError as exc:
-        fail(f"HTTP failure fetching {url}: {exc.reason}")
     except TimeoutError:
         fail(f"HTTP timeout fetching {url}")
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            fail(f"HTTP timeout fetching {url}")
+        fail(f"HTTP failure fetching {url}: {reason}")
     try:
         return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
@@ -467,29 +490,61 @@ def parse_openai_models_list(payload: object) -> list[tuple[str, str | None]] | 
     return items or None
 
 
-def live_fetch_error_status(url: str) -> str:
-    """TUI / CLI status when GET {base_url}/models fails. No HTTP body."""
-    return f"error {url}: fetch live model list failed"
+def live_fetch_error_status(detail: str) -> str:
+    """TUI / CLI status when GET {base_url}/models fails."""
+    if not detail:
+        return "error: fetch live model list failed"
+    if detail.startswith("error "):
+        return detail
+    return f"error {detail}"
+
+
+def _is_http_auth_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return msg.startswith("HTTP 401 ") or msg.startswith("HTTP 403 ")
+
+
+def provider_auth_models_list(provider: dict | None) -> bool:
+    """True when this provider's /models list requires an API key."""
+    if not isinstance(provider, dict):
+        return False
+    return provider.get("auth_models_list") is True
 
 
 def try_fetch_provider_models(
     base_url: str,
+    env_key: str = "",
+    provider: dict | None = None,
 ) -> tuple[list[tuple[str, str | None]] | None, str | None]:
     """GET {base_url}/models. Returns (rows, None) or (None, url) on failure.
 
     Never prints — callers decide whether to surface the URL in the TUI
     status line or as a one-line CLI message.
+
+    If providers.json has auth_models_list true, send Authorization: Bearer.
+    Otherwise fetch unauthenticated. On 401/403 with a usable env_key, set
+    auth_models_list true and retry with the key. Success leaves the flag
+    unchanged. Some public lists hang if a key is sent.
     """
     if not isinstance(base_url, str) or not base_url:
         return None, None
     url = provider_models_url(base_url)
+    use_auth = provider_auth_models_list(provider)
+    api_key = env_api_key(env_key) if use_auth else ""
     try:
-        payload = http_get_json(url)
-    except SyncError:
-        return None, url
+        payload = http_get_json(url, api_key=api_key or None)
+    except SyncError as exc:
+        if use_auth or not env_api_key(env_key) or not _is_http_auth_error(exc):
+            return None, str(exc)
+        if isinstance(provider, dict):
+            provider["auth_models_list"] = True
+        try:
+            payload = http_get_json(url, api_key=env_api_key(env_key))
+        except SyncError as retry_exc:
+            return None, str(retry_exc)
     items = parse_openai_models_list(payload)
     if items is None:
-        return None, url
+        return None, f"empty or invalid model list from {url}"
     return items, None
 
 
@@ -592,16 +647,24 @@ def reconcile_models_map(
 
 
 def authority_items_for_provider(
-    pinfo: dict, base_url: str, quiet: bool = False
+    pinfo: dict,
+    base_url: str,
+    quiet: bool = False,
+    env_key: str = "",
+    provider: dict | None = None,
 ) -> tuple[list[tuple[str, str | None]], str | None]:
     catalog = catalog_models_dict(pinfo)
     if USE_PROVIDER_MODELS_ENDPOINT and base_url:
-        live, err_url = try_fetch_provider_models(base_url)
+        live, err = try_fetch_provider_models(
+            base_url, env_key=env_key, provider=provider
+        )
         if live is not None:
             return live, None
-        if err_url and not quiet:
-            print(live_fetch_error_status(err_url))
-        return items_from_catalog(catalog), err_url
+        if err:
+            msg = live_fetch_error_status(err)
+            print(msg)
+            return items_from_catalog(catalog), msg
+        return items_from_catalog(catalog), err
     return items_from_catalog(catalog), None
 
 
@@ -2870,7 +2933,13 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     providers_doc.clear()
                     providers_doc.update(fresh)
                     n_sync = stats.get("providers_synced", 0)
-                    status_msg = f"Updated model list · {n_sync} providers synced"
+                    errs = stats.get("live_fetch_errors") or []
+                    if len(errs) == 1:
+                        status_msg = errs[0]
+                    elif len(errs) > 1:
+                        status_msg = f"{errs[0]} (+{len(errs) - 1} more)"
+                    else:
+                        status_msg = f"Updated model list · {n_sync} providers synced"
                     changed = True
                 except SyncError as exc:
                     status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: fetch live model list failed"
@@ -4162,6 +4231,7 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         "models_missing": 0,
         "providers_missing": 0,
         "tables_written": 0,
+        "live_fetch_errors": [],
     }
 
     # Refresh every configured provider, enabled or not — a disabled
@@ -4199,7 +4269,15 @@ def update_providers_json(*, quiet: bool = False) -> dict:
             provider["base_url"] = catalog_api
         base_url = stored or ""
 
-        items, _err = authority_items_for_provider(pinfo, base_url, quiet=quiet)
+        items, err = authority_items_for_provider(
+            pinfo,
+            base_url,
+            quiet=quiet,
+            env_key=first_env_key(provider),
+            provider=provider,
+        )
+        if err:
+            stats["live_fetch_errors"].append(err)
         reconcile_models_map(models_map, items, catalog_models, stats)
         stats["providers_synced"] += 1
 
@@ -4357,7 +4435,9 @@ def add_provider_entry(
     if isinstance(api_base, str) and api_base:
         entry["base_url"] = api_base
     base_url = entry.get("base_url") if isinstance(entry.get("base_url"), str) else ""
-    items, fetch_err_url = authority_items_for_provider(pinfo, base_url, quiet=quiet)
+    items, fetch_err_url = authority_items_for_provider(
+        pinfo, base_url, quiet=quiet, env_key=env, provider=entry
+    )
     if not items:
         fail(f"provider {provider_id!r} has no models in models.dev")
     models_map = seed_models_from_items(items, catalog_models)

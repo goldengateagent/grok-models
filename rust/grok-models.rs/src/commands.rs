@@ -579,7 +579,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     entry.insert("name".into(), name_val);
     let env = core::api_env_key(&pinfo);
     if !env.is_empty() {
-        entry.insert("env_key".into(), Value::String(env));
+        entry.insert("env_key".into(), Value::String(env.clone()));
     }
     // Seed the provider-level base_url override from the catalog so the
     // config menu shows the configured endpoint even before any edit.
@@ -587,7 +587,13 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !api_url.is_empty() {
         entry.insert("base_url".into(), Value::String(api_url.to_string()));
     }
-    let (items, fetch_err_url) = crate::sync::authority_items_for_provider(&pinfo, api_url, quiet);
+    let (items, fetch_err_url) = crate::sync::authority_items_for_provider(
+        &pinfo,
+        api_url,
+        quiet,
+        &env,
+        Some(&mut entry),
+    );
     if items.is_empty() {
         return fail(format!(
             "provider {} has no models in models.dev",

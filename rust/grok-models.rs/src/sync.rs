@@ -23,23 +23,42 @@ pub struct Stats {
     pub models_missing: u64,
     pub providers_missing: u64,
     pub tables_written: u64,
+    pub live_fetch_errors: Vec<String>,
 }
 
-/// Fetch models.dev api.json over HTTPS (ureq + rustls, 60s timeout).
+const HTTP_TIMEOUT_SECS: u64 = 15;
+
+/// Fetch models.dev api.json over HTTPS (ureq + rustls, 15s timeout).
 pub fn fetch_models_dev() -> Res<Value> {
     fetch_json_url(MODELS_DEV_URL)
 }
 
+/// Value of `env_key` if that env var is set and non-empty.
+pub fn env_api_key(env_key: &str) -> Option<String> {
+    if env_key.is_empty() {
+        return None;
+    }
+    match std::env::var(env_key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
 pub fn http_get_json(url: &str) -> Res<Value> {
+    http_get_json_with(url, None)
+}
+
+pub fn http_get_json_with(url: &str, api_key: Option<&str>) -> Res<Value> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .timeout_connect(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .user_agent("grok-models.py")
         .build();
-    match agent
-        .get(url)
-        .set("Accept", "application/json")
-        .call()
-    {
+    let mut request = agent.get(url).set("Accept", "application/json");
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.set("Authorization", &format!("Bearer {key}"));
+    }
+    match request.call() {
         Ok(resp) => {
             let status = resp.status();
             if status != 200 {
@@ -72,7 +91,16 @@ pub fn http_get_json(url: &str) -> Res<Value> {
                 .collect::<String>();
             fail(format!("HTTP {code} fetching {url}: {body}"))
         }
-        Err(e) => fail(format!("HTTP failure fetching {url}: {e}")),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.to_ascii_lowercase().contains("timed out")
+                || msg.to_ascii_lowercase().contains("timeout")
+            {
+                fail(format!("HTTP timeout fetching {url}"))
+            } else {
+                fail(format!("HTTP failure fetching {url}: {e}"))
+            }
+        }
     }
 }
 
@@ -114,26 +142,72 @@ pub fn parse_openai_models_list(payload: &Value) -> Option<Vec<(String, Option<S
     }
 }
 
-/// TUI / CLI status when GET {base_url}/models fails. No HTTP body.
-pub fn live_fetch_error_status(url: &str) -> String {
-    format!("error {url}: fetch live model list failed")
+/// TUI / CLI status when GET {base_url}/models fails.
+pub fn live_fetch_error_status(detail: &str) -> String {
+    if detail.is_empty() {
+        return "error: fetch live model list failed".to_string();
+    }
+    if detail.starts_with("error ") {
+        detail.to_string()
+    } else {
+        format!("error {detail}")
+    }
+}
+
+fn is_http_auth_error(err: &crate::SyncError) -> bool {
+    err.0.starts_with("HTTP 401 ") || err.0.starts_with("HTTP 403 ")
+}
+
+fn provider_auth_models_list(provider: Option<&Map<String, Value>>) -> bool {
+    matches!(
+        provider.and_then(|p| p.get("auth_models_list")),
+        Some(Value::Bool(true))
+    )
 }
 
 /// GET {base_url}/models. Returns (rows, None) or (None, Some(url)) on failure.
 /// Never prints — callers decide how to surface the URL.
+///
+/// If the provider has `auth_models_list: true`, send Authorization: Bearer.
+/// Otherwise fetch unauthenticated. On 401/403 with a usable env_key, set
+/// `auth_models_list` true and retry with the key. Success leaves the flag
+/// unchanged. Some public lists hang if a key is sent.
 pub fn try_fetch_provider_models(
     base_url: &str,
+    env_key: &str,
+    provider: Option<&mut Map<String, Value>>,
 ) -> (Option<Vec<(String, Option<String>)>>, Option<String>) {
     if base_url.is_empty() {
         return (None, None);
     }
     let url = provider_models_url(base_url);
-    match http_get_json(&url) {
-        Err(_) => (None, Some(url)),
-        Ok(payload) => match parse_openai_models_list(&payload) {
-            None => (None, Some(url)),
-            Some(items) => (Some(items), None),
-        },
+    let use_auth = provider_auth_models_list(provider.as_deref());
+    let key = if use_auth {
+        env_api_key(env_key)
+    } else {
+        None
+    };
+    let payload = match http_get_json_with(&url, key.as_deref()) {
+        Ok(payload) => payload,
+        Err(e) => {
+            if use_auth || !is_http_auth_error(&e) {
+                return (None, Some(e.0));
+            }
+            let Some(k) = env_api_key(env_key) else {
+                return (None, Some(e.0));
+            };
+            if let Some(p) = provider {
+                p.insert("auth_models_list".into(), Value::Bool(true));
+            }
+            match http_get_json_with(&url, Some(&k)) {
+                Ok(payload) => payload,
+                Err(retry_e) => return (None, Some(retry_e.0)),
+            }
+        }
+    };
+    match parse_openai_models_list(&payload) {
+        None => (None, Some(format!("empty or invalid model list from {url}"))),
+        Some(items) => (Some(items), None),
     }
 }
 
@@ -325,20 +399,22 @@ fn reconcile_models_map(
 pub fn authority_items_for_provider(
     pinfo: &Value,
     base_url: &str,
-    quiet: bool,
+    _quiet: bool,
+    env_key: &str,
+    provider: Option<&mut Map<String, Value>>,
 ) -> (Vec<(String, Option<String>)>, Option<String>) {
     let catalog = catalog_models_map(pinfo);
     if USE_PROVIDER_MODELS_ENDPOINT && !base_url.is_empty() {
-        let (live, err_url) = try_fetch_provider_models(base_url);
+        let (live, err) = try_fetch_provider_models(base_url, env_key, provider);
         if let Some(live) = live {
             return (live, None);
         }
-        if let Some(ref url) = err_url {
-            if !quiet {
-                println!("{}", live_fetch_error_status(url));
-            }
+        if let Some(ref err) = err {
+            let msg = live_fetch_error_status(err);
+            println!("{msg}");
+            return (items_from_catalog(&catalog), Some(msg));
         }
-        return (items_from_catalog(&catalog), err_url);
+        return (items_from_catalog(&catalog), err);
     }
     (items_from_catalog(&catalog), None)
 }
@@ -416,6 +492,7 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
         // missing base_url (a stored non-empty base_url override wins).
         let new_env_key = core::api_env_key(&pinfo);
         let effective_base_url: String;
+        let env_key: String;
         {
             let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
             if !new_env_key.is_empty()
@@ -439,12 +516,29 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
                     effective_base_url = catalog_url.to_string();
                 }
             }
+            env_key = match prov_obj.get("env_key").and_then(Value::as_str) {
+                Some(s) => s.to_string(),
+                None => String::new(),
+            };
         }
 
         // Bring the stored model list in line with the authoritative one:
         // add/remove/rename entries, then update each entry's attributes
-        // from the current catalog.
-        let (items, _err) = authority_items_for_provider(&pinfo, &effective_base_url, quiet);
+        // from the current catalog. A 401/403 on an unauthenticated
+        // /models fetch sets auth_models_list on the provider.
+        let (items, err) = {
+            let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
+            authority_items_for_provider(
+                &pinfo,
+                &effective_base_url,
+                quiet,
+                &env_key,
+                Some(prov_obj),
+            )
+        };
+        if let Some(e) = err {
+            stats.live_fetch_errors.push(e);
+        }
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
         reconcile_models_map(models_map, &items, &catalog_models, &mut stats);
@@ -1114,6 +1208,59 @@ mod tests {
         let s = last_updated_stamp();
         let re = regex_lite_stamp(&s);
         assert!(re, "last_updated stamp not MM-DD-YYYY HH:MM AM/PM: {s:?}");
+    }
+
+    #[test]
+    fn live_fetch_error_status_wraps_http_detail() {
+        assert_eq!(
+            live_fetch_error_status("HTTP timeout fetching https://api.example/v1/models"),
+            "error HTTP timeout fetching https://api.example/v1/models"
+        );
+        assert_eq!(
+            live_fetch_error_status("error already wrapped"),
+            "error already wrapped"
+        );
+    }
+
+    #[test]
+    fn provider_auth_models_list_only_true() {
+        let mut p = Map::new();
+        assert!(!provider_auth_models_list(Some(&p)));
+        p.insert("auth_models_list".into(), Value::Bool(false));
+        assert!(!provider_auth_models_list(Some(&p)));
+        p.insert("auth_models_list".into(), Value::Bool(true));
+        assert!(provider_auth_models_list(Some(&p)));
+        assert!(!provider_auth_models_list(None));
+    }
+
+    #[test]
+    fn is_http_auth_error_matches_401_403_only() {
+        assert!(is_http_auth_error(&crate::SyncError(
+            "HTTP 401 fetching https://example/models: no".into()
+        )));
+        assert!(is_http_auth_error(&crate::SyncError(
+            "HTTP 403 fetching https://example/models: no".into()
+        )));
+        assert!(!is_http_auth_error(&crate::SyncError(
+            "HTTP 429 fetching https://example/models: slow".into()
+        )));
+        assert!(!is_http_auth_error(&crate::SyncError(
+            "HTTP failure fetching https://example/models: timeout".into()
+        )));
+    }
+
+    #[test]
+    fn env_api_key_reads_set_var() {
+        let _guard = grok_home_lock();
+        const VAR: &str = "GROK_MODELS_TEST_FETCH_KEY";
+        std::env::remove_var(VAR);
+        assert_eq!(env_api_key(""), None);
+        assert_eq!(env_api_key(VAR), None);
+        std::env::set_var(VAR, "secret-token");
+        assert_eq!(env_api_key(VAR).as_deref(), Some("secret-token"));
+        std::env::set_var(VAR, "");
+        assert_eq!(env_api_key(VAR), None);
+        std::env::remove_var(VAR);
     }
 
     fn regex_lite_stamp(s: &str) -> bool {

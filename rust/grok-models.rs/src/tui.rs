@@ -2772,10 +2772,20 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
                     }
-                    status_msg = Some(format!(
-                        "Updated model list · {} providers synced",
-                        stats.providers_synced
-                    ));
+                    status_msg = Some(if stats.live_fetch_errors.len() == 1 {
+                        stats.live_fetch_errors[0].clone()
+                    } else if stats.live_fetch_errors.len() > 1 {
+                        format!(
+                            "{} (+{} more)",
+                            stats.live_fetch_errors[0],
+                            stats.live_fetch_errors.len() - 1
+                        )
+                    } else {
+                        format!(
+                            "Updated model list · {} providers synced",
+                            stats.providers_synced
+                        )
+                    });
                     changed = true;
                 }
                 Err(e) => {
