@@ -44,9 +44,13 @@ chmod 755 "$STAGE/grok-models"
 
 cp "$HERE/../README.md" "$STAGE/README.md"
 
-tar -czf "${STAGE}.tar.gz" -C "$DIST" "$(basename "$STAGE")"
-shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+ARCHIVE="$(basename "${STAGE}.tar.gz")"
+tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"
+(
+  cd "$DIST"
+  shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+)
 
 rm -rf "$STAGE"
-echo "release: ${STAGE}.tar.gz"
-cat "${STAGE}.tar.gz.sha256"
+echo "release: dist/$ARCHIVE"
+cat "$DIST/${ARCHIVE}.sha256"

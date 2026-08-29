@@ -13,6 +13,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CRATE="$HERE/grok-models.rs"
 TARGET="${TARGET:-}"
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+SYSROOT="$(rustc --print sysroot)"
+# Strip builder machine prefixes from panic/file!() paths in the binary.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${CRATE}= --remap-path-prefix=${CARGO_HOME}= --remap-path-prefix=${SYSROOT}="
 
 if [[ -n "$TARGET" ]]; then
   cargo build --release --manifest-path "$CRATE/Cargo.toml" --target "$TARGET"
