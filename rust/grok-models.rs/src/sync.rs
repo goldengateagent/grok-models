@@ -399,7 +399,7 @@ fn reconcile_models_map(
 pub fn authority_items_for_provider(
     pinfo: &Value,
     base_url: &str,
-    _quiet: bool,
+    quiet: bool,
     env_key: &str,
     provider: Option<&mut Map<String, Value>>,
 ) -> (Vec<(String, Option<String>)>, Option<String>) {
@@ -411,7 +411,9 @@ pub fn authority_items_for_provider(
         }
         if let Some(ref err) = err {
             let msg = live_fetch_error_status(err);
-            println!("{msg}");
+            if !quiet {
+                println!("{msg}");
+            }
             return (items_from_catalog(&catalog), Some(msg));
         }
         return (items_from_catalog(&catalog), err);

@@ -662,7 +662,8 @@ def authority_items_for_provider(
             return live, None
         if err:
             msg = live_fetch_error_status(err)
-            print(msg)
+            if not quiet:
+                print(msg)
             return items_from_catalog(catalog), msg
         return items_from_catalog(catalog), err
     return items_from_catalog(catalog), None
