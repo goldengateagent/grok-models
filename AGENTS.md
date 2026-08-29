@@ -11,6 +11,7 @@
 - Mutating commands (`add`, `rm`, `commit`, `reset`, `checkout`, `restore`, `push`, `pull`, `merge`, `rebase`, and anything that changes the index or working tree) require the user to authorize them by saying `exec git`.
 - When the user asks for git work, print the exact mutating command(s) for review before asking for authorization.
 - After approval, run only the authorized command(s) and echo the exact command(s) issued.
+- do not git revert any files without authorization
 
 ## Project files
 

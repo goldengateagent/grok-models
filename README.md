@@ -1,19 +1,63 @@
 # grok-models
 
-A TUI/CLI for configuring custom model configurations for [Grok Build](https://x.ai/cli). 
+## About
+`grok-models` enables provider and gateway models to run in Grok Build
+and Codex, alongside Grok and GPT. Besides the closed frontier models, there
+are many models offered through providers and gateways. Adding open weights
+models in Grok Build and Codex supplements Grok and GPT agentic coding
+especially for token usage. Many free models are available by enabling providers
+and putting their api key in your env vars. 
+
+`grok-models` enables agentic coding with gateway providers like OpenCode (Zen
+and Go), OpenRouter and Ollama Cloud with their models in Grok Build and Codex
+by automating the custom model configurations. Type-filter for Add Model allows
+search across 7,483 models and 207 providers and configures enabled models in
+Grok Build and Codex. Provider Model Configuration and Search Models orders
+enabled models, free models and then disabled models in the list to easily
+manage and find models including free models. When a provider is added with
+`grok-models` the required env_key for the api key is displayed. Go to the
+gateway site like openrouter.ai or opencode.ai, sign in, get a free api key and
+export it in your shell. `openrouter/free` slug routes to various free models
+while other individual models such as Ox Alpha/GML 5.3 Flash, DeepSeek V4 Flash,
+Hy3, MiniMax M3, Nemotron 3 Ultra and Gemma4 have all done well with agentic
+coding and often free.
+
+Enabling open weights models via `grok-models` gives access to these models in
+Grok Build using the `/model` command alongside grok models.
+
+## Grok Build Config
+
+`grok-models` is a TUI/CLI for configuring custom model configurations for [Grok Build](https://x.ai/cli). 
 This allows the use of other providers and models inside Grok Build besides the
 grok model. These model configurations are stored in `~/.grok/config.toml` or
 `$GROK_HOME/config.toml` and can be hard to manage manually. Grok Build does not
 allow more than one provider config to pull models from so each custom model
-must be defined in `config.toml`. `grok-models` configures these `[model.*]`
-tables automatically via a TUI that finds providers and models from [models.dev](https://models.dev) 
-and the providers api to manage which providers and models are enabled. While
-`models.dev` is used for discovery of providers and models, the provider's api
-is used for the authority on which models are currently active. `models.dev`
-model data is used to backfill configuration data for a particular model such
-as context window and reasoning levels. The provider/model config is stored in
-`~/.grok/providers.json` and when the TUI/CLI runs a sync, the `config.toml`
+must be defined in `config.toml`. 
+
+`grok-models` configures these `[model.*]` tables automatically via a TUI that
+finds providers and models from [models.dev](https://models.dev) and the providers api to 
+manage which providers and models are enabled. While `models.dev` is used for
+discovery of providers and models, the provider's api is used for the authority
+on which models are currently active. `models.dev` model data is used to
+backfill configuration data for a particular model such as context window and
+reasoning levels. The provider/model config is stored in `~/.grok/providers.json` 
+and when the TUI/CLI runs a sync, the `config.toml` 
 `[model.<provider-id>-<model-id>]` tables are updated.
+
+## Codex Config
+
+`grok-models` has a feature to enable Codex custom models, syncing the configured 
+model data held in `~/.grok/providers.json` to `~/.codex/config.toml` and 
+`~/.codex/<provider>-models.json`. Codex only allows one `model_provider` 
+configured in its `config.toml` so in the `grok-models` TUI a toggle allows
+selection of which provider (and their enabled models) to sync.
+
+## Syncing Model Configs
+
+Model and provider selections are made in the TUI/CLI, stored in the
+`~/.grok/providers.json`, and then synced to Grok Build (and Codex) config
+files. A sync to the config files will occur automatically when the TUI exits,
+on the CLI with --sync or via the TUI toggle 'Sync Model Config'. 
 
 ## Modifies `$GROK_HOME/config.toml` custom models (important)
 
@@ -35,23 +79,53 @@ Grok Build reads the API key from the provider’s `env_key` (shown in the TUI).
 Export that variable in your shell. After `config.toml` changes, relaunch 
 Grok Build so it reloads the file to pick up the model list. 
 
-## Quick Start
+## Install 
 
-There are two implementations that should behave the same:
-
-- `grok-models` — Rust native binary. `rust/build-grok-models.sh` builds to
-  `rust/grok-models`. Copy to `~/bin`, add to `PATH`. Builds on macos, wsl and
-  linux.
-- `grok-models.py` — Python 3, stdlib only. Run with `python grok-models.py`.
-
-Example CLI: Add OpenCode Go and enable GLM 5.3:
-
+##### Extract from distribution
 ```
-grok-models --add-provider opencode-go
-grok-models --enable opencode-go/glm-5.3
+% tar xvf grok-models-1.0.0-<platform>.tar.gz
+% cd grok-models-1.0.0-<platform>
+% cp ./grok-models ~/bin
+% export PATH="$HOME/bin:$PATH"
+% grok-models
 ```
 
-Python: `python grok-models.py` with the same flags.
+##### Build from source 
+```
+# macos
+% brew install rust
+
+# linux / wsl
+% sudo apt install rustc cargo
+
+% cd grok-models/rust
+% ./build-grok-models.sh
+% cp ./grok-models ~/bin
+% export PATH="$HOME/bin:$PATH"
+% grok-models
+```
+
+##### Make a distribution 
+```
+# creates tar.gz distribution in grok-models/rust/dist for current platform
+% grok-models/rust/make-release.sh
+```
+
+##### Python Version 
+```
+% cd grok-models
+% python grok-models.py
+```
+
+##### env_key required by enabled providers is shown in the grok-models TUI
+```
+# add to your shell or ~/.zshrc for macos 
+export OPENCODE_API_KEY="$(< ~/.opencode-key)"
+export OPENROUTER_API_KEY="$(< ~/.openrouter-key)"
+export OLLAMA_API_KEY="$(< ~/.ollama-key)"
+export GMICLOUD_API_KEY="$(< ~/.gmicloud-key)"
+export POOLSIDE_API_KEY="$(< ~/.poolside-key)"
+```
 
 ## TUI
 
@@ -85,7 +159,7 @@ sorted by name. Required env var for the `env_key` and sample export are shown.
 `providers.json` is written on each edit. `config.toml` is rewritten when you
 quit, if anything changed. Select Sync Model Config to rewrite `config.toml`
 on demand; the row shows `last_synced`. Ensure the env_key is exported in your
-shell and restart Grok Build. type `/model` and the new models will appear
+shell and restart Grok Build. Type `/model` and the new models will appear to
 select.
 
 ## Commands
@@ -123,3 +197,11 @@ never re-enables something you turned off.
   runs a full sync (same as `--sync`) and then writes owned `[model.*]` tables.
 - **`--enable` / `--disable` / `--sync`**: update `providers.json` and sync
   `config.toml` in that same command.
+
+## Agentic Coding
+`grok-models` 14,000 lines of code including tests was created in one week with
+1 Billion tokens utilizing agentic coding with Grok Build and Ox Alpha (max)
+(now GLM 5.3 Flash) free pre-release burning 600M tokens through OpenRouter and
+OpenCode Zen with additional 200M tokens from Grok 4.6 (high) via Supergrok and
+200M tokens from Hy3 (free through OpenCode Zen) and MiniMax M3 (free through
+GMI Cloud). 
