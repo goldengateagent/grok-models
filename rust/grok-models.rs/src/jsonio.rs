@@ -91,10 +91,11 @@ pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
     ];
 pub const PROVIDER_KEY_ORDER: [&str; 6] =
     ["id", "name", "env_key", "base_url", "enabled", "models"];
-const MODEL_KEY_ORDER: [&str; 7] = [
+const MODEL_KEY_ORDER: [&str; 8] = [
     "enabled",
     "name",
     "description",
+    "modalities",
     "context_window",
     "supports_reasoning_effort",
     "reasoning_effort",
@@ -115,6 +116,14 @@ pub fn catalog_description(minfo: &Value) -> Option<&str> {
         .get("description")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+}
+
+/// models.dev `modalities` object, or None when absent/not an object.
+pub fn catalog_modalities(minfo: &Value) -> Option<Value> {
+    match minfo.get("modalities") {
+        Some(v) if v.is_object() => Some(v.clone()),
+        _ => None,
+    }
 }
 
 /// Insert the catalog description into a model entry map (seed path).
@@ -373,6 +382,35 @@ mod tests {
         // Per-model canonical field order too.
         let alpha: Vec<String> = models["alpha"].as_object().unwrap().keys().cloned().collect();
         assert_eq!(alpha, ["enabled", "name"]);
+    }
+
+    #[test]
+    fn order_provider_entry_places_modalities_after_description() {
+        let p = serde_json::json!({
+            "id": "p",
+            "name": "P",
+            "enabled": true,
+            "models": {
+                "m": {
+                    "context_window": 1000,
+                    "enabled": true,
+                    "name": "M",
+                    "description": "d",
+                    "modalities": { "input": ["text"], "output": ["text"] }
+                }
+            }
+        });
+        let entry = order_provider_entry(p.as_object().unwrap());
+        let keys: Vec<String> = entry["models"]["m"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            ["enabled", "name", "description", "modalities", "context_window"]
+        );
     }
 
     #[test]

@@ -196,8 +196,12 @@ fn resolve_model_name(
 
 /// Fill a model's missing attributes (context window, reasoning effort
 /// options) from its models.dev catalog entry. Existing values are never
-/// overwritten — user-set preferences win.
+/// overwritten — user-set preferences win. Catalog `modalities` is refreshed
+/// whenever the catalog carries the object.
 fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
+    if let Some(mods) = jsonio::catalog_modalities(minfo) {
+        entry.insert("modalities".to_string(), mods);
+    }
     if !entry.contains_key("context_window") {
         if let Some(ctx) = core::context_window_field(minfo) {
             entry.insert("context_window".to_string(), ctx);
@@ -630,6 +634,30 @@ fn catalog_reasoning_levels(entry: &Map<String, Value>) -> (Vec<Value>, Option<S
     (levels, default)
 }
 
+const CODEX_INPUT_MODALITY_VALUES: [&str; 3] = ["text", "image", "audio"];
+
+/// Codex-allowed input modalities from a stored providers.json model.
+fn codex_input_modalities(entry: &Map<String, Value>) -> Vec<String> {
+    let Some(raw) = entry
+        .get("modalities")
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("input"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in raw {
+        let Some(s) = item.as_str() else {
+            continue;
+        };
+        if CODEX_INPUT_MODALITY_VALUES.contains(&s) && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
 fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
     let mut models_out = Vec::new();
     let empty = Map::new();
@@ -671,8 +699,14 @@ fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
             "truncation_policy": { "mode": "tokens", "limit": 10000 },
             "effective_context_window_percent": 95,
             "experimental_supported_tools": [],
-            "input_modalities": ["text"],
         });
+        let input_modalities = codex_input_modalities(&entry);
+        if !input_modalities.is_empty() {
+            item.as_object_mut().unwrap().insert(
+                "input_modalities".into(),
+                Value::Array(input_modalities.into_iter().map(Value::String).collect()),
+            );
+        }
         if let Some(def) = default_level {
             item.as_object_mut()
                 .unwrap()
@@ -1604,6 +1638,188 @@ mod tests {
         assert!(
             !paths::codex_models_json_path("openrouter").exists(),
             "catalog json must be deleted with the provider table"
+        );
+    }
+
+    #[test]
+    fn seed_models_from_items_copies_catalog_modalities() {
+        let catalog = serde_json::json!({
+            "vision": {
+                "name": "Vision",
+                "modalities": {
+                    "input": ["text", "image", "video", "pdf", "audio"],
+                    "output": ["text"]
+                }
+            },
+            "plain": { "name": "Plain" }
+        });
+        let items = vec![
+            ("vision".to_string(), Some("Vision".to_string())),
+            ("plain".to_string(), Some("Plain".to_string())),
+        ];
+        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap());
+        assert_eq!(
+            seeded["vision"]["modalities"],
+            serde_json::json!({
+                "input": ["text", "image", "video", "pdf", "audio"],
+                "output": ["text"]
+            })
+        );
+        assert!(
+            seeded["plain"].get("modalities").is_none(),
+            "models without catalog modalities must not gain the field"
+        );
+    }
+
+    #[test]
+    fn reconcile_refreshes_modalities_from_catalog_and_keeps_when_omitted() {
+        let mut models_map = match serde_json::json!({
+            "m": {
+                "enabled": true,
+                "name": "M",
+                "modalities": { "input": ["text"], "output": ["text"] }
+            }
+        }) {
+            Value::Object(m) => m,
+            other => panic!("expected object, got {other}"),
+        };
+        let items = vec![("m".to_string(), Some("M".to_string()))];
+        let mut stats = Stats::default();
+
+        let catalog = serde_json::json!({
+            "m": {
+                "name": "M",
+                "modalities": {
+                    "input": ["text", "image"],
+                    "output": ["text"]
+                }
+            }
+        });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog.as_object().unwrap(),
+            &mut stats,
+        );
+        assert_eq!(
+            models_map["m"]["modalities"]["input"],
+            serde_json::json!(["text", "image"])
+        );
+
+        let catalog_no_mods = serde_json::json!({ "m": { "name": "M" } });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog_no_mods.as_object().unwrap(),
+            &mut stats,
+        );
+        assert_eq!(
+            models_map["m"]["modalities"]["input"],
+            serde_json::json!(["text", "image"]),
+            "omitted catalog modalities must not delete the stored value"
+        );
+    }
+
+    fn catalog_json_for_modalities(input: Option<Value>) -> Value {
+        let mut model = serde_json::json!({
+            "enabled": true,
+            "name": "M"
+        });
+        if let Some(inp) = input {
+            model.as_object_mut().unwrap().insert(
+                "modalities".into(),
+                serde_json::json!({ "input": inp, "output": ["text"] }),
+            );
+        }
+        let provider = serde_json::json!({
+            "id": "p",
+            "models": { "m": model }
+        });
+        emit_codex_model_catalog(provider.as_object().unwrap())
+    }
+
+    #[test]
+    fn emit_codex_model_catalog_filters_input_modalities() {
+        let missing = catalog_json_for_modalities(None);
+        assert!(
+            missing["models"][0].get("input_modalities").is_none(),
+            "missing modalities must omit input_modalities: {missing}"
+        );
+
+        let full = catalog_json_for_modalities(Some(serde_json::json!([
+            "text", "image", "video", "pdf", "audio"
+        ])));
+        assert_eq!(
+            full["models"][0]["input_modalities"],
+            serde_json::json!(["text", "image", "audio"])
+        );
+
+        let image_only = catalog_json_for_modalities(Some(serde_json::json!(["image"])));
+        assert_eq!(
+            image_only["models"][0]["input_modalities"],
+            serde_json::json!(["image"])
+        );
+
+        let ignored = catalog_json_for_modalities(Some(serde_json::json!(["video", "pdf"])));
+        assert!(
+            ignored["models"][0].get("input_modalities").is_none(),
+            "non-Codex modalities must omit the field: {ignored}"
+        );
+    }
+
+    #[test]
+    fn codex_catalog_writes_filtered_input_modalities() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("modalities");
+
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "enabled": true,
+                "env_key": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "models": {
+                    "vision": {
+                        "name": "Vision",
+                        "enabled": true,
+                        "modalities": {
+                            "input": ["text", "image", "video", "pdf", "audio"],
+                            "output": ["text"]
+                        }
+                    },
+                    "plain": {
+                        "name": "Plain",
+                        "enabled": true
+                    }
+                }
+            }]
+        });
+        jsonio::set_codex_selection(&mut doc, Some("openrouter"));
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+
+        let catalog_path = paths::codex_models_json_path("openrouter");
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("catalog"),
+        )
+        .expect("parse catalog");
+        let models = catalog["models"].as_array().expect("models array");
+        let vision = models
+            .iter()
+            .find(|m| m["slug"] == "vision")
+            .expect("vision model");
+        let plain = models
+            .iter()
+            .find(|m| m["slug"] == "plain")
+            .expect("plain model");
+        assert_eq!(
+            vision["input_modalities"],
+            serde_json::json!(["text", "image", "audio"])
+        );
+        assert!(
+            plain.get("input_modalities").is_none(),
+            "plain model must omit input_modalities: {plain}"
         );
     }
 }

@@ -114,6 +114,7 @@ MODEL_KEY_ORDER = (
     "enabled",
     "name",
     "description",
+    "modalities",
     "context_window",
     "supports_reasoning_effort",
     "reasoning_effort",
@@ -139,6 +140,16 @@ def catalog_description(minfo: object) -> str | None:
     desc = minfo.get("description")
     if isinstance(desc, str) and desc:
         return desc
+    return None
+
+
+def catalog_modalities(minfo: object) -> dict | None:
+    """models.dev `modalities` object, or None when absent/not a dict."""
+    if not isinstance(minfo, dict):
+        return None
+    mods = minfo.get("modalities")
+    if isinstance(mods, dict):
+        return mods
     return None
 
 
@@ -3604,8 +3615,12 @@ def context_window_field(minfo: dict) -> int | None:
 def enrich_model_entry(entry: dict, minfo: dict) -> bool:
     """Fill a model's missing attributes (context window, reasoning effort
     options) from its models.dev catalog entry. Existing values are never
-    overwritten — user-set preferences win."""
+    overwritten — user-set preferences win. Catalog `modalities` is refreshed
+    whenever the catalog carries the object."""
     added = False
+    mods = catalog_modalities(minfo)
+    if mods is not None:
+        entry["modalities"] = mods
     if "context_window" not in entry:
         ctx = context_window_field(minfo)
         if ctx is not None:
@@ -3956,6 +3971,26 @@ def _codex_catalog_reasoning_levels(entry: dict) -> tuple[list[dict], str | None
     return levels, default
 
 
+CODEX_INPUT_MODALITY_VALUES = ("text", "image", "audio")
+
+
+def codex_input_modalities(entry: dict) -> list[str]:
+    """Codex-allowed input modalities from a stored providers.json model."""
+    modalities = entry.get("modalities")
+    if not isinstance(modalities, dict):
+        return []
+    raw = modalities.get("input")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if item in CODEX_INPUT_MODALITY_VALUES and item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
 def emit_codex_model_catalog(provider: dict) -> dict:
     """Codex `model_catalog_json` payload for one provider's enabled models."""
     models_out: list[dict] = []
@@ -3994,8 +4029,10 @@ def emit_codex_model_catalog(provider: dict) -> dict:
             "truncation_policy": {"mode": "tokens", "limit": 10000},
             "effective_context_window_percent": 95,
             "experimental_supported_tools": [],
-            "input_modalities": ["text"],
         }
+        input_modalities = codex_input_modalities(entry)
+        if input_modalities:
+            item["input_modalities"] = input_modalities
         if default_level:
             item["default_reasoning_level"] = default_level
         models_out.append(item)
