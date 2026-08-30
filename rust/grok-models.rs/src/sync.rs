@@ -1098,9 +1098,14 @@ tables will have an empty base_url",
                 Value::String(format!("{name} ({pname})")),
             );
             fields.insert("env_key".into(), Value::String(env_key.clone()));
+            let backend = entry
+                .get("api_backend")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("chat_completions");
             fields.insert(
                 "api_backend".into(),
-                Value::String("chat_completions".into()),
+                Value::String(backend.to_string()),
             );
             if let Some(ctx) = entry.get("context_window") {
                 fields.insert("context_window".into(), ctx.clone());
@@ -1613,6 +1618,49 @@ mod tests {
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
         assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");
+    }
+
+    #[test]
+    fn update_config_toml_uses_stored_api_backend() {
+        let _guard = grok_home_lock();
+        let (_grok, _codex) = isolate_codex_homes("api-backend");
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "p",
+                "name": "P",
+                "enabled": true,
+                "base_url": "https://example/v1",
+                "models": {
+                    "a": {
+                        "name": "A",
+                        "enabled": true,
+                        "api_backend": "messages"
+                    },
+                    "b": { "name": "B", "enabled": true }
+                }
+            }]
+        });
+        jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
+        update_config_toml().unwrap();
+        let text = std::fs::read_to_string(paths::config_toml_path()).expect("config");
+        let a = text
+            .split("[model.p-a]")
+            .nth(1)
+            .and_then(|s| s.split("[model.").next())
+            .expect("table p-a");
+        assert!(
+            a.contains("api_backend = \"messages\""),
+            "stored backend missing: {text}"
+        );
+        let b = text
+            .split("[model.p-b]")
+            .nth(1)
+            .and_then(|s| s.split("[model.").next())
+            .expect("table p-b");
+        assert!(
+            b.contains("api_backend = \"chat_completions\""),
+            "missing default backend: {text}"
+        );
     }
 
     fn isolate_codex_homes(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {

@@ -4408,12 +4408,15 @@ def update_config_toml(*, quiet: bool = False) -> Path:
             name = entry.get("name")
             if not isinstance(name, str) or not name:
                 name = first_letter_cap(mid)
+            backend = entry.get("api_backend")
+            if not isinstance(backend, str) or not backend:
+                backend = "chat_completions"
             fields: dict = {
                 "model": mid,
                 "base_url": base_url,
                 "name": f"{name} ({pname})",
                 "env_key": env_key,
-                "api_backend": "chat_completions",
+                "api_backend": backend,
             }
             if "context_window" in entry:
                 fields["context_window"] = entry["context_window"]
