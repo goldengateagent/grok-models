@@ -630,19 +630,6 @@ fn toml_key(ident: &str) -> String {
     }
 }
 
-fn codex_provider_name(fields: &Map<String, Value>, pid: &str) -> String {
-    let name = fields.get("name").and_then(Value::as_str).unwrap_or("");
-    if name.ends_with(')') {
-        if let Some(open) = name.rfind('(') {
-            let inner = name[open + 1..name.len() - 1].trim();
-            if !inner.is_empty() {
-                return inner.to_string();
-            }
-        }
-    }
-    pid.to_string()
-}
-
 fn is_codex_managed_key(stripped: &str) -> bool {
     stripped.starts_with("model =")
         || stripped.starts_with("model_provider =")
@@ -700,26 +687,17 @@ fn strip_codex_managed_sections(text: &str, provider_ids: &[String]) -> String {
 }
 
 fn emit_codex_provider_table(pid: &str, fields: &Map<String, Value>) -> String {
-    let backend = fields
-        .get("api_backend")
-        .and_then(Value::as_str)
-        .unwrap_or("chat_completions");
-    // Codex dropped `wire_api = "chat"`; OpenAI-compatible providers use
-    // `responses` (https://github.com/openai/codex/discussions/7782).
-    let wire = if backend == "chat_completions" {
-        "responses"
-    } else {
-        backend
-    };
-    let base = fields.get("base_url").and_then(Value::as_str).unwrap_or("");
-    let env = fields.get("env_key").and_then(Value::as_str).unwrap_or("");
+    let name = fields.get("name").and_then(Value::as_str).unwrap_or(pid);
+    let base_url = fields.get("base_url").and_then(Value::as_str).unwrap_or("");
+    let env_key = fields.get("env_key").and_then(Value::as_str).unwrap_or("");
+    let wire_api = "responses";
     format!(
         "[model_providers.{}]\nname = {}\nbase_url = {}\nenv_key = {}\nwire_api = {}\n",
         toml_key(pid),
-        toml_quoted(&codex_provider_name(fields, pid)),
-        toml_quoted(base),
-        toml_quoted(env),
-        toml_quoted(wire),
+        toml_quoted(name),
+        toml_quoted(base_url),
+        toml_quoted(env_key),
+        toml_quoted(wire_api),
     )
 }
 
@@ -902,7 +880,7 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
         .filter(|s| !s.is_empty())
         .unwrap_or(pid);
     let mut fields = Map::new();
-    fields.insert("name".into(), Value::String(format!("x ({pname})")));
+    fields.insert("name".into(), Value::String(pname.to_string()));
     fields.insert(
         "base_url".into(),
         Value::String(
@@ -917,7 +895,6 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
         "env_key".into(),
         Value::String(core::first_env_key(&Value::Object(provider.clone()))),
     );
-    fields.insert("api_backend".into(), Value::String("chat_completions".into()));
     fields
 }
 

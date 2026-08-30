@@ -3976,26 +3976,17 @@ def _toml_key(ident: str) -> str:
     return toml_escape(ident)
 
 
-def _codex_provider_name(fields: dict, pid: str) -> str:
-    name = fields.get("name")
-    if isinstance(name, str) and name.endswith(")") and "(" in name:
-        inner = name[name.rfind("(") + 1 : -1].strip()
-        if inner:
-            return inner
-    return pid
-
-
 def emit_codex_provider_table(pid: str, fields: dict) -> str:
-    backend = fields.get("api_backend") or "chat_completions"
-    # Codex dropped `wire_api = "chat"`; OpenAI-compatible providers use
-    # `responses` (https://github.com/openai/codex/discussions/7782).
-    wire = "responses" if backend == "chat_completions" else str(backend)
+    name = fields.get("name") or pid
+    base_url = fields.get("base_url") or ""
+    env_key = fields.get("env_key") or ""
+    wire_api = "responses"
     lines = [
         f"[model_providers.{_toml_key(pid)}]",
-        f"name = {toml_escape(_codex_provider_name(fields, pid))}",
-        f"base_url = {toml_escape(fields.get('base_url') or '')}",
-        f"env_key = {toml_escape(fields.get('env_key') or '')}",
-        f"wire_api = {toml_escape(wire)}",
+        f"name = {toml_escape(name)}",
+        f"base_url = {toml_escape(base_url)}",
+        f"env_key = {toml_escape(env_key)}",
+        f"wire_api = {toml_escape(wire_api)}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -4182,10 +4173,9 @@ def remove_codex_model_catalog(provider_id: str) -> None:
 def _codex_provider_fields(provider: dict, pid: str) -> dict:
     pname = provider.get("name") or pid
     return {
-        "name": f"x ({pname})",
+        "name": pname,
         "base_url": provider.get("base_url") if isinstance(provider.get("base_url"), str) else "",
         "env_key": first_env_key(provider),
-        "api_backend": "chat_completions",
     }
 
 
