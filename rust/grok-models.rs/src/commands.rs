@@ -581,6 +581,9 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !env.is_empty() {
         entry.insert("env_key".into(), Value::String(env.clone()));
     }
+    if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
+        entry.insert("npm".into(), Value::String(provider_npm.to_string()));
+    }
     // Seed the provider-level base_url override from the catalog so the
     // config menu shows the configured endpoint even before any edit.
     let api_url = pinfo.get("api").and_then(Value::as_str).unwrap_or_default();
@@ -600,7 +603,12 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
             core::py_repr(provider_id)
         ));
     }
-    let models_map = crate::sync::seed_models_from_items(&items, &catalog);
+    let models_map = crate::sync::seed_models_from_items(
+        &items,
+        &catalog,
+        provider_id,
+        jsonio::catalog_npm(&pinfo),
+    );
     let n_models = models_map.len();
     entry.insert("enabled".into(), Value::Bool(true));
     entry.insert("models".into(), Value::Object(models_map));
@@ -860,6 +868,63 @@ mod tests {
         let existing = vec!["a".to_string()];
         let targets: Vec<String> = vec!["a/x".into(), "a/y".into(), "a".into()];
         assert!(missing_combo_providers(&targets, &existing).is_empty());
+    }
+
+    #[test]
+    fn add_provider_entry_copies_catalog_npm() {
+        let _guard = crate::test_support::grok_home_lock();
+        let pid = std::process::id();
+        let grok = std::env::temp_dir().join(format!("gm-add-npm-grok-{pid}"));
+        let codex = std::env::temp_dir().join(format!("gm-add-npm-codex-{pid}"));
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+
+        let api = serde_json::json!({
+            "prov": {
+                "name": "Prov",
+                "npm": "@ai-sdk/openai-compatible",
+                "models": {
+                    "m": {
+                        "name": "M",
+                        "provider": { "npm": "@ai-sdk/openai" }
+                    }
+                }
+            },
+            "empty": {
+                "name": "Empty",
+                "npm": "",
+                "models": { "m": { "name": "M" } }
+            }
+        });
+        let mut doc = serde_json::json!({ "providers": [] });
+        add_provider_entry(&mut doc, &api, "prov", true).expect("add provider");
+        let prov = doc["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "prov")
+            .expect("provider present");
+        assert_eq!(prov["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(prov["models"]["m"]["npm"], "@ai-sdk/openai");
+
+        add_provider_entry(&mut doc, &api, "empty", true).expect("add empty-npm provider");
+        let empty = doc["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "empty")
+            .expect("empty provider present");
+        assert!(
+            empty.get("npm").is_none(),
+            "empty catalog npm must not be stored"
+        );
+
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
     }
 
     #[test]

@@ -113,6 +113,7 @@ PROVIDER_KEY_ORDER = (
     "id",
     "name",
     "env_key",
+    "npm",
     "base_url",
     "enabled",
     "auth_models_list",
@@ -123,6 +124,8 @@ MODEL_KEY_ORDER = (
     "name",
     "description",
     "modalities",
+    "npm",
+    "api_backend",
     "context_window",
     "supports_reasoning_effort",
     "reasoning_effort",
@@ -159,6 +162,36 @@ def catalog_modalities(minfo: object) -> dict | None:
     if isinstance(mods, dict):
         return mods
     return None
+
+
+def catalog_npm(v: object) -> str | None:
+    """models.dev `npm` package string, or None when absent/empty."""
+    if not isinstance(v, dict):
+        return None
+    npm = v.get("npm")
+    if isinstance(npm, str) and npm:
+        return npm
+    return None
+
+
+def get_api_backend(
+    provider_id: str, provider_npm: str | None, model_npm: str | None
+) -> str:
+    if provider_id in ("openai", "xai", "meta"):
+        return "responses"
+    npm = model_npm or provider_npm or "@ai-sdk/openai-compatible"
+    if npm == "@ai-sdk/openai":
+        return "responses"
+    if npm == "@ai-sdk/anthropic":
+        return "messages"
+    return "chat_completions"
+
+
+def write_api_backend(
+    entry: dict, provider_id: str, provider_npm: str | None
+) -> None:
+    model_npm = entry.get("npm") if isinstance(entry.get("npm"), str) else None
+    entry["api_backend"] = get_api_backend(provider_id, provider_npm, model_npm)
 
 
 def resolve_model_description(
@@ -582,7 +615,10 @@ def resolve_model_name(
 
 
 def seed_models_from_items(
-    items: list[tuple[str, str | None]], catalog_models: dict
+    items: list[tuple[str, str | None]],
+    catalog_models: dict,
+    provider_id: str,
+    provider_npm: str | None,
 ) -> dict:
     models_map: dict = {}
     for mid, live_name in items:
@@ -595,7 +631,9 @@ def seed_models_from_items(
         if desc is not None:
             entry["description"] = desc
         if isinstance(minfo, dict):
-            enrich_model_entry(entry, minfo)
+            enrich_model_entry(entry, minfo, provider_id, provider_npm)
+        if "api_backend" not in entry:
+            write_api_backend(entry, provider_id, provider_npm)
         entry["enabled"] = False
         models_map[mid] = entry
     return models_map
@@ -606,6 +644,8 @@ def reconcile_models_map(
     items: list[tuple[str, str | None]],
     catalog_models: dict,
     stats: dict,
+    provider_id: str,
+    provider_npm: str | None,
 ) -> None:
     """Add/rename/remove models so keys match `items` (authority order)."""
     authority = {mid for mid, _ in items}
@@ -626,13 +666,15 @@ def reconcile_models_map(
         # carries a different one. User-set values are never overwritten.
         minfo = catalog_models.get(mid)
         if isinstance(minfo, dict):
-            enrich_model_entry(m, minfo)
+            enrich_model_entry(m, minfo, provider_id, provider_npm)
             desc = catalog_description(minfo)
             if desc is not None and m.get("description") != desc:
                 m["description"] = desc
                 stats["descriptions_updated"] = (
                     stats.get("descriptions_updated", 0) + 1
                 )
+        if "api_backend" not in m:
+            write_api_backend(m, provider_id, provider_npm)
 
         # New entries start disabled.
         if is_new:
@@ -3682,12 +3724,18 @@ def context_window_field(minfo: dict) -> int | None:
     return None
 
 
-def enrich_model_entry(entry: dict, minfo: dict) -> bool:
+def enrich_model_entry(
+    entry: dict, minfo: dict, provider_id: str, provider_npm: str | None
+) -> bool:
     """Fill a model's missing attributes (context window, reasoning effort
     options) from its models.dev catalog entry. Existing values are never
-    overwritten — user-set preferences win. Catalog `modalities` is refreshed
-    whenever the catalog carries the object."""
+    overwritten — user-set preferences win. Catalog `modalities` and `npm`
+    are refreshed whenever the catalog carries them."""
     added = False
+    npm = catalog_npm(minfo.get("provider"))
+    if npm:
+        entry["npm"] = npm
+    write_api_backend(entry, provider_id, provider_npm)
     mods = catalog_modalities(minfo)
     if mods is not None:
         entry["modalities"] = mods
@@ -4219,7 +4267,7 @@ def codex_config_toml(
 def update_providers_json(*, quiet: bool = False) -> dict:
     """Update phase (1 of 2): reconcile every configured provider's model list
     in providers.json against fresh data (live /models with catalog fallback)
-    and backfill env_key/base_url. Fetches models.dev itself. Reads and
+    and backfill env_key/npm/base_url. Fetches models.dev itself. Reads and
     writes only providers.json — no config.toml involvement."""
     models_dev = fetch_models_dev()
     providers_doc = load_providers()
@@ -4254,6 +4302,9 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         new_env_key = api_env_key(pinfo)
         if new_env_key and provider.get("env_key") != new_env_key:
             provider["env_key"] = new_env_key
+        npm = catalog_npm(pinfo)
+        if npm:
+            provider["npm"] = npm
 
         models_map = provider.get("models")
         if not isinstance(models_map, dict):
@@ -4279,7 +4330,14 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         )
         if err:
             stats["live_fetch_errors"].append(err)
-        reconcile_models_map(models_map, items, catalog_models, stats)
+        reconcile_models_map(
+            models_map,
+            items,
+            catalog_models,
+            stats,
+            pid,
+            catalog_npm(pinfo),
+        )
         stats["providers_synced"] += 1
 
     providers_doc["last_updated"] = last_updated_stamp()
@@ -4432,6 +4490,9 @@ def add_provider_entry(
     env = api_env_key(pinfo)
     if env:
         entry["env_key"] = env
+    npm = catalog_npm(pinfo)
+    if npm:
+        entry["npm"] = npm
     api_base = pinfo.get("api")
     if isinstance(api_base, str) and api_base:
         entry["base_url"] = api_base
@@ -4441,7 +4502,9 @@ def add_provider_entry(
     )
     if not items:
         fail(f"provider {provider_id!r} has no models in models.dev")
-    models_map = seed_models_from_items(items, catalog_models)
+    models_map = seed_models_from_items(
+        items, catalog_models, provider_id, catalog_npm(pinfo)
+    )
     entry["enabled"] = True
     entry["models"] = models_map
     providers_doc["providers"].append(entry)

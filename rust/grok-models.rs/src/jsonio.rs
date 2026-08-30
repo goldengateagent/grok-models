@@ -89,20 +89,23 @@ pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
         "providers",
         "removed_providers",
     ];
-pub const PROVIDER_KEY_ORDER: [&str; 7] = [
+pub const PROVIDER_KEY_ORDER: [&str; 8] = [
     "id",
     "name",
     "env_key",
+    "npm",
     "base_url",
     "enabled",
     "auth_models_list",
     "models",
 ];
-const MODEL_KEY_ORDER: [&str; 8] = [
+const MODEL_KEY_ORDER: [&str; 10] = [
     "enabled",
     "name",
     "description",
     "modalities",
+    "npm",
+    "api_backend",
     "context_window",
     "supports_reasoning_effort",
     "reasoning_effort",
@@ -131,6 +134,11 @@ pub fn catalog_modalities(minfo: &Value) -> Option<Value> {
         Some(v) if v.is_object() => Some(v.clone()),
         _ => None,
     }
+}
+
+/// models.dev `npm` package string, or None when absent/empty.
+pub fn catalog_npm(v: &Value) -> Option<&str> {
+    v.get("npm").and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// Insert the catalog description into a model entry map (seed path).
@@ -396,6 +404,7 @@ mod tests {
         let p = serde_json::json!({
             "id": "p",
             "name": "P",
+            "npm": "@ai-sdk/openai-compatible",
             "enabled": true,
             "models": {
                 "m": {
@@ -403,11 +412,15 @@ mod tests {
                     "enabled": true,
                     "name": "M",
                     "description": "d",
+                    "npm": "@ai-sdk/openai",
+                    "api_backend": "responses",
                     "modalities": { "input": ["text"], "output": ["text"] }
                 }
             }
         });
         let entry = order_provider_entry(p.as_object().unwrap());
+        let pkeys: Vec<String> = entry.keys().cloned().collect();
+        assert_eq!(pkeys, ["id", "name", "npm", "enabled", "models"]);
         let keys: Vec<String> = entry["models"]["m"]
             .as_object()
             .unwrap()
@@ -416,8 +429,19 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["enabled", "name", "description", "modalities", "context_window"]
+            ["enabled", "name", "description", "modalities", "npm", "api_backend", "context_window"]
         );
+    }
+
+    #[test]
+    fn catalog_npm_skips_missing_and_empty() {
+        assert_eq!(
+            catalog_npm(&serde_json::json!({"npm": "@ai-sdk/openai"})),
+            Some("@ai-sdk/openai")
+        );
+        assert_eq!(catalog_npm(&serde_json::json!({"npm": ""})), None);
+        assert_eq!(catalog_npm(&serde_json::json!({})), None);
+        assert_eq!(catalog_npm(&serde_json::json!({"npm": 1})), None);
     }
 
     #[test]

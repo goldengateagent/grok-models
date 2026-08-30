@@ -268,11 +268,51 @@ fn resolve_model_name(
     catalog_name(catalog, mid)
 }
 
+fn get_api_backend(provider_id: &str, provider_npm: Option<&str>, model_npm: Option<&str>) -> &'static str {
+    if matches!(provider_id, "openai" | "xai" | "meta") {
+        return "responses";
+    }
+
+    let npm = model_npm
+        .or(provider_npm)
+        .unwrap_or("@ai-sdk/openai-compatible");
+
+    match npm {
+        "@ai-sdk/openai" => "responses",
+        "@ai-sdk/anthropic" => "messages",
+        _ => "chat_completions",
+    }
+}
+
+fn write_api_backend(
+    entry: &mut Map<String, Value>,
+    provider_id: &str,
+    provider_npm: Option<&str>,
+) {
+    let model_npm = entry
+        .get("npm")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    entry.insert(
+        "api_backend".into(),
+        Value::String(get_api_backend(provider_id, provider_npm, model_npm.as_deref()).to_string()),
+    );
+}
+
 /// Fill a model's missing attributes (context window, reasoning effort
 /// options) from its models.dev catalog entry. Existing values are never
-/// overwritten — user-set preferences win. Catalog `modalities` is refreshed
-/// whenever the catalog carries the object.
-fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
+/// overwritten — user-set preferences win. Catalog `modalities` and `npm`
+/// are refreshed whenever the catalog carries them.
+fn enrich_model_entry(
+    entry: &mut Map<String, Value>,
+    minfo: &Value,
+    provider_id: &str,
+    provider_npm: Option<&str>,
+) {
+    if let Some(model_npm) = minfo.get("provider").and_then(jsonio::catalog_npm) {
+        entry.insert("npm".to_string(), Value::String(model_npm.to_string()));
+    }
+    write_api_backend(entry, provider_id, provider_npm);
     if let Some(mods) = jsonio::catalog_modalities(minfo) {
         entry.insert("modalities".to_string(), mods);
     }
@@ -319,6 +359,8 @@ fn enrich_model_entry(entry: &mut Map<String, Value>, minfo: &Value) {
 pub fn seed_models_from_items(
     items: &[(String, Option<String>)],
     catalog: &Map<String, Value>,
+    provider_id: &str,
+    provider_npm: Option<&str>,
 ) -> Map<String, Value> {
     let mut models_map = Map::new();
     for (mid, live_name) in items {
@@ -328,7 +370,10 @@ pub fn seed_models_from_items(
         }
         if let Some(minfo) = catalog.get(mid) {
             crate::jsonio::seed_description(&mut entry, minfo);
-            enrich_model_entry(&mut entry, minfo);
+            enrich_model_entry(&mut entry, minfo, provider_id, provider_npm);
+        }
+        if !entry.contains_key("api_backend") {
+            write_api_backend(&mut entry, provider_id, provider_npm);
         }
         entry.insert("enabled".into(), Value::Bool(false));
         models_map.insert(mid.clone(), Value::Object(entry));
@@ -341,6 +386,8 @@ fn reconcile_models_map(
     items: &[(String, Option<String>)],
     catalog: &Map<String, Value>,
     stats: &mut Stats,
+    provider_id: &str,
+    provider_npm: Option<&str>,
 ) {
     let authority: HashSet<&str> = items.iter().map(|(m, _)| m.as_str()).collect();
     for (mid, live_name) in items {
@@ -367,7 +414,7 @@ fn reconcile_models_map(
         // carries a different one. User-set values are never overwritten.
         if let Some(minfo) = catalog.get(mid) {
             if minfo.is_object() {
-                enrich_model_entry(obj, minfo);
+                enrich_model_entry(obj, minfo, provider_id, provider_npm);
                 if let Some(desc) = crate::jsonio::catalog_description(minfo) {
                     if obj.get("description").and_then(Value::as_str) != Some(desc) {
                         obj.insert("description".into(), Value::String(desc.to_string()));
@@ -375,6 +422,9 @@ fn reconcile_models_map(
                     }
                 }
             }
+        }
+        if !obj.contains_key("api_backend") {
+            write_api_backend(obj, provider_id, provider_npm);
         }
 
         // New entries start disabled.
@@ -490,8 +540,8 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
 
         let catalog_models = catalog_models_map(&pinfo);
 
-        // Backfill provider-level fields from the catalog: env key and a
-        // missing base_url (a stored non-empty base_url override wins).
+        // Backfill provider-level fields from the catalog: env key, npm,
+        // and a missing base_url (a stored non-empty base_url override wins).
         let new_env_key = core::api_env_key(&pinfo);
         let effective_base_url: String;
         let env_key: String;
@@ -501,6 +551,9 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
                 && prov_obj.get("env_key") != Some(&Value::String(new_env_key.clone()))
             {
                 prov_obj.insert("env_key".into(), Value::String(new_env_key.clone()));
+            }
+            if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
+                prov_obj.insert("npm".into(), Value::String(provider_npm.to_string()));
             }
             if !prov_obj.get("models").is_some_and(Value::is_object) {
                 prov_obj.insert("models".into(), Value::Object(Map::new()));
@@ -543,7 +596,14 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
         }
         let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
         let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
-        reconcile_models_map(models_map, &items, &catalog_models, &mut stats);
+        reconcile_models_map(
+            models_map,
+            &items,
+            &catalog_models,
+            &mut stats,
+            &pid,
+            jsonio::catalog_npm(&pinfo),
+        );
         stats.providers_synced += 1;
     }
 
@@ -1806,7 +1866,7 @@ mod tests {
             ("vision".to_string(), Some("Vision".to_string())),
             ("plain".to_string(), Some("Plain".to_string())),
         ];
-        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap());
+        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap(), "prov", None);
         assert_eq!(
             seeded["vision"]["modalities"],
             serde_json::json!({
@@ -1817,6 +1877,186 @@ mod tests {
         assert!(
             seeded["plain"].get("modalities").is_none(),
             "models without catalog modalities must not gain the field"
+        );
+    }
+
+    #[test]
+    fn seed_models_from_items_copies_catalog_npm() {
+        let catalog = serde_json::json!({
+            "sdk": {
+                "name": "Sdk",
+                "provider": { "npm": "@ai-sdk/openai" }
+            },
+            "empty": {
+                "name": "Empty",
+                "provider": { "npm": "" }
+            },
+            "plain": { "name": "Plain" }
+        });
+        let items = vec![
+            ("sdk".to_string(), Some("Sdk".to_string())),
+            ("empty".to_string(), Some("Empty".to_string())),
+            ("plain".to_string(), Some("Plain".to_string())),
+        ];
+        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap(), "prov", None);
+        assert_eq!(seeded["sdk"]["npm"], "@ai-sdk/openai");
+        assert!(
+            seeded["empty"].get("npm").is_none(),
+            "empty catalog npm must not be stored"
+        );
+        assert!(
+            seeded["plain"].get("npm").is_none(),
+            "models without catalog npm must not gain the field"
+        );
+    }
+
+    #[test]
+    fn get_api_backend_provider_id_and_npm() {
+        assert_eq!(get_api_backend("openai", None, None), "responses");
+        assert_eq!(get_api_backend("xai", Some("@ai-sdk/anthropic"), None), "responses");
+        assert_eq!(
+            get_api_backend("prov", Some("@ai-sdk/openai-compatible"), Some("@ai-sdk/openai")),
+            "responses"
+        );
+        assert_eq!(
+            get_api_backend("prov", Some("@ai-sdk/anthropic"), None),
+            "messages"
+        );
+        assert_eq!(get_api_backend("prov", None, None), "chat_completions");
+    }
+
+    #[test]
+    fn seed_models_from_items_writes_api_backend() {
+        let catalog = serde_json::json!({
+            "sdk": {
+                "name": "Sdk",
+                "provider": { "npm": "@ai-sdk/openai" }
+            },
+            "plain": { "name": "Plain" }
+        });
+        let items = vec![
+            ("sdk".to_string(), Some("Sdk".to_string())),
+            ("plain".to_string(), Some("Plain".to_string())),
+            ("live-only".to_string(), Some("Live".to_string())),
+        ];
+        let seeded = seed_models_from_items(
+            &items,
+            catalog.as_object().unwrap(),
+            "prov",
+            Some("@ai-sdk/openai-compatible"),
+        );
+        assert_eq!(seeded["sdk"]["api_backend"], "responses");
+        assert_eq!(seeded["plain"]["api_backend"], "chat_completions");
+        assert_eq!(seeded["live-only"]["api_backend"], "chat_completions");
+    }
+
+    #[test]
+    fn reconcile_writes_api_backend_on_new_and_refreshes() {
+        let mut models_map = Map::new();
+        let items = vec![("m".to_string(), Some("M".to_string()))];
+        let mut stats = Stats::default();
+        let catalog = serde_json::json!({
+            "m": {
+                "name": "M",
+                "provider": { "npm": "@ai-sdk/openai" }
+            }
+        });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog.as_object().unwrap(),
+            &mut stats,
+            "prov",
+            None,
+        );
+        assert_eq!(models_map["m"]["api_backend"], "responses");
+
+        let catalog_anthropic = serde_json::json!({
+            "m": {
+                "name": "M",
+                "provider": { "npm": "@ai-sdk/anthropic" }
+            }
+        });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog_anthropic.as_object().unwrap(),
+            &mut stats,
+            "prov",
+            None,
+        );
+        assert_eq!(models_map["m"]["api_backend"], "messages");
+    }
+
+    #[test]
+    fn reconcile_backfills_api_backend_on_existing_without_catalog() {
+        let mut models_map = match serde_json::json!({
+            "live-only": {
+                "enabled": true,
+                "name": "Live"
+            }
+        }) {
+            Value::Object(m) => m,
+            other => panic!("expected object, got {other}"),
+        };
+        let items = vec![("live-only".to_string(), Some("Live".to_string()))];
+        let mut stats = Stats::default();
+        let catalog = serde_json::json!({});
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog.as_object().unwrap(),
+            &mut stats,
+            "prov",
+            Some("@ai-sdk/openai-compatible"),
+        );
+        assert_eq!(models_map["live-only"]["api_backend"], "chat_completions");
+    }
+
+    #[test]
+    fn reconcile_refreshes_npm_from_catalog_and_keeps_when_omitted() {
+        let mut models_map = match serde_json::json!({
+            "m": {
+                "enabled": true,
+                "name": "M",
+                "npm": "@ai-sdk/openai"
+            }
+        }) {
+            Value::Object(m) => m,
+            other => panic!("expected object, got {other}"),
+        };
+        let items = vec![("m".to_string(), Some("M".to_string()))];
+        let mut stats = Stats::default();
+
+        let catalog = serde_json::json!({
+            "m": {
+                "name": "M",
+                "provider": { "npm": "@ai-sdk/anthropic" }
+            }
+        });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog.as_object().unwrap(),
+            &mut stats,
+            "prov",
+            None,
+        );
+        assert_eq!(models_map["m"]["npm"], "@ai-sdk/anthropic");
+
+        let catalog_no_npm = serde_json::json!({ "m": { "name": "M" } });
+        reconcile_models_map(
+            &mut models_map,
+            &items,
+            catalog_no_npm.as_object().unwrap(),
+            &mut stats,
+            "prov",
+            None,
+        );
+        assert_eq!(
+            models_map["m"]["npm"],
+            "@ai-sdk/anthropic",
+            "omitted catalog npm must not delete the stored value"
         );
     }
 
@@ -1849,6 +2089,8 @@ mod tests {
             &items,
             catalog.as_object().unwrap(),
             &mut stats,
+            "prov",
+            None,
         );
         assert_eq!(
             models_map["m"]["modalities"]["input"],
@@ -1861,6 +2103,8 @@ mod tests {
             &items,
             catalog_no_mods.as_object().unwrap(),
             &mut stats,
+            "prov",
+            None,
         );
         assert_eq!(
             models_map["m"]["modalities"]["input"],
