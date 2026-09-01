@@ -1,4 +1,4 @@
-//! `cmd_config` orchestration: TUI on a TTY, numbered fallback otherwise.
+//! TUI main-menu orchestration: TUI on a TTY, numbered fallback otherwise.
 
 use crate::{fallback, jsonio, paths, sync, tui};
 use crate::Res;

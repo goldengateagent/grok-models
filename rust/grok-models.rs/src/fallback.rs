@@ -307,7 +307,7 @@ fn usable_provider_maps(doc: &Value) -> Vec<Map<String, Value>> {
         .unwrap_or_default()
 }
 
-/// `_numbered_config_flow`: whole --config flow over stdin/stdout.
+/// `_numbered_config_flow`: whole TUI flow over stdin/stdout.
 /// Returns whether providers.json changed.
 pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
     let mut changed = false;

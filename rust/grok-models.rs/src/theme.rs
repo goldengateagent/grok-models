@@ -41,7 +41,7 @@ pub enum P {
     LegendKey = 9,
     LegendDesc = 10,
     /// Red missing/error text on theme bg (Python `P.ERROR=11`): used for an
-    /// unset env var name in the `--config` models preview box.
+    /// unset env var name in the TUI models preview box.
     Error = 11,
     /// Code-block palette (Python pairs 14-19): borderless black panels.
     CodeText = 14,

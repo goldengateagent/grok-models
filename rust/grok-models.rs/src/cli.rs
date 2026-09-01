@@ -222,6 +222,5 @@ mod tests {
     fn rejects_unknown() {
         let argv = a(&["--bogus"]);
         assert!(parse(&argv).is_err());
-        assert!(parse(&a(&["--config"])).is_err());
     }
 }

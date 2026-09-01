@@ -55,7 +55,7 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     if args.sync {
         return commands::cmd_sync();
     }
-    // Default (no args): straight into the config TUI.
+    // Default (no args): straight into the TUI.
     flow::cmd_config()
 }
 

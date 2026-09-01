@@ -11,7 +11,7 @@
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
 //! - `tui`:       raw-mode ANSI screens (curses equivalent)
-//! - `flow`:      interactive `--config` orchestration (TUI + numbered)
+//! - `flow`:      interactive TUI orchestration (TUI + numbered fallback)
 
 pub mod cli;
 pub mod commands;

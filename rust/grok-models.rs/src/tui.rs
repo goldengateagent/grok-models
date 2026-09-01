@@ -577,7 +577,7 @@ pub enum SelectOutcome {
     ModelPicked { pid: String, mid: String },
 }
 
-/// A line drawn in the `--config` main-menu preview panel beneath the provider
+/// A line drawn in the TUI main-menu preview panel beneath the provider
 /// list. A `Heading` is a full-width blue bar (like the screen title); a `Segs`
 /// line is a sequence of `(text, color)` segments (like `--models` output).
 #[derive(Clone)]
@@ -985,7 +985,7 @@ pub fn select_win<S: Stdscr>(
             stdscr.addstr(sep_y, 0, &sep, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
         }
 
-        // Models preview: fill the empty space below the list (the --config
+        // Models preview: fill the empty space below the list (the TUI
         // main menu) with the enabled-models listing, styled like --models.
         // The action menu passes no preview and may have a footer instead.
         if let Some(preview) = preview {
@@ -2359,11 +2359,11 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
 }
 
 // ---------------------------------------------------------------------------
-// Whole --config flow driver (real terminal)
+// Whole TUI flow driver (real terminal)
 // ---------------------------------------------------------------------------
 
 /// Build the `--models`-style enabled-models listing as `PreviewLine`s, for
-/// rendering in the empty space under the `--config` main menu. Mirrors
+/// rendering in the empty space under the TUI main menu. Mirrors
 /// Python's `_build_config_models_preview`: enabled models in providers.json
 /// order, then an env-var status box and a summary line. `sort_by_name`
 /// reorders the model rows by display name without writing anything.
@@ -3049,7 +3049,7 @@ fn emit_cell<W: std::io::Write>(w: &mut W, y: i32, x: i32, s: &str, paint: Paint
 
 /// Switch to the terminal's alternate screen so the fullscreen TUI doesn't
 /// paint over (or leave scrollback history of) the user's existing terminal.
-/// On exit we restore the original screen, so closing `--config` returns the
+/// On exit we restore the original screen, so closing the TUI returns the
 /// terminal exactly as it was before — no blue background, no menu history.
 fn enable_mouse<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?1000h\x1b[?1006h");
@@ -4740,7 +4740,7 @@ mod tests {
 
     /// Terminal-like `Stdscr` that renders into an in-memory ANSI byte buffer
     /// using the exact same `emit_cell` path as `RealStdscr`. Lets the eval
-    /// verify the `--config` TUI produces a true fullscreen layout (each
+    /// verify the TUI produces a true fullscreen layout (each
     /// element at its absolute row/column) rather than a single wrapped line.
     struct CaptureStdscr {
         h: i32,

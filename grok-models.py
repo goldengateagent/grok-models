@@ -1711,7 +1711,7 @@ def _curses_select_win(
             except curses.error:
                 pass
 
-        # Models preview: fill the empty space below the list (the --config
+        # Models preview: fill the empty space below the list (the TUI
         # main menu) with the enabled-models listing, styled like --models.
         if preview:
             avail_top = sep_y + 1
@@ -2821,7 +2821,7 @@ def _curses_set_reasoning(stdscr, providers_doc: dict, pid: str, mid: str) -> st
 
 
 def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
-    """Run the whole --config flow inside ONE curses session so there is no
+    """Run the whole TUI flow inside ONE curses session so there is no
     terminal-mode flash between menus. Returns True if providers.json
     changed, False if not, or _CURSES_FAILED on any curses error."""
     import curses
@@ -3502,7 +3502,7 @@ def _build_config_models_preview(
     providers_doc: dict, sort_by_name: bool = False
 ) -> list:
     """Build the --models-style enabled-models listing as colored segment
-    lines, for rendering in the empty space under the --config main menu.
+    lines, for rendering in the empty space under the TUI main menu.
     Default order is providers.json (provider-name) order; sort_by_name
     reorders the model rows by display name without writing anything."""
     providers = [
@@ -4638,7 +4638,7 @@ def _confirm_delete(label: str) -> bool:
 
 
 def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
-    """Numbered (non-TTY) fallback for the entire --config flow."""
+    """Numbered (non-TTY) fallback for the entire TUI flow."""
     changed = False
     while True:
         # Order is providers.json (sorted only on dump).
@@ -4878,7 +4878,7 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_codex(args.codex)
         if args.sync:
             return cmd_sync()
-        # Default (no args): straight into the config TUI.
+        # Default (no args): straight into the TUI.
         return cmd_config()
     except SyncError as exc:
         print(str(exc), file=sys.stderr)
