@@ -1,3 +1,5 @@
+.DS_Store
+__pycache__/
+/rust/grok-models.rs/target/
 /rust/grok-models
 /rust/dist/
-__pycache__/

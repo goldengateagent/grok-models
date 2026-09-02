@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os:
+          - macos-14
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: ./rust/make-release.sh
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.os }}
+          path: rust/dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            Initial release of grok-models.
+
+            Configure custom models for Grok Build and Codex.
+          files: dist/*
+          overwrite_files: true

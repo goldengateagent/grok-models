@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 # Build a release package: the native grok-models binary plus README.md.
 #
 # Usage:
@@ -48,7 +48,11 @@ ARCHIVE="$(basename "${STAGE}.tar.gz")"
 tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"
 (
   cd "$DIST"
-  shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+  else
+    shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+  fi
 )
 
 rm -rf "$STAGE"
