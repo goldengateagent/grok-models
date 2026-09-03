@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
         run: ./rust/make-release.sh
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.os }}
           path: rust/dist/*
@@ -43,14 +43,14 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: dist
           pattern: "*"
           merge-multiple: true
 
       - name: Create or update release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body: |
             Initial release of grok-models.
