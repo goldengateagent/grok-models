@@ -16,6 +16,7 @@ jobs:
           - macos-14
           - ubuntu-24.04
           - ubuntu-24.04-arm
+          - windows-2022
 
     runs-on: ${{ matrix.os }}
 
@@ -27,6 +28,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release
+        shell: bash
         run: ./rust/make-release.sh
 
       - name: Upload release artifacts

@@ -7,7 +7,8 @@
 #                                              e.g. TARGET=x86_64-unknown-linux-musl
 #
 # Output:
-#   dist/grok-models-<version>-<target>.tar.gz   containing grok-models and README.md
+#   dist/grok-models-<version>-<target>.zip      (Windows) containing grok-models.exe and README.md
+#   dist/grok-models-<version>-<target>.tar.gz   (Unix) containing grok-models and README.md
 #   dist/<archive>.sha256                        checksum for the archive
 set -euo pipefail
 
@@ -39,13 +40,25 @@ STAGE="$DIST/grok-models-$VERSION-$PLATFORM"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-cp "$BIN" "$STAGE/grok-models"
-chmod 755 "$STAGE/grok-models"
+# Windows builds emit .exe; handle both
+if [[ -f "${BIN}.exe" ]]; then
+  cp "${BIN}.exe" "$STAGE/grok-models.exe"
+else
+  cp "$BIN" "$STAGE/grok-models"
+  chmod 755 "$STAGE/grok-models"
+fi
 
 cp "$HERE/../README.md" "$STAGE/README.md"
 
-ARCHIVE="$(basename "${STAGE}.tar.gz")"
-tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"
+# .zip for Windows, .tar.gz for Unix
+if [[ "$PLATFORM" == *"-windows-"* ]]; then
+  ARCHIVE="$(basename "${STAGE}.zip")"
+  powershell -Command "Compress-Archive -Path '${STAGE}' -DestinationPath '${DIST}/${ARCHIVE}' -Force"
+else
+  ARCHIVE="$(basename "${STAGE}.tar.gz")"
+  tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"
+fi
+
 (
   cd "$DIST"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -57,4 +70,3 @@ tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"
 
 rm -rf "$STAGE"
 echo "release: dist/$ARCHIVE"
-cat "$DIST/${ARCHIVE}.sha256"
