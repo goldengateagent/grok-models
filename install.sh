@@ -74,6 +74,33 @@ else
     PATH_ADDED=1
 fi
 
+# WSL: point GROK_HOME/CODEX_HOME at the Windows profile home, not the
+# WSL Linux home. The binary and grok-models.py already honor these vars.
+WSL_HOMES_ADDED=0
+is_wsl() {
+    grep -qi microsoft /proc/version 2>/dev/null || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
+}
+if is_wsl; then
+    if ! command -v wslpath >/dev/null 2>&1 || [ -z "${USERPROFILE:-}" ]; then
+        echo "Warning: WSL detected but wslpath/USERPROFILE is unavailable;"
+        echo "set GROK_HOME and CODEX_HOME manually to your Windows profile's .grok and .codex dirs."
+    elif grep -Fq '# grok-models WSL homes' "$RC"; then
+        WSL_HOMES_ADDED=0
+    else
+        cat >> "$RC" << 'EOF'
+
+# grok-models WSL homes
+if [ -z "$GROK_HOME" ] && command -v wslpath >/dev/null 2>&1 && [ -n "$USERPROFILE" ]; then
+    export GROK_HOME="$(wslpath "$USERPROFILE")/.grok"
+fi
+if [ -z "$CODEX_HOME" ] && command -v wslpath >/dev/null 2>&1 && [ -n "$USERPROFILE" ]; then
+    export CODEX_HOME="$(wslpath "$USERPROFILE")/.codex"
+fi
+EOF
+        WSL_HOMES_ADDED=1
+    fi
+fi
+
 export PATH="$BIN_DIR:$PATH"
 
 echo
@@ -86,4 +113,8 @@ if [ "$PATH_ADDED" -eq 1 ]; then
     echo "  export PATH=\"$BIN_DIR:\$PATH\""
 else
     echo "PATH already contains $BIN_DIR (found in $RC)."
+fi
+if [ "$WSL_HOMES_ADDED" -eq 1 ]; then
+    echo "WSL detected: added GROK_HOME/CODEX_HOME exports to $RC."
+    echo "Restart your shell to apply them."
 fi
