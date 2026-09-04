@@ -2889,8 +2889,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 )
             else:
                 labels.append(_SYNC_CONFIG_LABEL)
-            labels.append("➕ Add Provider…")
-            labels.append("➕ Add Model…")
+            labels.append("Add Provider")
+            labels.append("Add Model")
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider (changes sync on exit)",
                 status=status_msg,

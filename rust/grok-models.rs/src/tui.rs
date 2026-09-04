@@ -2596,7 +2596,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     loop {
         // Order is providers.json (sorted only on dump).
         let ordered: Vec<Map<String, Value>> = usable(doc);
-        // Zero providers is a valid state: ➕ Add Provider… is reachable first.
+        // Zero providers is a valid state: Add Provider is reachable first.
         // Trailing block after a section rule: Codex Config, Model
         // Descriptions toggle, Update Model List, Sync Model Config, then
         // the two add actions.
@@ -2636,8 +2636,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             }
             _ => labels.push(crate::core::SYNC_CONFIG_LABEL.to_string()),
         }
-        labels.push("➕ Add Provider…".to_string());
-        labels.push("➕ Add Model…".to_string());
+        labels.push("Add Provider".to_string());
+        labels.push("Add Model".to_string());
         let preview = build_config_models_preview(doc, sort_by_name);
         // Trailing-block rows (Codex Config, Model Descriptions, …) are
         // selectable; Enter lands on them as SelectOutcome::Picked.
@@ -2829,7 +2829,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 4 {
-            // "➕ Add Provider…" — modal over the models.dev catalog.
+            // "Add Provider" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
                 status_msg = Some(msg);
                 changed = true;
@@ -2838,7 +2838,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 5 {
-            // "➕ Add Model…" — cross-provider modal; auto-adds a missing
+            // "Add Model" — cross-provider modal; auto-adds a missing
             // provider and enables just that model.
             if let Some(msg) = add_model_win(stdscr, doc) {
                 status_msg = Some(msg);
