@@ -116,12 +116,17 @@ will show the Codex enabled model_provider models in the model selector.
 
 ##### Extract from distribution
 
+Download the `.tar.gz` for your platform from the releases page, then:
+
 ```
 % tar xvf grok-models-1.0.0-<platform>.tar.gz
 % cd grok-models-1.0.0-<platform>
-% mkdir -p ~/.grok-models/bin
-% cp ./grok-models ~/.grok-models/bin
-% export PATH="$HOME/.grok-models/bin:$PATH"
+% ./install.sh
+```
+
+Restart your shell (or run `export PATH="$HOME/.grok-models/bin:$PATH"`), then:
+
+```
 % grok-models
 ```
 

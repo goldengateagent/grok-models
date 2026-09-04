@@ -31,21 +31,26 @@ esac
 
 FILE="${ARTIFACT}-${VERSION}-${TARGET}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${FILE}"
+EXPECTED_DIR="${ARTIFACT}-${VERSION}-${TARGET}"
 
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+if [ "$(basename "$PWD")" = "$EXPECTED_DIR" ] && [ -f "$PWD/$ARTIFACT" ]; then
+    STAGE="$PWD"
+else
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
 
-echo "Downloading $FILE..."
+    echo "Downloading $FILE..."
 
-if ! curl -fsSL "$URL" -o "$TMP/$FILE"; then
-    echo "Error: no release available for $TARGET"
-    echo "Expected asset: $FILE"
-    exit 1
+    if ! curl -fsSL "$URL" -o "$TMP/$FILE"; then
+        echo "Error: no release available for $TARGET"
+        echo "Expected asset: $FILE"
+        exit 1
+    fi
+
+    tar -xzf "$TMP/$FILE" -C "$TMP"
+
+    STAGE="$TMP/${ARTIFACT}-${VERSION}-${TARGET}"
 fi
-
-tar -xzf "$TMP/$FILE" -C "$TMP"
-
-STAGE="$TMP/${ARTIFACT}-${VERSION}-${TARGET}"
 mkdir -p "$BIN_DIR"
 cp "$STAGE/$ARTIFACT" "$BIN_DIR/$ARTIFACT"
 chmod +x "$BIN_DIR/$ARTIFACT"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a release package: the native grok-models binary plus README.md.
+# Build a release package: the native grok-models binary plus install.sh and README.md.
 #
 # Usage:
 #   rust/make-release.sh                       build for host, package into dist/
@@ -8,7 +8,7 @@
 #
 # Output:
 #   dist/grok-models-<version>-<target>.zip      (Windows) containing grok-models.exe and README.md
-#   dist/grok-models-<version>-<target>.tar.gz   (Unix) containing grok-models and README.md
+#   dist/grok-models-<version>-<target>.tar.gz   (Unix) containing grok-models, install.sh, and README.md
 #   dist/<archive>.sha256                        checksum for the archive
 set -euo pipefail
 
@@ -49,6 +49,8 @@ else
 fi
 
 cp "$HERE/../README.md" "$STAGE/README.md"
+cp "$HERE/../install.sh" "$STAGE/install.sh"
+chmod 755 "$STAGE/install.sh"
 
 # .zip for Windows, .tar.gz for Unix
 if [[ "$PLATFORM" == *"-windows-"* ]]; then
