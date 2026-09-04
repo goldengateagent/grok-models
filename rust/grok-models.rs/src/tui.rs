@@ -2422,17 +2422,27 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
     // line on the status row.
     lines.push(PreviewLine::Heading(format!("Enabled Models: {total_enabled}")));
     lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
-    for (mname, pname, pid, mid) in &model_rows {
-        let level = model_reasoning_level(doc, pid, mid);
+    let model_width = model_rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
+    let rows_with_levels: Vec<(String, String, String, String, String)> = model_rows
+        .iter()
+        .map(|(mname, pname, pid, mid)| {
+            let level = model_reasoning_level(doc, pid, mid);
+            (mname.clone(), pname.clone(), pid.clone(), mid.clone(), level)
+        })
+        .collect();
+    let level_cell_width = rows_with_levels.iter().map(|r| r.4.chars().count() + 2).max().unwrap_or(0);
+    for (mname, pname, pid, mid, level) in &rows_with_levels {
         let level_pair = if level != "none" { P::Free } else { P::Muted };
+        let pad_m = model_width.saturating_sub(mname.chars().count());
+        let pad_l = (level_cell_width + 2).saturating_sub(level.chars().count() + 4);
         lines.push(PreviewLine::Model {
             pid: pid.clone(),
             mid: mid.clone(),
             segs: vec![
                 ("● ".to_string(), P::Enabled),
-                (mname.clone(), P::Value),
-                (format!(" ({pname}) "), P::Text),
-                (format!("({level})"), level_pair),
+                (format!("{mname}{}", " ".repeat(pad_m)), P::Value),
+                (format!(" ({}) {}", level, " ".repeat(pad_l)), level_pair),
+                (format!("({pname})"), P::Text),
             ],
         });
     }
@@ -4627,7 +4637,7 @@ mod tests {
                 PreviewLine::Segs(segs) | PreviewLine::Model { segs, .. } => segs
                     .iter()
                     .find(|(_, p)| *p == P::Value)
-                    .map(|(t, _)| t.clone()),
+                    .map(|(t, _)| t.trim_end().to_string()),
                 _ => None,
             })
             .collect()

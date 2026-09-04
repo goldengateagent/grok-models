@@ -3533,14 +3533,19 @@ def _build_config_models_preview(
     # so paging cannot park a second "Summary" line on the status row.
     lines.append(("heading", f"Enabled Models: {total_enabled}"))
     lines.append([("", P.TEXT)])  # gap under the models header
-    for mname, pname, pid, mid in model_rows:
-        level = _model_reasoning_level(_model_entry(providers, pid, mid))
+    model_width = max((len(r[0]) for r in model_rows), default=0)
+    rows_with_levels = [
+        (mname, pname, pid, mid, _model_reasoning_level(_model_entry(providers, pid, mid)))
+        for mname, pname, pid, mid in model_rows
+    ]
+    level_cell_width = max((len(r[4]) + 2 for r in rows_with_levels), default=0)
+    for mname, pname, pid, mid, level in rows_with_levels:
         level_pair = P.FREE if level != "none" else P.MUTED
         lines.append(("model", pid, mid, [
             ("● ", P.ENABLED),
-            (mname, P.VALUE),
-            (f" ({pname}) ", P.TEXT),
-            (f"({level})", level_pair),
+            (mname.ljust(model_width), P.VALUE),
+            (f" ({level}) ".ljust(level_cell_width + 2), level_pair),
+            (f"({pname})", P.TEXT),
         ]))
     if not total_enabled:
         lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
