@@ -325,7 +325,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
         let selected_id = entries[pi].0.clone();
 
         loop {
-            let (selected_name, was_enabled, env_key) = {
+            let (selected_name, was_enabled, env_key, doc_url) = {
                 let sel = find_by_id(doc, &selected_id);
                 let sel = match sel {
                     Some(s) => s,
@@ -339,7 +339,13 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     .to_string();
                 let enabled = crate::get_bool(&Value::Object(sel.clone()), "enabled", true);
                 let env = crate::first_env_key_from(&sel);
-                (name, enabled, env)
+                let doc = sel
+                    .get("doc")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                (name, enabled, env, doc)
             };
 
             let actions = vec![
@@ -351,13 +357,23 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                 "Delete Provider".to_string(),
                 "Back".to_string(),
             ];
-            let footer = if env_key.is_empty() {
-                None
-            } else {
-                Some(format!(
+            let mut footer_parts: Vec<String> = Vec::new();
+            if !doc_url.is_empty() {
+                footer_parts.push(
+                    "Provider docs: official documentation for this provider:".to_string(),
+                );
+                footer_parts.push(doc_url.clone());
+            }
+            if !env_key.is_empty() {
+                footer_parts.push(format!(
                     "Required env var: {}",
                     core::env_status_line(&env_key)
-                ))
+                ));
+            }
+            let footer = if footer_parts.is_empty() {
+                None
+            } else {
+                Some(footer_parts.join("\n"))
             };
             let ai = numbered_select(
                 &actions,

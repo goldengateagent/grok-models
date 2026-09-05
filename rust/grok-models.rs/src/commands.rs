@@ -581,6 +581,9 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !env.is_empty() {
         entry.insert("env_key".into(), Value::String(env.clone()));
     }
+    if let Some(doc_url) = jsonio::catalog_doc(&pinfo) {
+        entry.insert("doc".into(), Value::String(doc_url.to_string()));
+    }
     if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
         entry.insert("npm".into(), Value::String(provider_npm.to_string()));
     }

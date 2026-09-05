@@ -111,8 +111,9 @@ TOP_LEVEL_KEY_ORDER = (
 )
 PROVIDER_KEY_ORDER = (
     "id",
-    "name",
     "env_key",
+    "name",
+    "doc",
     "npm",
     "base_url",
     "enabled",
@@ -171,6 +172,16 @@ def catalog_npm(v: object) -> str | None:
     npm = v.get("npm")
     if isinstance(npm, str) and npm:
         return npm
+    return None
+
+
+def catalog_doc(v: object) -> str | None:
+    """models.dev `doc` URL string, or None when absent/empty."""
+    if not isinstance(v, dict):
+        return None
+    doc = v.get("doc")
+    if isinstance(doc, str) and doc:
+        return doc
     return None
 
 
@@ -1456,6 +1467,7 @@ def _curses_select_win(
     inline_edit: dict | None = None,
     section_sep_before: int | None = None,
     model_initial: tuple[str, str] | None = None,
+    doc_url: str | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme.
 
@@ -1779,11 +1791,36 @@ def _curses_select_win(
         # rectangles, one column of horizontal padding, no vertical padding,
         # vim-sh syntax colors via the shared _code_line_segments tokenizer.
         # Panel 1 = key-setup commands; Panel 2 = env status.
+        # Provider doc URL sits below the menu and just above the env block.
+        doc_h = 0
+        if doc_url:
+            try:
+                doc_y = sep_y + 1
+                if doc_y < height - 2:
+                    stdscr.addstr(
+                        doc_y,
+                        2,
+                        _clip_cols(
+                            "Provider docs: official documentation for this provider:",
+                            max(1, width - 4),
+                        ),
+                        curses.color_pair(P.MUTED),
+                    )
+                if doc_y + 1 < height - 2:
+                    stdscr.addstr(
+                        doc_y + 1,
+                        2,
+                        _clip_cols(doc_url, max(1, width - 4)),
+                        curses.color_pair(P.VALUE),
+                    )
+                doc_h = 3
+            except curses.error:
+                pass
         if footer or key_hint:
             text_attr = _cp(P.CODE_TEXT)
             bx = 2
             legend_y = height - 2
-            y = sep_y + 1
+            y = sep_y + 1 + doc_h
 
             def draw_code_panel(row: int, panel_lines: list[str]) -> None:
                 """Solid black panel whose lines are colored by the shared
@@ -3041,6 +3078,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     "Back",
                 ]
                 env_key = first_env_key(selected)
+                doc_val = selected.get("doc")
+                doc_url = doc_val if isinstance(doc_val, str) and doc_val else None
                 ai = _curses_select_win(
                     stdscr,
                     actions,
@@ -3065,6 +3104,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         if env_key
                         else None
                     ),
+                    doc_url=doc_url,
                 )
                 # Detect an inline base_url edit before any early exit: the
                 # setter already persisted, this only flags the exit sync.
@@ -4297,6 +4337,9 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         new_env_key = api_env_key(pinfo)
         if new_env_key and provider.get("env_key") != new_env_key:
             provider["env_key"] = new_env_key
+        doc = catalog_doc(pinfo)
+        if doc:
+            provider["doc"] = doc
         npm = catalog_npm(pinfo)
         if npm:
             provider["npm"] = npm
@@ -4488,6 +4531,9 @@ def add_provider_entry(
     env = api_env_key(pinfo)
     if env:
         entry["env_key"] = env
+    doc = catalog_doc(pinfo)
+    if doc:
+        entry["doc"] = doc
     npm = catalog_npm(pinfo)
     if npm:
         entry["npm"] = npm
@@ -4667,7 +4713,17 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                 "Back",
             ]
             env_line = _env_status_line(first_env_key(selected))
-            footer = f"Required env var: {env_line}" if first_env_key(selected) else None
+            doc_val = selected.get("doc")
+            doc_url = doc_val if isinstance(doc_val, str) and doc_val else None
+            footer_parts: list[str] = []
+            if doc_url:
+                footer_parts.append(
+                    "Provider docs: official documentation for this provider:"
+                )
+                footer_parts.append(doc_url)
+            if first_env_key(selected):
+                footer_parts.append(f"Required env var: {env_line}")
+            footer = "\n".join(footer_parts) if footer_parts else None
             ai = _numbered_select(
                 actions,
                 f"Provider: {selected.get('name') or selected['id']}  (1-4)",

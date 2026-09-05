@@ -691,6 +691,7 @@ pub fn select_win<S: Stdscr>(
     initial: usize,
     section_sep_before: Option<usize>,
     model_initial: Option<(&str, &str)>,
+    doc_url: Option<&str>,
 ) -> Option<SelectOutcome> {
     if options.is_empty() {
         return None;
@@ -1071,6 +1072,34 @@ pub fn select_win<S: Stdscr>(
         // rectangles, one column of horizontal padding, vim-sh syntax colors
         // via the shared tokenizer. Panel 1 content = key-setup commands;
         // then a blank line, the env comment label, and the env status lines.
+        // Provider doc URL sits below the menu and just above the env block.
+        let mut doc_h: i32 = 0;
+        if let Some(url) = doc_url {
+            if !url.is_empty() {
+                let doc_y = sep_y + 1;
+                let max_w = (w.max(1) as usize).saturating_sub(4);
+                if doc_y < h - 2 {
+                    stdscr.addstr(
+                        doc_y,
+                        2,
+                        &clip_cols(
+                            "Provider docs: official documentation for this provider:",
+                            max_w,
+                        ),
+                        Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
+                    );
+                }
+                if doc_y + 1 < h - 2 {
+                    stdscr.addstr(
+                        doc_y + 1,
+                        2,
+                        &clip_cols(url, max_w),
+                        Paint::plain(tn_color(P::Value), bg_color(P::Value)),
+                    );
+                }
+                doc_h = 3;
+            }
+        }
         if key_hint.is_some() || footer.is_some() {
             let mut panel_lines: Vec<String> = Vec::new();
             if let Some(kh) = key_hint {
@@ -1084,7 +1113,7 @@ pub fn select_win<S: Stdscr>(
                 panel_lines.extend(f.split('\n').map(|s| s.to_string()));
             }
             if !panel_lines.is_empty() {
-                draw_code_panel(stdscr, sep_y + 1, &panel_lines, 2, w, h - 2);
+                draw_code_panel(stdscr, sep_y + 1 + doc_h, &panel_lines, 2, w, h - 2);
             }
         }
 
@@ -2547,6 +2576,7 @@ fn set_reasoning_win<S: Stdscr>(
         0,
         None,
         None,
+        None,
     ) {
         Some(SelectOutcome::Picked(i)) => i,
         _ => return None,
@@ -2654,6 +2684,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor,
             Some(ordered.len()),
             model_focus.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+            None,
         ) {
             None => return Ok(changed),
             Some(SelectOutcome::Cancelled) => return Ok(changed),
@@ -2721,6 +2752,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 None,
                 None,
                 initial,
+                None,
                 None,
                 None,
             ) {
@@ -2878,6 +2910,10 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             } else {
                 Some(core::env_status_line(&env_key))
             };
+            let doc_url = target
+                .get("doc")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
             let ai = match select_win(stdscr,
                 &actions,
                 &format!("Provider: {}", target.get("name").and_then(Value::as_str).unwrap_or(target["id"].as_str().unwrap_or_default())),
@@ -2891,6 +2927,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 action_cursor,
                 None,
                 None,
+                doc_url,
             ) {
                 None | Some(SelectOutcome::Cancelled) => break,
                 Some(SelectOutcome::SortToggled(_)) => continue,
@@ -3889,7 +3926,7 @@ mod tests {
         // initial = 0: first (enabled) row selected.
         let mut f = FakeStdscr::new(h, w);
         f.script(Key::Char('q'));
-        let _ = select_win(&mut f, &options, "Select Provider", false, &[], false, None, None, None, None, 0, None, None);
+        let _ = select_win(&mut f, &options, "Select Provider", false, &[], false, None, None, None, None, 0, None, None, None);
         let calls = f.recorded();
 
         // Title present.
@@ -3945,7 +3982,7 @@ mod tests {
         // initial = 1: disabled row selected -> token red AND bold (selected).
         let mut f2 = FakeStdscr::new(h, w);
         f2.script(Key::Char('q'));
-        let _ = select_win(&mut f2, &options, "Select Provider", false, &[], false, None, None, None, None, 1, None, None);
+        let _ = select_win(&mut f2, &options, "Select Provider", false, &[], false, None, None, None, None, 1, None, None, None);
         let calls2 = f2.recorded();
         let dis2 = token_paints(&calls2, "[disabled]");
         assert!(
@@ -4015,6 +4052,7 @@ mod tests {
             None,
             None,
             0,
+            None,
             None,
             None,
         );
@@ -4189,14 +4227,14 @@ mod tests {
         // Baseline frame (scroll 0).
         let mut f0 = FakeStdscr::new(h, 80);
         f0.script(Key::Char('q'));
-        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None);
+        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None, None);
 
         // Two PageDowns, then quit.
         let mut f1 = FakeStdscr::new(h, 80);
         f1.script(Key::PageDown);
         f1.script(Key::PageDown);
         f1.script(Key::Char('q'));
-        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None);
+        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None, None);
 
         let base_rows: Vec<i32> = f0
             .recorded()
@@ -4253,7 +4291,7 @@ mod tests {
         f_paged.script(Key::Char('q'));
         let _ = select_win(
             &mut f_paged, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None,
+            None, None, None, Some(&preview), 0, None, None, None,
         );
 
         let mut f_up = FakeStdscr::new(h, 80);
@@ -4263,7 +4301,7 @@ mod tests {
         f_up.script(Key::Char('q'));
         let _ = select_win(
             &mut f_up, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None,
+            None, None, None, Some(&preview), 0, None, None, None,
         );
 
         fn last_frame_models(f: &FakeStdscr) -> Vec<String> {
@@ -4417,6 +4455,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
         let calls = f.recorded();
         assert!(
@@ -4484,6 +4523,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
         let calls = f.recorded();
         assert!(
@@ -4517,6 +4557,7 @@ mod tests {
             None,
             None,
             0,
+            None,
             None,
             None,
         );
@@ -4563,6 +4604,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
         let legend: Vec<(i32, String)> = f
             .recorded()
@@ -4600,6 +4642,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
         assert!(
             matches!(out, Some(SelectOutcome::SortToggled(0))),
@@ -4621,6 +4664,7 @@ mod tests {
             None,
             None,
             0,
+            None,
             None,
             None,
         );

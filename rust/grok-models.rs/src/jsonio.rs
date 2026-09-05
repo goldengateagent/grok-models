@@ -89,10 +89,11 @@ pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
         "providers",
         "removed_providers",
     ];
-pub const PROVIDER_KEY_ORDER: [&str; 8] = [
+pub const PROVIDER_KEY_ORDER: [&str; 9] = [
     "id",
-    "name",
     "env_key",
+    "name",
+    "doc",
     "npm",
     "base_url",
     "enabled",
@@ -139,6 +140,11 @@ pub fn catalog_modalities(minfo: &Value) -> Option<Value> {
 /// models.dev `npm` package string, or None when absent/empty.
 pub fn catalog_npm(v: &Value) -> Option<&str> {
     v.get("npm").and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// models.dev `doc` URL string, or None when absent/empty.
+pub fn catalog_doc(v: &Value) -> Option<&str> {
+    v.get("doc").and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// Insert the catalog description into a model entry map (seed path).

@@ -552,6 +552,9 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
             {
                 prov_obj.insert("env_key".into(), Value::String(new_env_key.clone()));
             }
+            if let Some(doc_url) = jsonio::catalog_doc(&pinfo) {
+                prov_obj.insert("doc".into(), Value::String(doc_url.to_string()));
+            }
             if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
                 prov_obj.insert("npm".into(), Value::String(provider_npm.to_string()));
             }
