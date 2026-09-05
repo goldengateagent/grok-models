@@ -116,6 +116,8 @@ PROVIDER_KEY_ORDER = (
     "doc",
     "npm",
     "base_url",
+    "extra_headers",
+    "env_http_headers",
     "enabled",
     "auth_models_list",
     "models",
@@ -4540,6 +4542,9 @@ def add_provider_entry(
     api_base = pinfo.get("api")
     if isinstance(api_base, str) and api_base:
         entry["base_url"] = api_base
+    if provider_id.startswith("opencode"):
+        entry["extra_headers"] = {"x-opencode-session": "opencode-default-session-id"}
+        entry["env_http_headers"] = {"x-opencode-session": "TERM_SESSION_ID"}
     base_url = entry.get("base_url") if isinstance(entry.get("base_url"), str) else ""
     items, fetch_err_url = authority_items_for_provider(
         pinfo, base_url, quiet=quiet, env_key=env, provider=entry

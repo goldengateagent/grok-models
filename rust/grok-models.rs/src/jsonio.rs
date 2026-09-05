@@ -89,13 +89,15 @@ pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
         "providers",
         "removed_providers",
     ];
-pub const PROVIDER_KEY_ORDER: [&str; 9] = [
+pub const PROVIDER_KEY_ORDER: [&str; 11] = [
     "id",
     "env_key",
     "name",
     "doc",
     "npm",
     "base_url",
+    "extra_headers",
+    "env_http_headers",
     "enabled",
     "auth_models_list",
     "models",

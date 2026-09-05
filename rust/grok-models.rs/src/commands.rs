@@ -593,6 +593,20 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
     if !api_url.is_empty() {
         entry.insert("base_url".into(), Value::String(api_url.to_string()));
     }
+    if provider_id.starts_with("opencode") {
+        let mut extra = Map::new();
+        extra.insert(
+            "x-opencode-session".into(),
+            Value::String("opencode-default-session-id".into()),
+        );
+        entry.insert("extra_headers".into(), Value::Object(extra));
+        let mut env_headers = Map::new();
+        env_headers.insert(
+            "x-opencode-session".into(),
+            Value::String("TERM_SESSION_ID".into()),
+        );
+        entry.insert("env_http_headers".into(), Value::Object(env_headers));
+    }
     let (items, fetch_err_url) = crate::sync::authority_items_for_provider(
         &pinfo,
         api_url,
