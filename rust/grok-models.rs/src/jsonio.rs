@@ -310,7 +310,7 @@ pub fn reset_codex_if_invalid(doc: &mut Value) -> bool {
     true
 }
 
-/// Main-menu state token: provider id, or "disabled".
+/// Main-menu state token: provider name, or "disabled".
 pub fn codex_status_token(doc: &Value) -> String {
     let flag = doc
         .get("write_codex_config_toml")
@@ -324,10 +324,16 @@ pub fn codex_status_token(doc: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or(CODEX_MODEL_PROVIDER_DEFAULT);
     if pid.is_empty() {
-        "disabled".to_string()
-    } else {
-        pid.to_string()
+        return "disabled".to_string();
     }
+    if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
+        for p in arr {
+            if p.get("id").and_then(Value::as_str) == Some(pid) {
+                return crate::name_or(p, pid);
+            }
+        }
+    }
+    pid.to_string()
 }
 
 /// Single write path for providers.json: this is the only sort. Providers
@@ -621,7 +627,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(doc["write_codex_config_toml"], Value::Bool(true));
         assert_eq!(doc["codex_model_provider"], "ollama-cloud");
-        assert_eq!(codex_status_token(&doc), "ollama-cloud");
+        assert_eq!(codex_status_token(&doc), "Ollama Cloud");
     }
 
     #[test]

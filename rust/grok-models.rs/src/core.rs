@@ -323,9 +323,19 @@ pub fn provider_display(p: &Value) -> String {
     format!("({name}) - {pid}")
 }
 
+pub const PROVIDER_NAME_COL_MAX: usize = 25;
+pub const MAIN_PROVIDER_NAME_COL_MAX: usize = 15;
+
+fn clipped_paren_name(name: &str, max: usize) -> String {
+    format!("({})", name.chars().take(max).collect::<String>())
+}
+
 /// Padded `(name) id [enabled/disabled]` rows (no env cell).
 pub fn format_provider_id_rows(rows: &[(String, String, bool)]) -> Vec<String> {
-    let names: Vec<String> = rows.iter().map(|(name, _, _)| format!("({name})")).collect();
+    let names: Vec<String> = rows
+        .iter()
+        .map(|(name, _, _)| clipped_paren_name(name, PROVIDER_NAME_COL_MAX))
+        .collect();
     let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
     let id_w = rows.iter().map(|(_, pid, _)| pid.len()).max().unwrap_or(0);
     let token_col = if rows.is_empty() { 0 } else { name_w + 1 + id_w + 1 };
@@ -374,7 +384,7 @@ pub fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
         .map(|p| {
             let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
             let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
-            format!("({name})").len()
+            clipped_paren_name(name, MAIN_PROVIDER_NAME_COL_MAX).len()
         })
         .max()
         .unwrap_or(0);
@@ -413,7 +423,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
         .map(|p| {
             let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
             let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
-            format!("({name})")
+            clipped_paren_name(name, MAIN_PROVIDER_NAME_COL_MAX)
         })
         .collect();
     let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
@@ -585,6 +595,38 @@ mod tests {
         assert_eq!(desc.find('['), Some(tok_a), "Model Descriptions token must line up");
         assert_eq!(upd.find('['), Some(tok_a), "Update Model List token must line up");
         assert_eq!(syn.find('['), Some(tok_a), "Sync Model Config token must line up");
+    }
+
+    #[test]
+    fn format_provider_id_rows_clips_name() {
+        let rows = format_provider_id_rows(&[(
+            "MiniMax Token Plan (minimaxi.com)".into(),
+            "x".into(),
+            true,
+        )]);
+        assert!(
+            rows[0].starts_with("(MiniMax Token Plan (minim) "),
+            "{}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn provider_menu_labels_clips_name() {
+        let p = json!({
+            "id": "x",
+            "name": "MiniMax Token Plan (minimaxi.com)",
+            "enabled": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let labels = provider_menu_labels(&[p]);
+        assert!(
+            labels[0].starts_with("(MiniMax Token P) "),
+            "{}",
+            labels[0]
+        );
     }
 
     #[test]

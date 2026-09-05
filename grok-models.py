@@ -347,12 +347,20 @@ def reset_codex_if_invalid(doc: dict) -> bool:
 
 
 def codex_status_token(doc: dict) -> str:
-    """Main-menu state token: provider id, or 'disabled'."""
+    """Main-menu state token: provider name, or 'disabled'."""
     if not bool(doc.get("write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT)):
         return "disabled"
     raw = doc.get("codex_model_provider", CODEX_MODEL_PROVIDER_DEFAULT)
     pid = raw if isinstance(raw, str) else ""
-    return pid if pid else "disabled"
+    if not pid:
+        return "disabled"
+    for p in doc.get("providers", []):
+        if isinstance(p, dict) and p.get("id") == pid:
+            name = p.get("name")
+            if isinstance(name, str) and name:
+                return name
+            return pid
+    return pid
 
 
 def codex_models_json_path(provider_id: str) -> Path:
@@ -1454,6 +1462,26 @@ CODEX_CONFIG_INFO = (
 )
 
 
+def _preview_visible_lines(sep_y, height):
+    avail_top = sep_y + 1
+    avail_bottom = height - 5
+    return max(0, avail_bottom - avail_top + 1)
+
+
+def _keep_model_cursor_in_view(preview, preview_models, model_cursor, preview_scroll, max_lines):
+    if max_lines <= 0 or not preview_models:
+        return preview_scroll
+    line_idx = preview_models[model_cursor][0]
+    max_top = max(0, len(preview or []) - max_lines)
+    if model_cursor == 0 and max_lines > line_idx:
+        return 0
+    if line_idx < preview_scroll:
+        return min(line_idx, max_top)
+    if line_idx >= preview_scroll + max_lines:
+        return min(max(0, line_idx + 1 - max_lines), max_top)
+    return preview_scroll
+
+
 def _curses_select_win(
     stdscr,
     options: list[str],
@@ -1468,7 +1496,7 @@ def _curses_select_win(
     status: str | None = None,
     inline_edit: dict | None = None,
     section_sep_before: int | None = None,
-    model_initial: tuple[str, str] | None = None,
+    model_initial: tuple[str, str, int] | None = None,
     doc_url: str | None = None,
 ) -> int | list[int] | None:
     """curses selector drawn into an existing stdscr with color theme.
@@ -1503,11 +1531,11 @@ def _curses_select_win(
             for k, ln in enumerate(preview)
             if isinstance(ln, tuple) and ln[0] == "model"
         ]
-        for j, (line_idx, pid, mid) in enumerate(preview_models):
-            if (pid, mid) == model_initial:
+        for j, (_line_idx, pid, mid) in enumerate(preview_models):
+            if (pid, mid) == (model_initial[0], model_initial[1]):
                 model_cursor = j
                 current = n - 1 if n else 0
-                preview_scroll = line_idx
+                preview_scroll = model_initial[2]
                 break
     while True:
         stdscr.erase()
@@ -1894,26 +1922,28 @@ def _curses_select_win(
             if model_cursor is not None:
                 if model_cursor > 0:
                     model_cursor -= 1
-                    if preview_models[model_cursor][0] < preview_scroll:
-                        preview_scroll = preview_models[model_cursor][0]
+                    preview_scroll = _keep_model_cursor_in_view(
+                        preview, preview_models, model_cursor, preview_scroll,
+                        _preview_visible_lines(sep_y, height),
+                    )
                 else:
                     model_cursor = None
+                    preview_scroll = 0
             elif current > 0:
                 current -= 1
         elif ch == curses.KEY_DOWN:
             if model_cursor is not None:
                 if model_cursor + 1 < len(preview_models):
                     model_cursor += 1
-                    # keep the picked model in the preview window
+                    preview_scroll = _keep_model_cursor_in_view(
+                        preview, preview_models, model_cursor, preview_scroll,
+                        _preview_visible_lines(sep_y, height),
+                    )
             elif current < n - 1:
                 current += 1
             elif preview_models:
                 model_cursor = 0
                 preview_scroll = 0
-                # start at first model line; heading stays pinned above via scroll
-                first = preview_models[0][0]
-                if first > 0:
-                    preview_scroll = 0
         elif multi and ch == ord(" "):
             if current in state:
                 state.discard(current)
@@ -1984,7 +2014,7 @@ def _curses_select_win(
         elif ch in (curses.KEY_ENTER, 10, 13, curses.KEY_RIGHT):
             if model_cursor is not None and preview_models:
                 _i, pid, mid = preview_models[model_cursor]
-                return ("model", pid, mid)
+                return ("model", pid, mid, preview_scroll)
             return sorted(state) if multi else current
         elif (wheel := _as_wheel(ch)) is not None and preview_models:
             wkind, my = wheel
@@ -2325,7 +2355,9 @@ def _curses_filter_list_win(
             top = 0
 
 
-_MODEL_NAME_COL_MAX = 27
+_MODEL_NAME_COL_MAX = 32
+_PROVIDER_NAME_COL_MAX = 25
+_MAIN_PROVIDER_NAME_COL_MAX = 15
 
 
 def _model_list_row(mname, pname, enabled, is_free, name_w, pname_w):
@@ -2336,7 +2368,7 @@ def _model_list_row(mname, pname, enabled, is_free, name_w, pname_w):
         ("  ", P.TEXT),
         (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), name_pair),
         ("  ", P.TEXT),
-        (f"({pname})".ljust(pname_w), P.TEXT),
+        (f"({pname[:_PROVIDER_NAME_COL_MAX]})".ljust(pname_w), P.TEXT),
         ("  ", P.TEXT),
         (state, state_pair),
     ]
@@ -2376,7 +2408,7 @@ def _curses_model_search_win(
             max((len(_mname(mid)) for mid in ordered), default=0),
             _MODEL_NAME_COL_MAX,
         )
-        pname_w = len(pname) + 2
+        pname_w = min(len(pname), _PROVIDER_NAME_COL_MAX) + 2
         return ordered, separators
 
     def render(mid, _is_sel):
@@ -2722,7 +2754,10 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
             max((len(e[2]) for e in matched), default=0),
             _MODEL_NAME_COL_MAX,
         )
-        pname_w = max((len(e[3]) + 2 for e in matched), default=0)
+        pname_w = max(
+            (min(len(e[3]), _PROVIDER_NAME_COL_MAX) + 2 for e in matched),
+            default=0,
+        )
         return matched, separators
 
     def render(entry, _is_sel):
@@ -2960,7 +2995,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 menu_cursor = pi[1]
                 continue
             if isinstance(pi, tuple) and pi and pi[0] == "model":
-                model_focus = (pi[1], pi[2])
+                model_focus = (pi[1], pi[2], pi[3] if len(pi) > 3 else 0)
                 msg = _curses_set_reasoning(stdscr, providers_doc, pi[1], pi[2])
                 if msg:
                     status_msg = msg
@@ -2978,11 +3013,16 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 ]
                 values = [None] + [p["id"] for p in enabled]
                 choices = ["disabled"] + _provider_menu_labels(enabled)
-                current = codex_status_token(providers_doc)
+                writing = bool(
+                    providers_doc.get(
+                        "write_codex_config_toml", WRITE_CODEX_CONFIG_TOML_DEFAULT
+                    )
+                )
+                pid = codex_model_provider_id(providers_doc)
                 initial = (
                     0
-                    if current == "disabled" or current not in values
-                    else values.index(current)
+                    if not writing or not pid or pid not in values
+                    else values.index(pid)
                 )
                 picked = _curses_select_win(
                     stdscr, choices, "Codex Config", initial=initial, back_on_left=True
@@ -3258,9 +3298,13 @@ def _provider_display(p: dict) -> str:
     return f"({name}) - {pid}"
 
 
+def _paren_name(name: str, max_w: int) -> str:
+    return f"({name[:max_w]})"
+
+
 def _format_provider_id_rows(rows: list[tuple[str, str, bool]]) -> list[str]:
     """Padded `(name) id [enabled/disabled]` rows (no env cell)."""
-    names = [f"({name})" for name, _pid, _en in rows]
+    names = [_paren_name(name, _PROVIDER_NAME_COL_MAX) for name, _pid, _en in rows]
     name_w = max((len(n) for n in names), default=0)
     id_w = max((len(pid) for _n, pid, _en in rows), default=0)
     token_col = (name_w + 1 + id_w + 1) if rows else 0
@@ -3296,7 +3340,10 @@ def _provider_state_token_col(providers: list) -> int:
     """Column where `[enabled]` / `[disabled]` / `[date]` start on the main
     menu. Shared by provider rows and the Model Descriptions / Update Model
     List trailing rows so the tokens form one vertical line."""
-    names = [f"({p.get('name') or p['id']})" for p in providers]
+    names = [
+        _paren_name(p.get("name") or p["id"], _MAIN_PROVIDER_NAME_COL_MAX)
+        for p in providers
+    ]
     name_w = max((len(n) for n in names), default=0)
     id_w = max((len(p["id"]) for p in providers), default=0)
     provider_col = (name_w + 3 + id_w + 1) if providers else 0
@@ -3316,7 +3363,10 @@ def _pad_state_label(label: str, token: str, token_col: int) -> str:
 def _provider_menu_labels(providers: list) -> list[str]:
     """Padded main-menu provider rows: aligned dashes, aligned state tokens,
     then a gap + env cell."""
-    names = [f"({p.get('name') or p['id']})" for p in providers]
+    names = [
+        _paren_name(p.get("name") or p["id"], _MAIN_PROVIDER_NAME_COL_MAX)
+        for p in providers
+    ]
     name_w = max((len(n) for n in names), default=0)
     id_w = max((len(p["id"]) for p in providers), default=0)
     token_col = _provider_state_token_col(providers)

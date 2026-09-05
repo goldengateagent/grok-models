@@ -574,7 +574,7 @@ pub enum SelectOutcome {
     /// Main-menu `S`: toggle Enabled Models sort; carries the current cursor.
     SortToggled(usize),
     /// Enter on an Enabled Models row.
-    ModelPicked { pid: String, mid: String },
+    ModelPicked { pid: String, mid: String, scroll: usize },
 }
 
 /// A line drawn in the TUI main-menu preview panel beneath the provider
@@ -614,11 +614,8 @@ fn page_preview(
     down: bool,
 ) {
     let Some(preview) = preview else { return };
-    let avail_top = sep_y + 1;
     let _ = has_status;
-    // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
-    let avail_bottom = h - 5;
-    let max_lines = (avail_bottom - avail_top + 1).max(0) as usize;
+    let max_lines = preview_visible_lines(sep_y, h);
     if max_lines == 0 {
         return;
     }
@@ -634,25 +631,24 @@ fn page_preview(
 /// popup (or a no-op Enter on a model with no levels).
 fn restore_preview_model_cursor(
     preview: Option<&[PreviewLine]>,
-    focus: Option<(&str, &str)>,
+    focus: Option<(&str, &str, usize)>,
     n: usize,
     current: &mut usize,
     model_cursor: &mut Option<usize>,
     preview_scroll: &mut usize,
 ) {
-    let Some((pid, mid)) = focus else { return };
+    let Some((pid, mid, scroll)) = focus else { return };
     let Some(preview) = preview else { return };
     let models = preview_model_entries(preview);
-    if let Some((i, (line_idx, _, _))) = models
+    if let Some(i) = models
         .iter()
-        .enumerate()
-        .find(|(_, (_, p, m))| p == pid && m == mid)
+        .position(|(_, p, m)| p == pid && m == mid)
     {
         *model_cursor = Some(i);
         if n > 0 {
             *current = n - 1;
         }
-        *preview_scroll = *line_idx;
+        *preview_scroll = scroll;
     }
 }
 
@@ -674,6 +670,37 @@ fn pin_model_cursor_to_scroll(
         .or_else(|| models.len().checked_sub(1));
 }
 
+fn preview_visible_lines(sep_y: i32, h: i32) -> usize {
+    let avail_top = sep_y + 1;
+    let avail_bottom = h - 5;
+    (avail_bottom - avail_top + 1).max(0) as usize
+}
+
+fn keep_model_cursor_in_view(
+    preview: &[PreviewLine],
+    model_cursor: usize,
+    preview_scroll: &mut usize,
+    max_lines: usize,
+) {
+    if max_lines == 0 {
+        return;
+    }
+    let models = preview_model_entries(preview);
+    let Some(&(line_idx, _, _)) = models.get(model_cursor) else {
+        return;
+    };
+    let max_top = preview.len().saturating_sub(max_lines);
+    if model_cursor == 0 && max_lines > line_idx {
+        *preview_scroll = 0;
+        return;
+    }
+    if line_idx < *preview_scroll {
+        *preview_scroll = line_idx.min(max_top);
+    } else if line_idx >= *preview_scroll + max_lines {
+        *preview_scroll = (line_idx + 1).saturating_sub(max_lines).min(max_top);
+    }
+}
+
 /// Explanatory note shown directly under the heading on the Codex Config page.
 const CODEX_CONFIG_INFO: &str = "$CODEX_HOME/config.toml and $CODEX_HOME/<provider>-models.json are updated to enable this provider's enabled models. Codex only allows one configured provider by setting:\n\n  model_provider = <provider>\n  model_catalog_json = <provider>-models.json\n\nDisabling removes this config from config.toml and deletes its models json file.";
 
@@ -690,7 +717,7 @@ pub fn select_win<S: Stdscr>(
     preview: Option<&[PreviewLine]>,
     initial: usize,
     section_sep_before: Option<usize>,
-    model_initial: Option<(&str, &str)>,
+    model_initial: Option<(&str, &str, usize)>,
     doc_url: Option<&str>,
 ) -> Option<SelectOutcome> {
     if options.is_empty() {
@@ -1154,19 +1181,17 @@ pub fn select_win<S: Stdscr>(
                     if c > 0 {
                         let next = c - 1;
                         model_cursor = Some(next);
-                        // Keep the highlighted model in the pane: if it sits
-                        // above the current window, scroll up to its line.
-                        // Mirrors Python `_curses_select_win` KEY_UP.
                         if let Some(preview) = preview {
-                            let models = preview_model_entries(preview);
-                            if let Some((line_idx, _, _)) = models.get(next) {
-                                if *line_idx < preview_scroll {
-                                    preview_scroll = *line_idx;
-                                }
-                            }
+                            keep_model_cursor_in_view(
+                                preview,
+                                next,
+                                &mut preview_scroll,
+                                preview_visible_lines(sep_y, h),
+                            );
                         }
                     } else {
                         model_cursor = None;
+                        preview_scroll = 0;
                     }
                 } else if current > 0 {
                     current -= 1;
@@ -1176,12 +1201,22 @@ pub fn select_win<S: Stdscr>(
                 let models = preview.map(preview_model_entries).unwrap_or_default();
                 if let Some(c) = model_cursor {
                     if c + 1 < models.len() {
-                        model_cursor = Some(c + 1);
+                        let next = c + 1;
+                        model_cursor = Some(next);
+                        if let Some(preview) = preview {
+                            keep_model_cursor_in_view(
+                                preview,
+                                next,
+                                &mut preview_scroll,
+                                preview_visible_lines(sep_y, h),
+                            );
+                        }
                     }
                 } else if current + 1 < n {
                     current += 1;
                 } else if !models.is_empty() && !back_on_left {
                     model_cursor = Some(0);
+                    preview_scroll = 0;
                 }
             }
             Key::Char(' ') if multi => {
@@ -1195,6 +1230,7 @@ pub fn select_win<S: Stdscr>(
                             return Some(SelectOutcome::ModelPicked {
                                 pid: pid.clone(),
                                 mid: mid.clone(),
+                                scroll: preview_scroll,
                             });
                         }
                     }
@@ -1568,7 +1604,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 // Model picker built on the filter widget (python `_curses_model_search_win`)
 // ---------------------------------------------------------------------------
 
-const MODEL_NAME_COL_MAX: usize = 27;
+const MODEL_NAME_COL_MAX: usize = 32;
 
 fn model_list_row(
     mname: &str,
@@ -1586,6 +1622,7 @@ fn model_list_row(
         P::Text
     };
     let mname: String = mname.chars().take(MODEL_NAME_COL_MAX).collect();
+    let pname: String = pname.chars().take(core::PROVIDER_NAME_COL_MAX).collect();
     let plab = format!("({pname})");
     let state = if enabled { "[enabled]" } else { "[disabled]" };
     let state_pair = if enabled { P::Enabled } else { P::Error };
@@ -1632,7 +1669,7 @@ impl<'a> FilterList for ModelPicker<'a> {
             name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
         }
         self.name_w = name_w;
-        self.pname_w = self.pname.len() + 2;
+        self.pname_w = self.pname.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2;
         (ordered, separators)
     }
 
@@ -2280,7 +2317,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             .unwrap_or(0);
         self.pname_w = ordered
             .iter()
-            .map(|(_, _, _, p)| p.len() + 2)
+            .map(|(_, _, _, p)| p.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2)
             .max()
             .unwrap_or(0);
         (ordered, separators)
@@ -2667,7 +2704,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     let mut status_msg: Option<String> = None;
     let mut sort_by_name = false;
     let mut menu_cursor = 0usize;
-    let mut model_focus: Option<(String, String)> = None;
+    let mut model_focus: Option<(String, String, usize)> = None;
     loop {
         // Order is providers.json (sorted only on dump).
         let ordered: Vec<Map<String, Value>> = usable(doc);
@@ -2728,7 +2765,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             Some(&preview),
             menu_cursor,
             Some(ordered.len()),
-            model_focus.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+            model_focus.as_ref().map(|(p, m, s)| (p.as_str(), m.as_str(), *s)),
             None,
         ) {
             None => return Ok(changed),
@@ -2738,8 +2775,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 menu_cursor = i;
                 continue;
             }
-            Some(SelectOutcome::ModelPicked { pid, mid }) => {
-                model_focus = Some((pid.clone(), mid.clone()));
+            Some(SelectOutcome::ModelPicked { pid, mid, scroll }) => {
+                model_focus = Some((pid.clone(), mid.clone(), scroll));
                 if let Some(msg) = set_reasoning_win(stdscr, doc, &pid, &mid) {
                     status_msg = Some(msg);
                     changed = true;
@@ -2775,11 +2812,15 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             }
             let mut choices: Vec<String> = vec!["disabled".to_string()];
             choices.extend(crate::core::provider_menu_labels(&enabled));
-            let current = crate::jsonio::codex_status_token(doc);
-            let initial = if current == "disabled" {
+            let writing = doc
+                .get("write_codex_config_toml")
+                .and_then(Value::as_bool)
+                .unwrap_or(crate::jsonio::WRITE_CODEX_CONFIG_TOML_DEFAULT);
+            let pid = crate::jsonio::codex_model_provider_id(doc);
+            let initial = if !writing || pid.is_empty() {
                 0
             } else if let Some(pos) =
-                values.iter().position(|v| v.as_deref() == Some(current.as_str()))
+                values.iter().position(|v| v.as_deref() == Some(pid.as_str()))
             {
                 pos
             } else {
@@ -4374,6 +4415,222 @@ mod tests {
         );
     }
 
+    fn enabled_models_preview(n: usize) -> Vec<PreviewLine> {
+        let mut preview = vec![
+            PreviewLine::Heading("Enabled Models".into()),
+            PreviewLine::Segs(vec![("".into(), P::Text)]),
+        ];
+        for i in 0..n {
+            preview.push(PreviewLine::Model {
+                pid: "prov".into(),
+                mid: format!("m{i}"),
+                segs: vec![(format!("model-{i}"), P::Value)],
+            });
+        }
+        preview
+    }
+
+    fn last_frame_model_names(f: &FakeStdscr) -> Vec<String> {
+        f.last_frame()
+            .into_iter()
+            .filter_map(|(_, _, t, _)| {
+                if t.starts_with("model-") {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn last_frame_selected_models(f: &FakeStdscr) -> Vec<String> {
+        let sel_bg = bg_color(P::Selected);
+        f.last_frame()
+            .into_iter()
+            .filter_map(|(_, _, t, p)| {
+                if t.starts_with("model-") && p.bg == sel_bg {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn last_frame_has_enabled_heading(f: &FakeStdscr) -> bool {
+        f.last_frame()
+            .iter()
+            .any(|(_, _, t, _)| t.contains("Enabled Models"))
+    }
+
+    #[test]
+    fn select_win_down_scrolls_preview_to_keep_model_visible() {
+        let preview = enabled_models_preview(40);
+        let options = vec!["Add Model".to_string()];
+        let h = 16;
+
+        let mut f_base = FakeStdscr::new(h, 80);
+        f_base.script(Key::Down);
+        f_base.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_base, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        let initial = last_frame_model_names(&f_base);
+        assert!(!initial.is_empty(), "no models drawn at scroll 0");
+        let last_initial = initial.last().cloned().unwrap();
+
+        let mut f_down = FakeStdscr::new(h, 80);
+        f_down.script(Key::Down);
+        for _ in 0..initial.len() {
+            f_down.script(Key::Down);
+        }
+        f_down.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_down, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        let after = last_frame_model_names(&f_down);
+        let selected = last_frame_selected_models(&f_down);
+        assert!(
+            !selected.is_empty(),
+            "highlight left the visible pane; models={after:?}"
+        );
+        assert_ne!(
+            after.last(),
+            Some(&last_initial),
+            "Down past the last visible row must scroll; initial_last={last_initial} after={after:?}"
+        );
+        assert_eq!(
+            after.last(),
+            selected.last(),
+            "highlighted row must be the last visible model; after={after:?} selected={selected:?}"
+        );
+    }
+
+    #[test]
+    fn select_win_up_restores_enabled_models_heading() {
+        let preview = enabled_models_preview(40);
+        let options = vec!["Add Model".to_string()];
+        let h = 16;
+
+        let mut f_paged = FakeStdscr::new(h, 80);
+        f_paged.script(Key::Down);
+        f_paged.script(Key::PageDown);
+        f_paged.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_paged, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        assert!(
+            !last_frame_has_enabled_heading(&f_paged),
+            "PageDown should hide the Enabled Models heading"
+        );
+        let paged_models = last_frame_model_names(&f_paged);
+        let first_paged = paged_models
+            .first()
+            .and_then(|t| t.strip_prefix("model-"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .expect("paged frame should show a model-N row");
+
+        let mut f_first = FakeStdscr::new(h, 80);
+        f_first.script(Key::Down);
+        f_first.script(Key::PageDown);
+        for _ in 0..first_paged {
+            f_first.script(Key::Up);
+        }
+        f_first.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_first, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        assert!(
+            last_frame_has_enabled_heading(&f_first),
+            "Up to the first enabled model must bring the heading back"
+        );
+        assert_eq!(
+            last_frame_selected_models(&f_first).first().map(String::as_str),
+            Some("model-0"),
+            "first enabled model should be highlighted"
+        );
+
+        let mut f_menu = FakeStdscr::new(h, 80);
+        f_menu.script(Key::Down);
+        f_menu.script(Key::PageDown);
+        for _ in 0..first_paged + 1 {
+            f_menu.script(Key::Up);
+        }
+        f_menu.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_menu, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        assert!(
+            last_frame_has_enabled_heading(&f_menu),
+            "Up from the first model onto Add Model must keep the heading in view"
+        );
+        assert!(
+            last_frame_selected_models(&f_menu).is_empty(),
+            "cursor should have left the enabled-models list"
+        );
+    }
+
+    #[test]
+    fn select_win_restore_keeps_preview_scroll() {
+        let preview = enabled_models_preview(40);
+        let options = vec!["Add Model".to_string()];
+        let h = 16;
+        let downs = 12usize;
+
+        let mut f_before = FakeStdscr::new(h, 80);
+        f_before.script(Key::Down);
+        for _ in 0..downs {
+            f_before.script(Key::Down);
+        }
+        f_before.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_before, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        let before_models = last_frame_model_names(&f_before);
+        let before_selected = last_frame_selected_models(&f_before);
+        assert!(!before_selected.is_empty(), "expected a highlighted model before Enter");
+
+        let mut f_enter = FakeStdscr::new(h, 80);
+        f_enter.script(Key::Down);
+        for _ in 0..downs {
+            f_enter.script(Key::Down);
+        }
+        f_enter.script(Key::Enter);
+        let picked = select_win(
+            &mut f_enter, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None, None, None,
+        );
+        let (pid, mid, scroll) = match picked {
+            Some(SelectOutcome::ModelPicked { pid, mid, scroll }) => (pid, mid, scroll),
+            other => panic!("expected ModelPicked, got {other:?}"),
+        };
+        assert_ne!(scroll, 0, "scrolled list should restore a non-zero offset");
+
+        let mut f_after = FakeStdscr::new(h, 80);
+        f_after.script(Key::Char('q'));
+        let _ = select_win(
+            &mut f_after, &options, "Select Provider", false, &[], false,
+            None, None, None, Some(&preview), 0, None,
+            Some((pid.as_str(), mid.as_str(), scroll)), None,
+        );
+        assert_eq!(
+            last_frame_model_names(&f_after),
+            before_models,
+            "returning from Enter must not move the preview window"
+        );
+        assert_eq!(
+            last_frame_selected_models(&f_after),
+            before_selected,
+            "the same model must stay highlighted in the same window"
+        );
+    }
+
     #[test]
     fn build_add_model_catalog_includes_enabled_and_doc_only() {
         let api = serde_json::json!({
@@ -4829,6 +5086,15 @@ mod tests {
         assert_eq!(sel[1], (format!("{:<8}", "Pro"), P::Enabled));
         assert_eq!(sel[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
         assert_eq!(sel[5], ("[enabled]".into(), P::Enabled));
+
+        picker.pname = "MiniMax Token Plan (minimaxi.com)".into();
+        let _ = picker.compute_view(&ids, "");
+        let clipped = picker.render(&"pro".to_string(), false);
+        assert_eq!(
+            clipped[3],
+            (format!("{:<27}", "(MiniMax Token Plan (minim)"), P::Text)
+        );
+        picker.pname = "OpenCode Go".into();
 
         let mut f = FakeStdscr::new(20, 80);
         f.script(Key::Esc);
