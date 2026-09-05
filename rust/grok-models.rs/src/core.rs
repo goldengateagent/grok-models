@@ -323,18 +323,18 @@ pub fn provider_display(p: &Value) -> String {
     format!("({name}) - {pid}")
 }
 
-/// Padded `(name) - id [enabled/disabled]` rows (no env cell).
+/// Padded `(name) id [enabled/disabled]` rows (no env cell).
 pub fn format_provider_id_rows(rows: &[(String, String, bool)]) -> Vec<String> {
     let names: Vec<String> = rows.iter().map(|(name, _, _)| format!("({name})")).collect();
     let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
     let id_w = rows.iter().map(|(_, pid, _)| pid.len()).max().unwrap_or(0);
-    let token_col = if rows.is_empty() { 0 } else { name_w + 3 + id_w + 1 };
+    let token_col = if rows.is_empty() { 0 } else { name_w + 1 + id_w + 1 };
     names
         .iter()
         .zip(rows.iter())
         .map(|(nlab, (_, pid, enabled))| {
             let token = if *enabled { "[enabled]" } else { "[disabled]" };
-            let head = format!("{:<name_w$} - {:<id_w$}", nlab, pid);
+            let head = format!("{:<name_w$} {:<id_w$}", nlab, pid);
             format!("{:<token_col$}{token}", head)
         })
         .collect()
@@ -538,7 +538,8 @@ mod tests {
         let tok_b = rows[1].find('[').unwrap();
         assert_eq!(tok_a, tok_b, "state tokens must share a column:\n{}\n{}", rows[0], rows[1]);
         assert!(rows[0].starts_with("(A)"), "{}", rows[0]);
-        assert!(rows[1].contains(" - long-id"), "{}", rows[1]);
+        assert!(rows[1].contains(" long-id"), "{}", rows[1]);
+        assert!(!rows[1].contains(" - "), "{}", rows[1]);
         assert!(rows[0].ends_with("[enabled]"), "{}", rows[0]);
         assert!(rows[1].ends_with("[disabled]"), "{}", rows[1]);
     }

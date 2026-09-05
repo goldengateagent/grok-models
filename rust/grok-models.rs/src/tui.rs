@@ -1568,12 +1568,44 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 // Model picker built on the filter widget (python `_curses_model_search_win`)
 // ---------------------------------------------------------------------------
 
+const MODEL_NAME_COL_MAX: usize = 27;
+
+fn model_list_row(
+    mname: &str,
+    pname: &str,
+    enabled: bool,
+    is_free: bool,
+    name_w: usize,
+    pname_w: usize,
+) -> Vec<(String, P)> {
+    let name_pair = if enabled {
+        P::Enabled
+    } else if is_free {
+        P::Free
+    } else {
+        P::Text
+    };
+    let mname: String = mname.chars().take(MODEL_NAME_COL_MAX).collect();
+    let plab = format!("({pname})");
+    let state = if enabled { "[enabled]" } else { "[disabled]" };
+    let state_pair = if enabled { P::Enabled } else { P::Error };
+    vec![
+        ("  ".to_string(), P::Text),
+        (format!("{mname:<name_w$}"), name_pair),
+        ("  ".to_string(), P::Text),
+        (format!("{plab:<pname_w$}"), P::Text),
+        ("  ".to_string(), P::Text),
+        (state.to_string(), state_pair),
+    ]
+}
+
 struct ModelPicker<'a> {
     ids: &'a [String],
     models: &'a mut Map<String, Value>,
-    pid: String,
     pname: String,
     changed: bool,
+    name_w: usize,
+    pname_w: usize,
 }
 
 impl<'a> FilterList for ModelPicker<'a> {
@@ -1590,6 +1622,17 @@ impl<'a> FilterList for ModelPicker<'a> {
         if sorted.free_disabled_count > 0 && free_sep_idx < ordered.len() {
             separators.push((free_sep_idx, P::Free));
         }
+        let mut name_w = 0usize;
+        for mid in &ordered {
+            let n = self
+                .models
+                .get(mid)
+                .map(|v| crate::name_or(v, mid))
+                .unwrap_or_else(|| mid.clone());
+            name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
+        }
+        self.name_w = name_w;
+        self.pname_w = self.pname.len() + 2;
         (ordered, separators)
     }
 
@@ -1597,24 +1640,15 @@ impl<'a> FilterList for ModelPicker<'a> {
         let m = self.models.get(mid);
         let enabled = m.map(|v| crate::get_bool_val(v, "enabled", true)).unwrap_or(false);
         let is_free = mid.to_lowercase().contains("free");
-        let mark = if enabled { "●" } else { "○" };
         let mname = m.map(|v| crate::name_or(v, mid)).unwrap_or_else(|| mid.clone());
-        let rest = format!(" ({}) - {}/{mid}", self.pname, self.pid);
-        let name_pair = if enabled {
-            P::Enabled
-        } else if is_free {
-            P::Free
-        } else {
-            P::Text
-        };
-        let mark_pair = if enabled { P::Enabled } else { P::Text };
-        vec![
-            ("  ".to_string(), P::Text),
-            (mark.to_string(), mark_pair),
-            ("  ".to_string(), P::Text),
-            (mname, name_pair),
-            (rest, P::Text),
-        ]
+        model_list_row(
+            &mname,
+            &self.pname,
+            enabled,
+            is_free,
+            self.name_w,
+            self.pname_w,
+        )
     }
 
     fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, mid: &String) -> bool {
@@ -1634,15 +1668,16 @@ pub fn model_search_win<S: Stdscr>(
     ids: &[String],
     models: &mut Map<String, Value>,
     title: &str,
-    pid: &str,
+    _pid: &str,
     pname: &str,
 ) -> bool {
     let mut picker = ModelPicker {
         ids,
         models,
-        pid: pid.to_string(),
         pname: pname.to_string(),
         changed: false,
+        name_w: 0,
+        pname_w: 0,
     };
     filter_list_win(
         stdscr,
@@ -2152,6 +2187,8 @@ struct AddModelPicker<'a> {
     // Cache of (pid, mid) combos that are enabled in providers.json, so render()
     // does O(1) lookups instead of a linear scan per row per keystroke.
     enabled_cache: std::collections::HashSet<(String, String)>,
+    name_w: usize,
+    pname_w: usize,
 }
 
 impl<'a> AddModelPicker<'a> {
@@ -2236,6 +2273,16 @@ impl<'a> FilterList for AddModelPicker<'a> {
         if free_disabled_count > 0 && free_sep_idx < ordered.len() {
             separators.push((free_sep_idx, P::Free));
         }
+        self.name_w = ordered
+            .iter()
+            .map(|(_, _, n, _)| n.chars().count().min(MODEL_NAME_COL_MAX))
+            .max()
+            .unwrap_or(0);
+        self.pname_w = ordered
+            .iter()
+            .map(|(_, _, _, p)| p.len() + 2)
+            .max()
+            .unwrap_or(0);
         (ordered, separators)
     }
 
@@ -2247,23 +2294,14 @@ impl<'a> FilterList for AddModelPicker<'a> {
         let (pid, mid, mname, pname) = entry;
         let enabled = self.is_enabled(pid, mid);
         let is_free = mid.to_lowercase().contains("free");
-        let mark = if enabled { "●" } else { "○" };
-        let rest = format!(" ({pname}) - {pid}/{mid}");
-        let name_pair = if enabled {
-            P::Enabled
-        } else if is_free {
-            P::Free
-        } else {
-            P::Text
-        };
-        let mark_pair = if enabled { P::Enabled } else { P::Text };
-        vec![
-            ("  ".to_string(), P::Text),
-            (mark.to_string(), mark_pair),
-            ("  ".to_string(), P::Text),
-            (mname.clone(), name_pair),
-            (rest, P::Text),
-        ]
+        model_list_row(
+            mname,
+            pname,
+            enabled,
+            is_free,
+            self.name_w,
+            self.pname_w,
+        )
     }
 
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String, String, String)) -> bool {
@@ -2369,7 +2407,14 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
         }
     };
     let catalog = build_add_model_catalog(&api, doc);
-    let mut picker = AddModelPicker { doc, api, status: None, enabled_cache: Default::default() };
+    let mut picker = AddModelPicker {
+        doc,
+        api,
+        status: None,
+        enabled_cache: Default::default(),
+        name_w: 0,
+        pname_w: 0,
+    };
     filter_list_win_with(
         stdscr,
         &catalog,
@@ -3860,9 +3905,10 @@ mod tests {
         let mut picker = ModelPicker {
             ids: &ids,
             models: &mut models,
-            pid: "test-pid".into(),
             pname: "Test Provider".into(),
             changed: false,
+            name_w: 0,
+            pname_w: 0,
         };
         filter_list_win(
             &mut f,
@@ -4130,7 +4176,8 @@ mod tests {
             let row = picker.render(&("opencode".to_string(), "OpenCode".to_string()), false);
             let joined: String = row.iter().map(|(t, _)| t.as_str()).collect();
             assert!(joined.contains("(OpenCode)"), "{joined}");
-            assert!(joined.contains(" - opencode"), "{joined}");
+            assert!(joined.contains("opencode"), "{joined}");
+            assert!(!joined.contains(" - "), "{joined}");
             if enabled_flag {
                 assert_eq!(row[2], ("[enabled]".to_string(), P::Enabled));
             } else {
@@ -4382,7 +4429,14 @@ mod tests {
             }}
         });
         let catalog = build_add_model_catalog(&api, &doc);
-        let mut picker = AddModelPicker { doc: &mut doc, api, status: None, enabled_cache: Default::default() };
+        let mut picker = AddModelPicker {
+            doc: &mut doc,
+            api,
+            status: None,
+            enabled_cache: Default::default(),
+            name_w: 0,
+            pname_w: 0,
+        };
         let (ordered, seps) = picker.compute_view(&catalog, "");
         assert_eq!(
             ordered.iter().map(|(p, m, _, _)| (p.as_str(), m.as_str())).collect::<Vec<_>>(),
@@ -4393,19 +4447,26 @@ mod tests {
                 ("aaa", "omega"),
             ]
         );
-        assert_eq!(seps, vec![(1, P::Chevron), (2, P::Free)]);
+        assert_eq!(seps, vec![(1, P::Enabled), (2, P::Free)]);
 
         let enabled_row = picker.render(&ordered[0], false);
-        assert_eq!(enabled_row[1], ("●".into(), P::Enabled));
-        assert_eq!(enabled_row[3], ("Alpha One".into(), P::Value));
+        assert_eq!(enabled_row[1], (format!("{:<9}", "Alpha One"), P::Enabled));
+        assert_eq!(enabled_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
+        assert_eq!(enabled_row[5], ("[enabled]".into(), P::Enabled));
+        assert!(
+            enabled_row.iter().all(|(t, _)| !t.contains("zeta/") && !t.contains("/alpha")),
+            "enabled row still shows model/provider id"
+        );
 
         let free_row = picker.render(&ordered[1], false);
-        assert_eq!(free_row[1], ("○".into(), P::Text));
-        assert_eq!(free_row[3], ("Zeta Free".into(), P::Enabled));
+        assert_eq!(free_row[1], (format!("{:<9}", "Zeta Free"), P::Free));
+        assert_eq!(free_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
+        assert_eq!(free_row[5], ("[disabled]".into(), P::Error));
 
         let rest_row = picker.render(&ordered[2], false);
-        assert_eq!(rest_row[1], ("○".into(), P::Text));
-        assert_eq!(rest_row[3], ("beta".into(), P::Text));
+        assert_eq!(rest_row[1], (format!("{:<9}", "beta"), P::Text));
+        assert_eq!(rest_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
+        assert_eq!(rest_row[5], ("[disabled]".into(), P::Error));
 
         let mut f = FakeStdscr::new(20, 80);
         // Enter on an already-enabled row disables it. The picker stays
@@ -4727,39 +4788,37 @@ mod tests {
         let mut picker = ModelPicker {
             ids: &ids,
             models: &mut models,
-            pid: "opencode-go".into(),
             pname: "OpenCode Go".into(),
             changed: false,
+            name_w: 0,
+            pname_w: 0,
         };
         let (ordered, seps) = picker.compute_view(&ids, "");
         assert_eq!(ordered, ["pro", "hy3-free", "omega"]);
-        assert_eq!(seps, vec![(1, P::Chevron), (2, P::Free)]);
+        assert_eq!(seps, vec![(1, P::Enabled), (2, P::Free)]);
 
         let enabled_row = picker.render(&"pro".to_string(), false);
-        assert_eq!(enabled_row[1], ("●".into(), P::Enabled));
-        assert_eq!(enabled_row[3], ("Pro".into(), P::Value));
-        assert_eq!(
-            enabled_row[4],
-            (" (OpenCode Go) - opencode-go/pro".into(), P::Text)
+        assert_eq!(enabled_row[1], (format!("{:<8}", "Pro"), P::Enabled));
+        assert_eq!(enabled_row[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(enabled_row[5], ("[enabled]".into(), P::Enabled));
+        assert!(
+            enabled_row
+                .iter()
+                .all(|(t, _)| !t.contains("opencode-go") && !t.contains("/pro")),
+            "enabled row still shows model/provider id"
         );
         assert!(
             is_green(tn_color(enabled_row[1].1)),
-            "enabled circle not green"
-        );
-        assert!(
-            is_blue(tn_color(enabled_row[3].1)),
-            "enabled model name not blue"
+            "enabled model name not green"
         );
 
         let free_row = picker.render(&"hy3-free".to_string(), false);
-        assert_eq!(free_row[3], ("HY3 Free".into(), P::Enabled));
-        assert_eq!(
-            free_row[4],
-            (" (OpenCode Go) - opencode-go/hy3-free".into(), P::Text)
-        );
+        assert_eq!(free_row[1], (format!("{:<8}", "HY3 Free"), P::Free));
+        assert_eq!(free_row[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(free_row[5], ("[disabled]".into(), P::Error));
         assert!(
-            is_green(tn_color(free_row[3].1)),
-            "free model name not green"
+            is_blue(tn_color(free_row[1].1)),
+            "free model name not blue"
         );
         assert!(
             free_row.iter().all(|(t, _)| !t.contains("[free]")),
@@ -4767,8 +4826,9 @@ mod tests {
         );
 
         let sel = picker.render(&"pro".to_string(), true);
-        assert_eq!(sel[1], ("●".into(), P::Enabled));
-        assert_eq!(sel[3], ("Pro".into(), P::Value));
+        assert_eq!(sel[1], (format!("{:<8}", "Pro"), P::Enabled));
+        assert_eq!(sel[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(sel[5], ("[enabled]".into(), P::Enabled));
 
         let mut f = FakeStdscr::new(20, 80);
         f.script(Key::Esc);
@@ -4780,15 +4840,15 @@ mod tests {
             &mut picker,
         );
         let calls = f.recorded();
-        let pro = token_paints(&calls, "Pro");
+        let pro = token_paints(&calls, &format!("{:<8}", "Pro"));
         assert!(
-            pro.iter().any(|p| is_blue(p.fg)),
+            pro.iter().any(|p| is_green(p.fg)),
             "selected enabled name turned white: {pro:?}"
         );
-        let circle = token_paints(&calls, "●");
+        let state = token_paints(&calls, "[enabled]");
         assert!(
-            circle.iter().any(|p| is_green(p.fg)),
-            "selected enabled circle turned white: {circle:?}"
+            state.iter().any(|p| is_green(p.fg)),
+            "selected enabled state turned white: {state:?}"
         );
     }
 

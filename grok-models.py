@@ -2325,17 +2325,45 @@ def _curses_filter_list_win(
             top = 0
 
 
+_MODEL_NAME_COL_MAX = 27
+
+
+def _model_list_row(mname, pname, enabled, is_free, name_w, pname_w):
+    name_pair = P.ENABLED if enabled else (P.FREE if is_free else P.TEXT)
+    state = "[enabled]" if enabled else "[disabled]"
+    state_pair = P.ENABLED if enabled else P.ERROR
+    return [
+        ("  ", P.TEXT),
+        (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), name_pair),
+        ("  ", P.TEXT),
+        (f"({pname})".ljust(pname_w), P.TEXT),
+        ("  ", P.TEXT),
+        (state, state_pair),
+    ]
+
+
 def _curses_model_search_win(
     ids: list[str], models: dict, stdscr, provider_title: str,
-    pid: str, pname: str,
+    _pid: str, pname: str,
 ) -> bool:
     """Model picker built on _curses_filter_list_win: type to filter model ids
     or names live, arrow to move, Enter toggles the selected model's enabled
     state, q/ESC finishes. Left/Right arrows page.
     Mutates models in place. Returns True if any toggle happened, False otherwise."""
     changed = False
+    name_w = 0
+    pname_w = 0
+
+    def _mname(mid):
+        m = models.get(mid) if isinstance(models, dict) else None
+        if isinstance(m, dict):
+            n = m.get("name")
+            if isinstance(n, str) and n:
+                return n
+        return mid
 
     def compute_view(entries, query):
+        nonlocal name_w, pname_w
         indices, enabled_count, free_disabled_count = _sort_model_indices(ids, models, query)
         ordered = [ids[i] for i in indices]
         separators = []
@@ -2344,28 +2372,18 @@ def _curses_model_search_win(
         free_sep_idx = enabled_count + free_disabled_count
         if free_disabled_count > 0 and free_sep_idx < len(ordered):
             separators.append((free_sep_idx, P.FREE))
+        name_w = min(
+            max((len(_mname(mid)) for mid in ordered), default=0),
+            _MODEL_NAME_COL_MAX,
+        )
+        pname_w = len(pname) + 2
         return ordered, separators
 
     def render(mid, _is_sel):
         m = models[mid]
         enabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
         is_free = "free" in mid.lower()
-        mark = "●" if enabled else "○"
-        mname = mid
-        if isinstance(m, dict):
-            n = m.get("name")
-            if isinstance(n, str) and n:
-                mname = n
-        rest = f" ({pname}) - {pid}/{mid}"
-        name_pair = P.ENABLED if enabled else (P.FREE if is_free else P.TEXT)
-        mark_pair = P.ENABLED if enabled else P.TEXT
-        return [
-            ("  ", P.TEXT),
-            (mark, mark_pair),
-            ("  ", P.TEXT),
-            (mname, name_pair),
-            (rest, P.TEXT),
-        ]
+        return _model_list_row(_mname(mid), pname, enabled, is_free, name_w, pname_w)
 
     def toggle(mid):
         nonlocal changed
@@ -2668,7 +2686,11 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
     def is_free(entry):
         return "free" in entry[1].lower()
 
+    name_w = 0
+    pname_w = 0
+
     def compute_view(entries, query):
+        nonlocal name_w, pname_w
         term_l = query.lower()
 
         def matches(entry):
@@ -2696,23 +2718,18 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         free_sep_idx = enabled_count + free_disabled_count
         if free_disabled_count > 0 and free_sep_idx < len(matched):
             separators.append((free_sep_idx, P.FREE))
+        name_w = min(
+            max((len(e[2]) for e in matched), default=0),
+            _MODEL_NAME_COL_MAX,
+        )
+        pname_w = max((len(e[3]) + 2 for e in matched), default=0)
         return matched, separators
 
     def render(entry, _is_sel):
         pid, mid, mname, pname = entry
         enabled = is_enabled(entry)
         free = is_free(entry)
-        mark = "●" if enabled else "○"
-        rest = f" ({pname}) - {pid}/{mid}"
-        name_pair = P.ENABLED if enabled else (P.FREE if free else P.TEXT)
-        mark_pair = P.ENABLED if enabled else P.TEXT
-        return [
-            ("  ", P.TEXT),
-            (mark, mark_pair),
-            ("  ", P.TEXT),
-            (mname, name_pair),
-            (rest, P.TEXT),
-        ]
+        return _model_list_row(mname, pname, enabled, free, name_w, pname_w)
 
     def enable(entry):
         pid, mid, mname, pname = entry
@@ -3242,15 +3259,15 @@ def _provider_display(p: dict) -> str:
 
 
 def _format_provider_id_rows(rows: list[tuple[str, str, bool]]) -> list[str]:
-    """Padded `(name) - id [enabled/disabled]` rows (no env cell)."""
+    """Padded `(name) id [enabled/disabled]` rows (no env cell)."""
     names = [f"({name})" for name, _pid, _en in rows]
     name_w = max((len(n) for n in names), default=0)
     id_w = max((len(pid) for _n, pid, _en in rows), default=0)
-    token_col = (name_w + 3 + id_w + 1) if rows else 0
+    token_col = (name_w + 1 + id_w + 1) if rows else 0
     out = []
     for (_name, pid, enabled), nlab in zip(rows, names):
         token = "[enabled]" if enabled else "[disabled]"
-        head = f"{nlab.ljust(name_w)} - {pid.ljust(id_w)}"
+        head = f"{nlab.ljust(name_w)} {pid.ljust(id_w)}"
         out.append(f"{head.ljust(token_col)}{token}")
     return out
 
