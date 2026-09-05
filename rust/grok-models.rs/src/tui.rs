@@ -5389,8 +5389,8 @@ use serde_json::json;
         assert!(res.is_ok(), "codex disable picker errored: {:?}", res.err());
         assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
         assert_eq!(
-            doc["codex_model_provider"], "openrouter",
-            "picker disable must keep the remembered provider; only sync clears it"
+            doc["codex_model_provider"], "",
+            "picker disable syncs immediately, clearing the remembered provider"
         );
     }
 }
