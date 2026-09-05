@@ -30,6 +30,9 @@ Prebuilt binaries are published for macOS, Linux, and WSL:
 
 ```sh
 curl -fsSL https://github.com/goldengateagent/grok-models/raw/main/install.sh | bash
+```
+
+```sh
 grok-models
 ```
 
