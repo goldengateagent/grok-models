@@ -3953,6 +3953,13 @@ def emit_model_table(table_key: str, fields: dict) -> str:
             continue
         if key in fields:
             lines.append(f"{key} = {toml_escape(fields[key])}")
+    for subkey in ("extra_headers", "env_http_headers"):
+        sub = fields.get(subkey)
+        if isinstance(sub, dict) and sub:
+            lines.append("")
+            lines.append(f"[model.{table_key}.{subkey}]")
+            for sk in sorted(sub.keys()):
+                lines.append(f"{_toml_key(sk)} = {toml_escape(sub[sk])}")
     efforts = fields.get("reasoning_efforts") or []
     for row in efforts:
         lines.append("")
@@ -4035,7 +4042,20 @@ def emit_codex_provider_table(pid: str, fields: dict) -> str:
         f"env_key = {toml_escape(env_key)}",
         f"wire_api = {toml_escape(wire_api)}",
     ]
+    extra = fields.get("extra_headers")
+    if isinstance(extra, dict) and extra:
+        lines.append(f"http_headers = {_toml_inline_table(extra)}")
+    env_headers = fields.get("env_http_headers")
+    if isinstance(env_headers, dict) and env_headers:
+        lines.append(f"env_http_headers = {_toml_inline_table(env_headers)}")
     return "\n".join(lines) + "\n"
+
+
+def _toml_inline_table(mapping: dict) -> str:
+    items = ", ".join(
+        f"{toml_escape(sk)} = {toml_escape(mapping[sk])}" for sk in sorted(mapping.keys())
+    )
+    return "{ " + items + " }"
 
 
 def _is_codex_managed_key(stripped: str) -> bool:
@@ -4219,11 +4239,16 @@ def remove_codex_model_catalog(provider_id: str) -> None:
 
 def _codex_provider_fields(provider: dict, pid: str) -> dict:
     pname = provider.get("name") or pid
-    return {
+    fields = {
         "name": pname,
         "base_url": provider.get("base_url") if isinstance(provider.get("base_url"), str) else "",
         "env_key": first_env_key(provider),
     }
+    for header_key in ("extra_headers", "env_http_headers"):
+        header_val = provider.get(header_key)
+        if isinstance(header_val, dict) and header_val:
+            fields[header_key] = dict(header_val)
+    return fields
 
 
 def codex_config_toml(
@@ -4460,6 +4485,10 @@ def update_config_toml(*, quiet: bool = False) -> Path:
             }
             if "context_window" in entry:
                 fields["context_window"] = entry["context_window"]
+            for header_key in ("extra_headers", "env_http_headers"):
+                header_val = provider.get(header_key)
+                if isinstance(header_val, dict) and header_val:
+                    fields[header_key] = dict(header_val)
             if entry.get("supports_reasoning_effort"):
                 fields["supports_reasoning_effort"] = True
                 if "reasoning_efforts" in entry:

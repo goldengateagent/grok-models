@@ -694,14 +694,38 @@ fn emit_codex_provider_table(pid: &str, fields: &Map<String, Value>) -> String {
     let base_url = fields.get("base_url").and_then(Value::as_str).unwrap_or("");
     let env_key = fields.get("env_key").and_then(Value::as_str).unwrap_or("");
     let wire_api = "responses";
-    format!(
+    let mut out = format!(
         "[model_providers.{}]\nname = {}\nbase_url = {}\nenv_key = {}\nwire_api = {}\n",
         toml_key(pid),
         toml_quoted(name),
         toml_quoted(base_url),
         toml_quoted(env_key),
         toml_quoted(wire_api),
-    )
+    );
+    if let Some(obj) = fields.get("extra_headers").and_then(Value::as_object) {
+        if !obj.is_empty() {
+            out.push_str(&format!("http_headers = {}\n", toml_inline_table(obj)));
+        }
+    }
+    if let Some(obj) = fields.get("env_http_headers").and_then(Value::as_object) {
+        if !obj.is_empty() {
+            out.push_str(&format!("env_http_headers = {}\n", toml_inline_table(obj)));
+        }
+    }
+    out
+}
+
+fn toml_inline_table(obj: &Map<String, Value>) -> String {
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort();
+    let items: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            let v = obj.get(*k).and_then(Value::as_str).unwrap_or_default();
+            format!("{} = {}", toml_quoted(k), toml_quoted(v))
+        })
+        .collect();
+    format!("{{ {} }}", items.join(", "))
 }
 
 fn find_provider<'a>(doc: &'a Value, pid: &str) -> Option<&'a Map<String, Value>> {
@@ -898,6 +922,13 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
         "env_key".into(),
         Value::String(core::first_env_key(&Value::Object(provider.clone()))),
     );
+    for header_key in ["extra_headers", "env_http_headers"] {
+        if let Some(obj) = provider.get(header_key).and_then(Value::as_object) {
+            if !obj.is_empty() {
+                fields.insert(header_key.into(), Value::Object(obj.clone()));
+            }
+        }
+    }
     fields
 }
 
@@ -1089,6 +1120,13 @@ tables will have an empty base_url",
             );
             if let Some(ctx) = entry.get("context_window") {
                 fields.insert("context_window".into(), ctx.clone());
+            }
+            for header_key in ["extra_headers", "env_http_headers"] {
+                if let Some(obj) = provider.get(header_key).and_then(Value::as_object) {
+                    if !obj.is_empty() {
+                        fields.insert(header_key.into(), Value::Object(obj.clone()));
+                    }
+                }
             }
             if crate::truthy(entry.get("supports_reasoning_effort")) {
                 fields.insert(

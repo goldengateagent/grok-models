@@ -28,6 +28,18 @@ fn toml_escape(value: &Value) -> Res<String> {
     }
 }
 
+fn toml_subkey(ident: &str) -> String {
+    if !ident.is_empty()
+        && ident
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        ident.to_string()
+    } else {
+        format!("\"{}\"", ident.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 fn number_to_string(n: &serde_json::Number) -> String {
     if let Some(i) = n.as_i64() {
         i.to_string()
@@ -69,6 +81,20 @@ pub fn emit_model_table(table_key: &str, fields: &serde_json::Map<String, Value>
         // "write only when present", same as Python's control flow.
         if fields.contains_key(key) {
             lines.push(format!("{key} = {}", toml_escape(&fields[key])?));
+        }
+    }
+    for subkey in ["extra_headers", "env_http_headers"] {
+        if let Some(obj) = fields.get(subkey).and_then(Value::as_object) {
+            if obj.is_empty() {
+                continue;
+            }
+            lines.push(String::new());
+            lines.push(format!("[model.{table_key}.{subkey}]"));
+            let mut subkeys: Vec<&String> = obj.keys().collect();
+            subkeys.sort();
+            for sk in subkeys {
+                lines.push(format!("{} = {}", toml_subkey(sk), toml_escape(&obj[sk])?));
+            }
         }
     }
     let empty = Vec::new();
