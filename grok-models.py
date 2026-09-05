@@ -2313,7 +2313,7 @@ def _curses_filter_list_win(
                 # disabled side moves down (current + 1). The chevron
                 # separator marks the boundary between the two
                 # sections.
-                _chev = next((i for i, p in separators if p == P.CHEVRON), None)
+                _chev = next((i for i, p in separators if p == P.ENABLED), None)
                 if _chev is not None and current < _chev:
                     if current > 0:
                         current -= 1
@@ -2340,7 +2340,7 @@ def _curses_model_search_win(
         ordered = [ids[i] for i in indices]
         separators = []
         if 0 < enabled_count < len(ordered):
-            separators.append((enabled_count, P.CHEVRON))
+            separators.append((enabled_count, P.ENABLED))
         free_sep_idx = enabled_count + free_disabled_count
         if free_disabled_count > 0 and free_sep_idx < len(ordered):
             separators.append((free_sep_idx, P.FREE))
@@ -2357,7 +2357,7 @@ def _curses_model_search_win(
             if isinstance(n, str) and n:
                 mname = n
         rest = f" ({pname}) - {pid}/{mid}"
-        name_pair = P.VALUE if enabled else (P.ENABLED if is_free else P.TEXT)
+        name_pair = P.ENABLED if enabled else (P.FREE if is_free else P.TEXT)
         mark_pair = P.ENABLED if enabled else P.TEXT
         return [
             ("  ", P.TEXT),
@@ -2692,7 +2692,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         free_disabled_count = sum(1 for e in matched[enabled_count:] if is_free(e))
         separators = []
         if 0 < enabled_count < len(matched):
-            separators.append((enabled_count, P.CHEVRON))
+            separators.append((enabled_count, P.ENABLED))
         free_sep_idx = enabled_count + free_disabled_count
         if free_disabled_count > 0 and free_sep_idx < len(matched):
             separators.append((free_sep_idx, P.FREE))
@@ -2704,7 +2704,7 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
         free = is_free(entry)
         mark = "●" if enabled else "○"
         rest = f" ({pname}) - {pid}/{mid}"
-        name_pair = P.VALUE if enabled else (P.ENABLED if free else P.TEXT)
+        name_pair = P.ENABLED if enabled else (P.FREE if free else P.TEXT)
         mark_pair = P.ENABLED if enabled else P.TEXT
         return [
             ("  ", P.TEXT),

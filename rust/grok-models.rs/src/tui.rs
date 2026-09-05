@@ -1506,7 +1506,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                     // sections.
                     let chev_idx = separators
                         .iter()
-                        .find_map(|(i, p)| if *p == P::Chevron { Some(*i) } else { None });
+                        .find_map(|(i, p)| if *p == P::Enabled { Some(*i) } else { None });
                     if chev_idx.map_or(false, |i| current < i) {
                         if current > 0 {
                             current -= 1;
@@ -1584,7 +1584,7 @@ impl<'a> FilterList for ModelPicker<'a> {
         let ordered: Vec<String> = sorted.filtered.iter().map(|&i| self.ids[i].clone()).collect();
         let mut separators: Vec<(usize, P)> = Vec::new();
         if 0 < sorted.enabled_count && sorted.enabled_count < ordered.len() {
-            separators.push((sorted.enabled_count, P::Chevron));
+            separators.push((sorted.enabled_count, P::Enabled));
         }
         let free_sep_idx = sorted.enabled_count + sorted.free_disabled_count;
         if sorted.free_disabled_count > 0 && free_sep_idx < ordered.len() {
@@ -1601,9 +1601,9 @@ impl<'a> FilterList for ModelPicker<'a> {
         let mname = m.map(|v| crate::name_or(v, mid)).unwrap_or_else(|| mid.clone());
         let rest = format!(" ({}) - {}/{mid}", self.pname, self.pid);
         let name_pair = if enabled {
-            P::Value
-        } else if is_free {
             P::Enabled
+        } else if is_free {
+            P::Free
         } else {
             P::Text
         };
@@ -2230,7 +2230,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             .count();
         let mut separators: Vec<(usize, P)> = Vec::new();
         if 0 < enabled_count && enabled_count < ordered.len() {
-            separators.push((enabled_count, P::Chevron));
+            separators.push((enabled_count, P::Enabled));
         }
         let free_sep_idx = enabled_count + free_disabled_count;
         if free_disabled_count > 0 && free_sep_idx < ordered.len() {
@@ -2250,9 +2250,9 @@ impl<'a> FilterList for AddModelPicker<'a> {
         let mark = if enabled { "●" } else { "○" };
         let rest = format!(" ({pname}) - {pid}/{mid}");
         let name_pair = if enabled {
-            P::Value
-        } else if is_free {
             P::Enabled
+        } else if is_free {
+            P::Free
         } else {
             P::Text
         };
