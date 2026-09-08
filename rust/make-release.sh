@@ -7,7 +7,7 @@
 #                                              e.g. TARGET=x86_64-unknown-linux-musl
 #
 # Output:
-#   dist/grok-models-<version>-<target>.zip      (Windows) containing grok-models.exe and README.md
+#   dist/grok-models-<version>-<target>.zip      (Windows) containing grok-models.exe, install.ps1, README.md
 #   dist/grok-models-<version>-<target>.tar.gz   (Unix) containing grok-models, install.sh, and README.md
 #   dist/<archive>.sha256                        checksum for the archive
 set -euo pipefail
@@ -49,8 +49,12 @@ else
 fi
 
 cp "$HERE/../README.md" "$STAGE/README.md"
-cp "$HERE/../install.sh" "$STAGE/install.sh"
-chmod 755 "$STAGE/install.sh"
+if [[ "$PLATFORM" == *"-windows-"* ]]; then
+  cp "$HERE/../install.ps1" "$STAGE/install.ps1"
+else
+  cp "$HERE/../install.sh" "$STAGE/install.sh"
+  chmod 755 "$STAGE/install.sh"
+fi
 
 # .zip for Windows, .tar.gz for Unix
 if [[ "$PLATFORM" == *"-windows-"* ]]; then

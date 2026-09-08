@@ -4,8 +4,8 @@ $Repo = "goldengateagent/grok-models"
 $Version = "1.0.0"
 $Artifact = "grok-models"
 
-$InstallDir = "$env:LOCALAPPDATA\grok-models"
-$BinDir = "$InstallDir\bin"
+$InstallDir = Join-Path $env:USERPROFILE ".grok-models"
+$BinDir = Join-Path $InstallDir "bin"
 
 # Detect architecture
 $Arch = $env:PROCESSOR_ARCHITECTURE
