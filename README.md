@@ -26,10 +26,18 @@ transform the same data to configure Codex custom models.
 
 ## Installing the released binary
 
-Prebuilt binaries are published for macOS, Linux, and WSL:
+Prebuilt binaries are published for macOS, Linux, WSL, and Windows.
+
+macOS / Linux / WSL:
 
 ```sh
-curl -fsSL https://github.com/goldengateagent/grok-models/raw/main/install.sh | bash
+curl -fsSL https://github.com/goldengateagent/grok-models/raw/v1.1.0-beta/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/goldengateagent/grok-models/raw/v1.1.0-beta/install.ps1 | iex
 ```
 
 ```sh
