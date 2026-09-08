@@ -55,7 +55,15 @@ chmod 755 "$STAGE/install.sh"
 # .zip for Windows, .tar.gz for Unix
 if [[ "$PLATFORM" == *"-windows-"* ]]; then
   ARCHIVE="$(basename "${STAGE}.zip")"
-  powershell -Command "Compress-Archive -Path '${STAGE}' -DestinationPath '${DIST}/${ARCHIVE}' -Force"
+  # Git Bash uses /d/a/... paths; Compress-Archive needs Windows paths.
+  if command -v cygpath >/dev/null 2>&1; then
+    WIN_STAGE="$(cygpath -w "$STAGE")"
+    WIN_DEST="$(cygpath -w "$DIST/$ARCHIVE")"
+  else
+    WIN_STAGE="$STAGE"
+    WIN_DEST="$DIST/$ARCHIVE"
+  fi
+  powershell -Command "Compress-Archive -Path '${WIN_STAGE}' -DestinationPath '${WIN_DEST}' -Force"
 else
   ARCHIVE="$(basename "${STAGE}.tar.gz")"
   tar -czf "$DIST/$ARCHIVE" -C "$DIST" "$(basename "$STAGE")"

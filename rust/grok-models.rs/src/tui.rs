@@ -3210,6 +3210,9 @@ fn show_cursor<W: std::io::Write>(w: &mut W) {
 /// these on every exit path so the terminal returns to its prior state and
 /// wheel events stop being eaten. This is the hand-rolled equivalent of
 /// grok-build's `RESTORE_SEQ` (async-signal-safe: ANSI only).
+/// Windows restore goes through crossterm (`restore_terminal_raw`); this
+/// sequence is only written from Unix signal handlers.
+#[cfg(unix)]
 const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m";
 
 fn restore_terminal_raw() {
@@ -5264,7 +5267,9 @@ use serde_json::json;
     #[test]
     fn terminal_emitters_match_restore_contract() {
         // The hand-rolled RESTORE_SEQ must clear exactly the modes we enable
-        // (mouse tracking + cursor + alt screen).
+        // (mouse tracking + cursor + alt screen). Unix-only: Windows restore
+        // uses crossterm, not this sequence.
+        #[cfg(unix)]
         assert_eq!(RESTORE_SEQ, b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m");
         let mut buf: Vec<u8> = Vec::new();
         enter_alt_screen(&mut buf);
