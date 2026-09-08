@@ -23,20 +23,10 @@ pub fn home_dir() -> PathBuf {
             return PathBuf::from(home);
         }
     }
-    // Fall back to the passwd entry like Python's Path.home().
-    unsafe {
-        let uid = libc::getuid();
-        let pw = libc::getpwuid(uid);
-        if !pw.is_null() {
-            let dir = (*pw).pw_dir;
-            if !dir.is_null() {
-                let cstr = std::ffi::CStr::from_ptr(dir);
-                if let Ok(s) = cstr.to_str() {
-                    if !s.is_empty() {
-                        return PathBuf::from(s);
-                    }
-                }
-            }
+    // USERPROFILE on Windows; passwd fallback on Unix (`home` crate).
+    if let Some(dir) = home::home_dir() {
+        if !dir.as_os_str().is_empty() {
+            return dir;
         }
     }
     PathBuf::from(".")

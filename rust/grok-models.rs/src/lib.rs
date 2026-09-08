@@ -10,7 +10,7 @@
 //! - `cli`:       argparse-equivalent parser
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
-//! - `tui`:       raw-mode ANSI screens (curses equivalent)
+//! - `tui`:       Ratatui/Crossterm screens (curses equivalent)
 //! - `flow`:      interactive TUI orchestration (TUI + numbered fallback)
 
 pub mod cli;
