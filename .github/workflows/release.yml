@@ -52,9 +52,6 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v3
         with:
-          body: |
-            Initial release of grok-models.
-
-            Configure custom models for Grok Build and Codex.
+          generate_release_notes: true
           files: dist/*
           overwrite_files: true
