@@ -2,7 +2,7 @@
 set -e
 
 REPO="goldengateagent/grok-models"
-VERSION="1.0.0"
+VERSION="1.1.0"
 ARTIFACT="grok-models"
 
 INSTALL_DIR="$HOME/.grok-models"
@@ -86,20 +86,21 @@ is_wsl() {
     grep -qi microsoft /proc/version 2>/dev/null || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
 }
 if is_wsl; then
-    if ! command -v wslpath >/dev/null 2>&1 || [ -z "${USERPROFILE:-}" ]; then
+    USERPROFILE_WSL_PATH="$(wslpath "$(powershell.exe -NoProfile -NonInteractive -Command '$env:USERPROFILE' | tr -d '\r')")"
+    if [ -z "$USERPROFILE_WSL_PATH" ]; then
         echo "Warning: WSL detected but wslpath/USERPROFILE is unavailable;"
         echo "set GROK_HOME and CODEX_HOME manually to your Windows profile's .grok and .codex dirs."
     elif grep -Fq '# grok-models WSL homes' "$RC"; then
         WSL_HOMES_ADDED=0
     else
-        cat >> "$RC" << 'EOF'
+        cat >> "$RC" << EOF
 
 # grok-models WSL homes
-if [ -z "$GROK_HOME" ] && command -v wslpath >/dev/null 2>&1 && [ -n "$USERPROFILE" ]; then
-    export GROK_HOME="$(wslpath "$USERPROFILE")/.grok"
+if [ -z "\$GROK_HOME" ]; then
+    export GROK_HOME="${USERPROFILE_WSL_PATH}/.grok"
 fi
-if [ -z "$CODEX_HOME" ] && command -v wslpath >/dev/null 2>&1 && [ -n "$USERPROFILE" ]; then
-    export CODEX_HOME="$(wslpath "$USERPROFILE")/.codex"
+if [ -z "\$CODEX_HOME" ]; then
+    export CODEX_HOME="${USERPROFILE_WSL_PATH}/.codex"
 fi
 EOF
         WSL_HOMES_ADDED=1

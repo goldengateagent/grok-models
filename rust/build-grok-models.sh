@@ -26,5 +26,10 @@ else
   BIN="$CRATE/target/release/grok-models"
 fi
 
-cp "$BIN" "$HERE/grok-models"
-echo "installed: $HERE/grok-models"
+if [[ -f "${BIN}.exe" ]]; then
+  cp "${BIN}.exe" "$HERE/grok-models.exe"
+  echo "installed: $HERE/grok-models.exe"
+else
+  cp "$BIN" "$HERE/grok-models"
+  echo "installed: $HERE/grok-models"
+fi

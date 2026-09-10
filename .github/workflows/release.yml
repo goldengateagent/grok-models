@@ -16,7 +16,8 @@ jobs:
           - macos-14
           - ubuntu-24.04
           - ubuntu-24.04-arm
-          # windows-2022 disabled until native Windows support lands (use WSL).
+          - windows-2025
+          - windows-11-arm
 
     runs-on: ${{ matrix.os }}
 
@@ -52,9 +53,6 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v3
         with:
-          body: |
-            Initial release of grok-models.
-
-            Configure custom models for Grok Build and Codex.
+          generate_release_notes: true
           files: dist/*
           overwrite_files: true

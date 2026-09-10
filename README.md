@@ -8,6 +8,7 @@ automate the configuration for custom models for Grok Build and later adapted to
 transform the same data to configure Codex custom models. 
 
 [Installing the released binary](#installing-the-released-binary) ·
+[API Keys](#api-keys) ·
 [About](#about) ·
 [Grok Build config](#grok-build-config) ·
 [Codex config](#codex-config) ·
@@ -26,17 +27,35 @@ transform the same data to configure Codex custom models.
 
 ## Installing the released binary
 
-Prebuilt binaries are published for macOS, Linux, and WSL:
+Prebuilt binaries are published for macOS, Linux, WSL, and Windows.
+
+macOS / Linux / WSL:
 
 ```sh
-curl -fsSL https://github.com/goldengateagent/grok-models/raw/main/install.sh | bash
+curl -fsSL https://github.com/goldengateagent/grok-models/raw/v1.1.0/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/goldengateagent/grok-models/raw/v1.1.0/install.ps1 | iex
 ```
 
 ```sh
 grok-models
 ```
 
+## API Keys
 
+Grok Build and Codex use `env_key` in thier config to name the environment
+variable that holds the API key for a provider. Export that variable in your
+shell for each enabled provider:
+
+```sh
+export OPENROUTER_API_KEY="$(< ~/.openrouter-key)"
+```
+
+The TUI shows the variable for each enabled provider and whether it has a value.
 
 ## About
 
@@ -233,6 +252,7 @@ the new models will appear to select.
 | `--sync`            | Reconcile `providers.json` with models.dev and rewrite owned `[model.*]` tables in config.toml |
 | `--import`          | Create providers/models from existing `config.toml` `[model.*]` tables                         |
 | `-h`, `--help`      | Help                                                                                           |
+| `-V`, `--version`   | Print version and exit                                                                         |
 
 
 `--sync` adds new API models as disabled, drops models that left the API, and

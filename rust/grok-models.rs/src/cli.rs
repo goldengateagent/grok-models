@@ -65,8 +65,17 @@ pub fn print_help() {
     println!("  --sync                   Refresh providers.json from models.dev; rewrite config.toml");
     println!("  --import                 Import providers/models from existing config.toml [model.*]");
     println!("  -h, --help               Show this help and exit");
+    println!("  -V, --version            Print version and exit");
     println!();
     println!("{EPILOG}");
+}
+
+pub fn version_line() -> String {
+    format!("grok-models {}", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn print_version() {
+    println!("{}", version_line());
 }
 
 pub fn parse(argv: &[String]) -> Res<Args> {
@@ -138,7 +147,7 @@ pub fn parse(argv: &[String]) -> Res<Args> {
                 std::process::exit(0);
             }
             "-V" | "--version" => {
-                println!("grok-models 1.0.0");
+                print_version();
                 std::process::exit(0);
             }
             other => return fail(format!("unknown flag {other}")),
@@ -222,5 +231,13 @@ mod tests {
     fn rejects_unknown() {
         let argv = a(&["--bogus"]);
         assert!(parse(&argv).is_err());
+    }
+
+    #[test]
+    fn version_line_matches_cargo() {
+        assert_eq!(
+            version_line(),
+            format!("grok-models {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

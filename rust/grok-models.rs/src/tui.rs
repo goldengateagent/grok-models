@@ -1,10 +1,8 @@
-//! Raw-mode ANSI TUI (curses equivalent).
+//! Ratatui + Crossterm TUI (curses equivalent).
 //!
-//! Backed by `Stdscr` — a trait whose real implementation writes escape
-//! sequences to a `/dev/tty` and whose fake implementation records calls so
-//! the unit tests can assert exact rendered output. This lets every code path
-//! in the curses Python flow run through one screen object without `curses`
-//! panicking in CI.
+//! Backed by `Stdscr` — the real implementation draws through Ratatui's
+//! Crossterm backend; the fake implementation records calls so unit tests
+//! can assert exact rendered output without a TTY.
 //!
 //! Behaviour parity with `grok-models.py`:
 //! - Full-screen background sweep on every frame (NBSP fill).
@@ -19,11 +17,24 @@ use crate::jsonio;
 use crate::paths;
 use crate::theme::{self, P, Rgb};
 use crate::Res;
+use crossterm::{
+    cursor::{Hide, Show},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEventKind,
+    },
+    execute,
+    style::ResetColor,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    style::{Color, Modifier, Style},
+    Terminal,
+};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Fate of a TUI invocation when /dev/tty isn't a TTY.
 pub struct CursesFailed;
@@ -121,13 +132,6 @@ impl Paint {
 fn blank_frame(rows: usize, cols: usize) -> Vec<Vec<(char, Paint)>> {
     let bg = Paint::plain(crate::theme::tn(0), crate::theme::tn(0));
     vec![vec![(' ', bg); cols.max(1)]; rows.max(1)]
-}
-
-/// A "never seen" frame: `\0` cells that compare unequal to anything real,
-/// forcing the diff renderer to emit a full repaint.
-fn unknown_frame(rows: usize, cols: usize) -> Vec<Vec<(char, Paint)>> {
-    let p = Paint::plain(Rgb { r: 0, g: 0, b: 0 }, Rgb { r: 0, g: 0, b: 0 });
-    vec![vec![('\0', p); cols.max(1)]; rows.max(1)]
 }
 
 // ---------------------------------------------------------------------------
@@ -3184,21 +3188,19 @@ fn emit_cell<W: std::io::Write>(w: &mut W, y: i32, x: i32, s: &str, paint: Paint
 /// paint over (or leave scrollback history of) the user's existing terminal.
 /// On exit we restore the original screen, so closing the TUI returns the
 /// terminal exactly as it was before — no blue background, no menu history.
-fn enable_mouse<W: std::io::Write>(w: &mut W) {
-    let _ = write!(w, "\x1b[?1000h\x1b[?1006h");
-}
-fn disable_mouse<W: std::io::Write>(w: &mut W) {
-    let _ = write!(w, "\x1b[?1000l\x1b[?1006l");
-}
+#[cfg(test)]
 fn enter_alt_screen<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?1049h");
 }
+#[cfg(test)]
 fn leave_alt_screen<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?1049l\x1b[0m");
 }
+#[cfg(test)]
 fn hide_cursor<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?25l");
 }
+#[cfg(test)]
 fn show_cursor<W: std::io::Write>(w: &mut W) {
     let _ = write!(w, "\x1b[?25h");
 }
@@ -3208,70 +3210,60 @@ fn show_cursor<W: std::io::Write>(w: &mut W) {
 /// these on every exit path so the terminal returns to its prior state and
 /// wheel events stop being eaten. This is the hand-rolled equivalent of
 /// grok-build's `RESTORE_SEQ` (async-signal-safe: ANSI only).
+/// Windows restore goes through crossterm (`restore_terminal_raw`); this
+/// sequence is only written from Unix signal handlers.
+#[cfg(unix)]
 const RESTORE_SEQ: &[u8] = b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m";
 
-/// Original termios captured at `open()`, restored on every exit path
-/// (normal `Drop`, SIGINT/SIGTERM/SIGHUP, panic) so the terminal never stays
-/// in raw mode. Read from the async signal handler, so it is a plain `static`
-/// set exactly once before any signal can fire.
-static SAVED_TERMIOS: OnceLock<libc::termios> = OnceLock::new();
-
-/// Set by the SIGWINCH handler and consumed by `read_key` to surface a resize
-/// between key presses. The default SIGWINCH disposition is "ignore", so a
-/// real handler must be installed — `sigwait` silently fails on macOS for a
-/// default-ignore signal (grok-build's `sigwinch_loop` documents this).
-static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
-
-/// Async-signal-safe terminal restore: `write(2)` only, no allocation, no
-/// locks. Mirrors grok-build's `restore_in_signal_handler`, which writes the
-/// RESTORE_SEQ from a real signal handler context.
-unsafe fn restore_terminal_raw() {
-    libc::write(
-        1,
-        RESTORE_SEQ.as_ptr() as *const libc::c_void,
-        RESTORE_SEQ.len(),
+fn restore_terminal_raw() {
+    let _ = disable_raw_mode();
+    let mut out = std::io::stdout();
+    let _ = execute!(
+        out,
+        DisableMouseCapture,
+        Show,
+        LeaveAlternateScreen,
+        ResetColor
     );
-    libc::write(
-        2,
-        RESTORE_SEQ.as_ptr() as *const libc::c_void,
-        RESTORE_SEQ.len(),
-    );
-    if let Some(t) = SAVED_TERMIOS.get() {
-        libc::tcsetattr(0, libc::TCSANOW, t);
-    }
-}
-
-extern "C" fn on_signal(sig: libc::c_int) {
-    // The terminal is left in raw mode + alt screen until we restore it here.
-    // Restore, then exit with the conventional `128 + sig` status.
+    #[cfg(unix)]
     unsafe {
-        restore_terminal_raw();
-        libc::_exit(128 + sig);
+        libc::write(
+            1,
+            RESTORE_SEQ.as_ptr() as *const libc::c_void,
+            RESTORE_SEQ.len(),
+        );
+        libc::write(
+            2,
+            RESTORE_SEQ.as_ptr() as *const libc::c_void,
+            RESTORE_SEQ.len(),
+        );
     }
 }
 
-extern "C" fn on_winch(_sig: libc::c_int) {
-    RESIZE_PENDING.store(true, Ordering::SeqCst);
-}
-
+#[cfg(unix)]
 fn install_signal_handlers() {
-    type Sig = extern "C" fn(libc::c_int);
     unsafe {
-        // Ignore SIGTTIN/SIGTTOU: a child briefly stealing the foreground
-        // process group would otherwise stop the whole TUI, stranding the
-        // terminal in raw mode. (grok-build's `signal_handler::install` does
-        // the same.)
         libc::signal(libc::SIGTTIN, libc::SIG_IGN);
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        // Restore the terminal before the default action terminates us, so
-        // Ctrl-C / terminal close never leaves a broken (raw + blue) terminal.
-        libc::signal(libc::SIGINT, on_signal as Sig as usize);
-        libc::signal(libc::SIGTERM, on_signal as Sig as usize);
-        libc::signal(libc::SIGHUP, on_signal as Sig as usize);
-        libc::signal(libc::SIGWINCH, on_winch as Sig as usize);
+    }
+    for &sig in &[
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        let _ = unsafe {
+            signal_hook::low_level::register(sig, move || {
+                restore_terminal_raw();
+                libc::_exit(128 + sig);
+            })
+        };
     }
 }
 
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
+
+#[cfg(unix)]
 fn reset_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGTTIN, libc::SIG_DFL);
@@ -3283,47 +3275,69 @@ fn reset_signal_handlers() {
     }
 }
 
+#[cfg(not(unix))]
+fn reset_signal_handlers() {}
+
 /// Chain a panic hook that restores the terminal. `Drop` already handles the
 /// unwind path, but this also covers `panic = "abort"` builds (where `Drop`
-/// does not run), mirroring grok-build's `set_panic_hook`.
+/// does not run).
 fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        unsafe {
-            restore_terminal_raw();
-        }
+        restore_terminal_raw();
         prev(info);
     }));
 }
 
+fn paint_style(p: Paint) -> Style {
+    let mut s = Style::default()
+        .fg(Color::Rgb(p.fg.r, p.fg.g, p.fg.b))
+        .bg(Color::Rgb(p.bg.r, p.bg.g, p.bg.b));
+    if p.bold {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    s
+}
+
+fn map_crossterm_key(k: event::KeyEvent) -> Option<Key> {
+    if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
+        return None;
+    }
+    if k.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
+        return Some(Key::Interrupt);
+    }
+    Some(match k.code {
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Char(c) => Key::Char(c.to_ascii_lowercase()),
+        _ => return None,
+    })
+}
+
 pub struct RealStdscr {
-    pub raw_mode: Option<TermiosMode>,
-    /// Unconsumed bytes from previous reads: a burst (paste, fast typing) can
-    /// deliver several keys in one chunk and none may be dropped.
-    pub input_buf: Vec<u8>,
-    /// Frame being built this pass (erase/addstr write here, never to the
-    /// terminal) plus the last frame actually emitted. `refresh()` diffs the
-    /// two and writes only the changed cells — no `\x1b[2J` wipe per keypress,
-    /// which is what made fast navigation flicker.
+    terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
+    /// Frame being built this pass (erase/addstr write here). `refresh()`
+    /// blits it through Ratatui, which diffs against the last committed frame.
     pub frame: Vec<Vec<(char, Paint)>>,
-    pub committed: Vec<Vec<(char, Paint)>>,
 }
 
 impl Stdscr for RealStdscr {
     fn getmaxyx(&self) -> (i32, i32) {
-        unsafe {
-            let w = libc::STDOUT_FILENO;
-            let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(w, libc::TIOCGWINSZ, &mut ws) == 0 {
-                (ws.ws_row as i32, ws.ws_col as i32)
-            } else {
-                (40, 80)
-            }
+        match crossterm::terminal::size() {
+            Ok((cols, rows)) => (rows as i32, cols as i32),
+            Err(_) => (40, 80),
         }
     }
     fn erase(&mut self) {
-        // No terminal output: just start a fresh frame at the current size.
-        // (The old `\x1b[2J` wipe per keypress was the flicker source.)
         let (rows, cols) = self.getmaxyx();
         self.frame = blank_frame(rows as usize, cols as usize);
     }
@@ -3333,50 +3347,29 @@ impl Stdscr for RealStdscr {
         if rows == 0 || cols == 0 {
             return;
         }
-        // Shape changed (resize, first frame): force a full repaint.
-        if self.committed.len() != rows
-            || self.committed.first().map(|r| r.len()) != Some(cols)
-        {
-            self.committed = unknown_frame(rows, cols);
-        }
-        let mut out = String::new();
-        let mut last_paint: Option<Paint> = None;
-        let mut cur_pos: Option<(usize, usize)> = None;
-        for r in 0..rows {
-            for c in 0..cols {
-                let cell = self.frame[r][c];
-                if cell.0 == '\0' {
-                    // Continuation of a 2-col glyph: the terminal already
-                    // advanced past this column when the glyph was emitted.
-                    self.committed[r][c] = cell;
-                    continue;
+        let Some(terminal) = self.terminal.as_mut() else {
+            return;
+        };
+        let frame = &self.frame;
+        let _ = terminal.draw(|f| {
+            let area = f.area();
+            let buf = f.buffer_mut();
+            let max_y = rows.min(area.height as usize);
+            let max_x = cols.min(area.width as usize);
+            for y in 0..max_y {
+                for x in 0..max_x {
+                    let (ch, paint) = frame[y][x];
+                    if ch == '\0' {
+                        continue;
+                    }
+                    let cell = &mut buf[(x as u16, y as u16)];
+                    cell.set_char(ch);
+                    cell.set_style(paint_style(paint));
                 }
-                if self.committed[r][c] == cell {
-                    continue;
-                }
-                // Move only when the cursor wouldn't naturally land here by
-                // having written the previous changed cell in this run.
-                if cur_pos != Some((r, c)) || last_paint != Some(cell.1) {
-                    out.push_str(&format!("\x1b[{};{}H", r + 1, c + 1));
-                }
-                if last_paint != Some(cell.1) {
-                    out.push_str(&crate::theme::sgr_paint(cell.1.fg, cell.1.bg, cell.1.bold));
-                    last_paint = Some(cell.1);
-                }
-                out.push(cell.0);
-                let adv = char_cols(cell.0);
-                cur_pos = Some((r, c + adv));
-                self.committed[r][c] = cell;
             }
-        }
-        if !out.is_empty() {
-            let mut stdout = std::io::stdout();
-            let _ = stdout.write_all(out.as_bytes());
-            let _ = stdout.flush();
-        }
+        });
     }
     fn addstr(&mut self, y: i32, x: i32, s: &str, paint: Paint) {
-        // Write into the frame buffer; refresh() sends it to the terminal.
         let rows = self.frame.len();
         let cols = self.frame.first().map(|r| r.len()).unwrap_or(0);
         if y < 0 || y as usize >= rows || x < 0 {
@@ -3396,141 +3389,69 @@ impl Stdscr for RealStdscr {
         }
     }
     fn getch(&mut self) -> Key {
-        // Buffered input path: parse one key per call from bytes already
-        // read, only hitting the tty when the buffer runs dry. An incomplete
-        // escape sequence waits ~25ms (python set_escdelay(25)) for its tail
-        // before giving up and treating the leading ESC as Key::Esc.
-        const ESC_DELAY_MS: i32 = 25;
         loop {
-            match parse_key_prefix(&self.input_buf) {
-                Some((k, used)) => {
-                    self.input_buf.drain(..used);
-                    return k;
-                }
-                None => {}
-            }
-            let readable = if self.input_buf.is_empty() {
-                match wait_stdin_readable(-1) {
-                    Ok(r) => r,
-                    Err(()) => {
-                        if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
-                            return Key::Resize;
+            match event::poll(Duration::from_millis(500)) {
+                Ok(false) => continue,
+                Err(_) => return Key::Eof,
+                Ok(true) => match event::read() {
+                    Ok(Event::Key(k)) => {
+                        if let Some(key) = map_crossterm_key(k) {
+                            return key;
                         }
-                        // Non-resize interrupt: retry the read.
-                        continue;
                     }
-                }
-            } else {
-                matches!(wait_stdin_readable(ESC_DELAY_MS), Ok(true))
-            };
-            if !readable {
-                // Esc-delay expired on an incomplete sequence. A lone ESC is
-                // a real Esc; a truncated CSI/mouse prefix must be dropped —
-                // emitting Esc would pop Configure Models back to the
-                // provider page on a fast wheel burst.
-                if self.input_buf.first() == Some(&0x1b) {
-                    if self.input_buf.len() == 1 {
-                        self.input_buf.clear();
-                        return Key::Esc;
-                    }
-                    self.input_buf.clear();
-                }
-                continue;
-            }
-            let mut buf = [0u8; 4096];
-            match std::io::stdin().read(&mut buf) {
-                Ok(nread) if nread >= 1 => self.input_buf.extend_from_slice(&buf[..nread]),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    if RESIZE_PENDING.swap(false, Ordering::SeqCst) {
-                        return Key::Resize;
-                    }
-                    // Non-resize interrupt: retry the read.
-                }
-                _ => return Key::Eof,
+                    Ok(Event::Resize(_, _)) => return Key::Resize,
+                    Ok(Event::Mouse(m)) => match m.kind {
+                        MouseEventKind::ScrollUp => return Key::WheelUp(m.row as i32),
+                        MouseEventKind::ScrollDown => return Key::WheelDown(m.row as i32),
+                        _ => {}
+                    },
+                    Ok(_) => {}
+                    Err(_) => return Key::Eof,
+                },
             }
         }
     }
     fn invalidate(&mut self) {
-        let (rows, cols) = self.getmaxyx();
-        self.committed = unknown_frame(rows as usize, cols as usize);
+        if let Some(terminal) = self.terminal.as_mut() {
+            let _ = terminal.clear();
+        }
     }
 }
 
-/// Read one key from `r`, transparently handling `EINTR` (delivered by
-/// SIGWINCH): a resize interrupt surfaces as `Key::Resize` so the TUI can
-/// redraw at the new size; any other interrupt is retried.
 impl RealStdscr {
     pub fn open() -> Option<Self> {
-        let raw_mode = TermiosMode::enter().ok()?;
-        // Capture the original termios for the signal/panic restore paths.
-        SAVED_TERMIOS.get_or_init(|| raw_mode.saved);
-        // Swap to the alternate screen and hide the cursor before drawing.
+        enable_raw_mode().ok()?;
         let mut out = std::io::stdout();
-        enter_alt_screen(&mut out);
-        enable_mouse(&mut out);
-        hide_cursor(&mut out);
-        let _ = out.flush();
-        // Ensure every exit path restores the terminal (Ctrl-C, terminal
-        // close, crash) instead of stranding it in raw mode + alt screen.
+        if execute!(out, EnterAlternateScreen, EnableMouseCapture, Hide).is_err() {
+            let _ = disable_raw_mode();
+            return None;
+        }
         install_signal_handlers();
         install_panic_hook();
+        let backend = CrosstermBackend::new(std::io::stdout());
+        let terminal = match Terminal::new(backend) {
+            Ok(t) => t,
+            Err(_) => {
+                restore_terminal_raw();
+                return None;
+            }
+        };
         Some(Self {
-            raw_mode: Some(raw_mode),
-            input_buf: Vec::new(),
+            terminal: Some(terminal),
             frame: Vec::new(),
-            committed: Vec::new(),
         })
     }
 }
 
 impl Drop for RealStdscr {
     fn drop(&mut self) {
-        // Show the cursor, leave the alternate screen, and flush so the
-        // restore actually reaches the terminal (stdout is buffered). Then
-        // restore cooked mode. Finally reset our signal handlers so a later
-        // Ctrl-C (e.g. during the post-config sync) behaves normally.
+        // Cursor show + leave alt screen last, matching the previous restore
+        // order. Then cooked mode and default signal handlers.
+        self.terminal.take();
         let mut out = std::io::stdout();
-        disable_mouse(&mut out);
-        show_cursor(&mut out);
-        leave_alt_screen(&mut out);
-        let _ = out.flush();
-        if let Some(m) = self.raw_mode.take() {
-            let _ = m.restore();
-        }
+        let _ = execute!(out, DisableMouseCapture, Show, LeaveAlternateScreen, ResetColor);
+        let _ = disable_raw_mode();
         reset_signal_handlers();
-    }
-}
-
-pub struct TermiosMode {
-    fd: i32,
-    saved: libc::termios,
-}
-
-impl TermiosMode {
-    pub fn enter() -> std::io::Result<Self> {
-        unsafe {
-            let fd = libc::STDIN_FILENO;
-            let mut saved: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut saved) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut raw = saved;
-            raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-            raw.c_cc[libc::VMIN] = 1;
-            raw.c_cc[libc::VTIME] = 0;
-            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(Self { fd, saved })
-        }
-    }
-    pub fn restore(self) -> std::io::Result<()> {
-        unsafe {
-            if libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        }
     }
 }
 
@@ -3541,6 +3462,7 @@ impl TermiosMode {
 /// down). Modifier and motion bits (shift/ctrl/meta/32) are ignored so a
 /// fast trackpad burst still scrolls instead of being dropped or turned
 /// into Esc. Releases (`press == false`) are ignored to avoid double-steps.
+#[cfg(test)]
 fn sgr_wheel_key(btn: u32, press: bool, y: i32) -> Key {
     if !press || btn & 64 == 0 {
         return Key::Eof;
@@ -3552,6 +3474,7 @@ fn sgr_wheel_key(btn: u32, press: bool, y: i32) -> Key {
     }
 }
 
+#[cfg(test)]
 fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
     if buf.is_empty() {
         return None;
@@ -3639,19 +3562,6 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
         _ => Key::Eof,
     };
     Some((key, 1))
-}
-
-/// Wait for stdin readability. `Ok(true)` readable, `Ok(false)` timeout,
-/// `Err(())` interrupted (EINTR).
-fn wait_stdin_readable(timeout_ms: i32) -> Result<bool, ()> {
-    unsafe {
-        let mut fds = [libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 }];
-        let rc = libc::poll(fds.as_mut_ptr(), 1, timeout_ms);
-        if rc < 0 {
-            return Err(());
-        }
-        Ok(rc > 0)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5357,7 +5267,9 @@ use serde_json::json;
     #[test]
     fn terminal_emitters_match_restore_contract() {
         // The hand-rolled RESTORE_SEQ must clear exactly the modes we enable
-        // (mouse tracking + cursor + alt screen).
+        // (mouse tracking + cursor + alt screen). Unix-only: Windows restore
+        // uses crossterm, not this sequence.
+        #[cfg(unix)]
         assert_eq!(RESTORE_SEQ, b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m");
         let mut buf: Vec<u8> = Vec::new();
         enter_alt_screen(&mut buf);

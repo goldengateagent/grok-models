@@ -480,29 +480,22 @@ fn providers_list(doc: &Value) -> Vec<Value> {
 
 /// Local `MM-DD-YYYY HH:MM AM/PM` for providers.json `last_updated`.
 pub fn last_updated_stamp() -> String {
-    unsafe {
-        let mut t: libc::time_t = 0;
-        libc::time(&mut t);
-        let tm = libc::localtime(&t);
-        if tm.is_null() {
-            return String::new();
-        }
-        let tm = *tm;
-        let hour24 = tm.tm_hour;
-        let ampm = if hour24 < 12 { "AM" } else { "PM" };
-        let hour12 = {
-            let h = hour24 % 12;
-            if h == 0 { 12 } else { h }
-        };
-        format!(
-            "{:02}-{:02}-{} {:02}:{:02} {ampm}",
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_year + 1900,
-            hour12,
-            tm.tm_min
-        )
-    }
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    let hour24 = now.hour();
+    let ampm = if hour24 < 12 { "AM" } else { "PM" };
+    let hour12 = {
+        let h = hour24 % 12;
+        if h == 0 { 12 } else { h }
+    };
+    format!(
+        "{:02}-{:02}-{} {:02}:{:02} {ampm}",
+        now.month(),
+        now.day(),
+        now.year(),
+        hour12,
+        now.minute()
+    )
 }
 
 /// Update phase (1 of 2): reconcile every configured provider's model list
