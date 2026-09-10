@@ -86,7 +86,7 @@ is_wsl() {
     grep -qi microsoft /proc/version 2>/dev/null || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null
 }
 if is_wsl; then
-    USERPROFILE_WSL_PATH="$(wslpath "$(powershell.exe -NoProfile -NonInteractive -Command '$env:USERPROFILE' | tr -d '\r')")"
+    USERPROFILE_WSL_PATH="$(wslpath "$(powershell.exe -NoProfile -NonInteractive -Command '$env:USERPROFILE' </dev/null | tr -d '\r')")"
     if [ -z "$USERPROFILE_WSL_PATH" ]; then
         echo "Warning: WSL detected but wslpath/USERPROFILE is unavailable;"
         echo "set GROK_HOME and CODEX_HOME manually to your Windows profile's .grok and .codex dirs."
