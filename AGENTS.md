@@ -2,8 +2,11 @@
 
 ## Communication
 
-- If the user asks a question, do not respond by editing code. Answer the
-question.
+- Do not edit files unless the user tells you to. If they ask a question or
+are discussing an approach, answer in chat only. Do not change code until
+they agree on the approach and tell you to apply it.
+- Never form feedback. Do not call `send_feedback`, write feedback drafts, or
+open `/feedback`.
 
 ## Git
 

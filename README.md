@@ -31,13 +31,13 @@ Prebuilt binaries are published for macOS, Linux, WSL, and Windows.
 macOS / Linux / WSL:
 
 ```sh
-curl -fsSL https://github.com/goldengateagent/grok-models/raw/v1.1.0-beta/install.sh | bash
+curl -fsSL https://github.com/goldengateagent/grok-models/raw/v1.1.0/install.sh | bash
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/goldengateagent/grok-models/raw/v1.1.0-beta/install.ps1 | iex
+irm https://github.com/goldengateagent/grok-models/raw/v1.1.0/install.ps1 | iex
 ```
 
 ```sh

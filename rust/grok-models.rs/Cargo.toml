@@ -1,6 +1,6 @@
 [package]
 name = "grok-models"
-version = "1.1.0-beta"
+version = "1.1.0"
 edition = "2021"
 description = "Native port of grok-models.py: sync Grok Build [model.*] tables from models.dev"
 default-run = "grok-models"
