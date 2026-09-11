@@ -9,6 +9,7 @@ transform the same data to configure Codex custom models.
 
 [Installing the released binary](#installing-the-released-binary) ·
 [API Keys](#api-keys) ·
+[Platforms](#platforms) ·
 [About](#about) ·
 [Grok Build config](#grok-build-config) ·
 [Codex config](#codex-config) ·
@@ -56,6 +57,22 @@ export OPENROUTER_API_KEY="$(< ~/.openrouter-key)"
 ```
 
 The TUI shows the variable for each enabled provider and whether it has a value.
+
+## Platforms
+
+The `grok-models` binary is supported on macOS, Windows, Linux, and WSL.
+
+On macOS, Windows, and Linux it reads API keys from the process environment and
+writes Grok Build and Codex config under `~/.grok` and `~/.codex` (or
+`$GROK_HOME` / `$CODEX_HOME` when set).
+
+On WSL, API keys are read from the Windows environment, not the Linux one. Grok
+Build and Codex directories are the Windows profile's `.grok` and `.codex` so
+the Windows apps use the same config.
+
+`grok-models` started as a Python app (`grok-models.py`). It is kept in parity
+with the Rust binary but is being EOL'd in favor of the Rust app for simpler
+maintenance.
 
 ## About
 
