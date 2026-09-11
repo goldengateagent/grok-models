@@ -58,7 +58,11 @@ pub fn codex_models_json_path(provider_id: &str) -> PathBuf {
 }
 
 /// TOML `model_catalog_json` value matching `codex_models_json_path`.
+/// WSL: always `~/...` — Windows Codex does not expand `$CODEX_HOME`.
 pub fn codex_models_json_toml_value(provider_id: &str) -> String {
+    if crate::core::is_wsl() {
+        return format!("~/.codex/{provider_id}-models.json");
+    }
     match std::env::var("CODEX_HOME") {
         Ok(home) if !home.is_empty() => {
             let _home = home;

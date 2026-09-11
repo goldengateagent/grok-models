@@ -16,6 +16,7 @@ import copy
 import curses
 import json
 import shutil
+import subprocess
 import sys
 import unicodedata
 import urllib.error
@@ -368,10 +369,63 @@ def codex_models_json_path(provider_id: str) -> Path:
     return codex_home() / f"{provider_id}-models.json"
 
 
+_IS_WSL: bool | None = None
+
+
+def is_wsl() -> bool:
+    """WSL if /proc kernel strings contain microsoft."""
+    global _IS_WSL
+    if _IS_WSL is not None:
+        return _IS_WSL
+
+    def has_microsoft(path: str) -> bool:
+        try:
+            return "microsoft" in Path(path).read_text(errors="ignore").lower()
+        except OSError:
+            return False
+
+    _IS_WSL = has_microsoft("/proc/version") or has_microsoft(
+        "/proc/sys/kernel/osrelease"
+    )
+    return _IS_WSL
+
+
+_WINDOWS_ENV_CACHE: dict[str, str] = {}
+
+
+def get_windows_env_var(name: str) -> str:
+    """Windows process env via powershell.exe. Cached per name for the process."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        return ""
+    if name in _WINDOWS_ENV_CACHE:
+        return _WINDOWS_ENV_CACHE[name]
+    cmd = f"[Environment]::GetEnvironmentVariable('{name}')"
+    try:
+        out = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        value = out.stdout.strip() if out.returncode == 0 else ""
+    except OSError:
+        value = ""
+    _WINDOWS_ENV_CACHE[name] = value
+    return value
+
+
+def env_var_value(name: str) -> str:
+    """Process value of a named env var; unset → `""`. On WSL, the Windows env."""
+    if is_wsl():
+        return get_windows_env_var(name)
+    return os.environ.get(name, "") or ""
+
+
 def codex_models_json_toml_value(provider_id: str) -> str:
-    if os.environ.get("CODEX_HOME"):
-        return f"$CODEX_HOME/{provider_id}-models.json"
-    return f"~/.codex/{provider_id}-models.json"
+    # WSL: always `~/...` — Windows Codex does not expand `$CODEX_HOME`.
+    if is_wsl() or not os.environ.get("CODEX_HOME"):
+        return f"~/.codex/{provider_id}-models.json"
+    return f"$CODEX_HOME/{provider_id}-models.json"
 
 
 def _code_line_segments(
@@ -479,7 +533,7 @@ def env_api_key(env_key: str) -> str:
     """Value of `env_key` if that env var is set and non-empty."""
     if not env_key:
         return ""
-    return os.environ.get(env_key, "") or ""
+    return env_var_value(env_key)
 
 
 HTTP_TIMEOUT_SEC = 15
@@ -3499,7 +3553,7 @@ def render_list_text(
 
 def _env_value(env_var: str) -> str:
     """Current value of an env var: first 10 chars + ellipsis, or empty string."""
-    val = os.environ.get(env_var, "")
+    val = env_var_value(env_var)
     return f'"{val[:10]}..."' if val else '""'
 
 
@@ -3507,9 +3561,7 @@ def _env_status_line(env_var: str) -> str:
     """Format an env var requirement with its current value status."""
     if not env_var:
         return ""
-    val = os.environ.get(env_var, "")
-    shown = f'"{val[:10]}..."' if val else '""'
-    return f"{env_var} = {shown}"
+    return f"{env_var} = {_env_value(env_var)}"
 
 
 def enabled_provider_env_vars(providers_doc: dict) -> list[str]:
