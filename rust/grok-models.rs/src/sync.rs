@@ -525,7 +525,7 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
 
         // Backfill provider-level fields from the catalog: env key, npm,
         // and a missing base_url (a stored non-empty base_url override wins).
-        let new_env_key = core::api_env_key(&pinfo);
+        let new_env_key = core::provider_env_key_from_api(&pinfo);
         let effective_base_url: String;
         let env_key: String;
         {
@@ -903,7 +903,7 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
     );
     fields.insert(
         "env_key".into(),
-        Value::String(core::first_env_key(&Value::Object(provider.clone()))),
+        Value::String(core::provider_env_key_from_json(&Value::Object(provider.clone()))),
     );
     for header_key in ["extra_headers", "env_http_headers"] {
         if let Some(obj) = provider.get(header_key).and_then(Value::as_object) {
@@ -1058,7 +1058,7 @@ tables will have an empty base_url",
                 core::py_repr(&pid)
             );
         }
-        let env_key = core::first_env_key(&provider);
+        let env_key = core::provider_env_key_from_json(&provider);
         let pname = provider
             .get("name")
             .and_then(Value::as_str)
@@ -1429,7 +1429,7 @@ mod tests {
                 mid,
                 minfo,
                 prov["base_url"].as_str().unwrap_or_default(),
-                &core::api_env_key(&prov),
+                &core::provider_env_key_from_api(&prov),
                 prov["name"].as_str().unwrap(),
                 entry.get("name").and_then(Value::as_str),
                 include_descriptions,

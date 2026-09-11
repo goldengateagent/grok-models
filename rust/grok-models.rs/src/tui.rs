@@ -2984,7 +2984,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 "Delete Provider".to_string(),
                 "Back".to_string(),
             ];
-            let env_key = crate::first_env_key_from(&target);
+            let env_key = crate::provider_env_key_from_json(&target);
             let key_hint = if env_key.is_empty() {
                 None
             } else {

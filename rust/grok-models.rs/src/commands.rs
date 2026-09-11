@@ -68,7 +68,7 @@ pub fn render_list_text(
                 enabled_providers += 1;
             }
             println!("{}", provider_state_line(provider));
-            let env = crate::first_env_key_from(provider);
+            let env = crate::provider_env_key_from_json(provider);
             if !env.is_empty() {
                 println!("    {}", core::env_requirement_line(&env));
             }
@@ -217,7 +217,7 @@ pub fn render_models_text() -> Res<i32> {
         if !crate::get_bool_obj(provider, "enabled", true) {
             continue;
         }
-        let env = crate::first_env_key_from(provider);
+        let env = crate::provider_env_key_from_json(provider);
         if !env.is_empty() {
             let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
             let pname = provider
@@ -577,7 +577,7 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         Value::String(provider_id.to_string())
     };
     entry.insert("name".into(), name_val);
-    let env = core::api_env_key(&pinfo);
+    let env = core::provider_env_key_from_api(&pinfo);
     if !env.is_empty() {
         entry.insert("env_key".into(), Value::String(env.clone()));
     }

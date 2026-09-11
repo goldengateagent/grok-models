@@ -111,7 +111,8 @@ pub fn get_bool_val(v: &Value, key: &str, default: bool) -> bool {
     get_bool(v, key, default)
 }
 
-pub fn first_env_key_from(o: &serde_json::Map<String, Value>) -> String {
+/// `env_key` on a stored provider map, or `""`.
+pub fn provider_env_key_from_json(o: &serde_json::Map<String, Value>) -> String {
     match o.get("env_key") {
         Some(Value::String(s)) => s.clone(),
         _ => String::new(),

@@ -16,8 +16,8 @@ pub fn first_letter_cap(text: &str) -> String {
     }
 }
 
-/// First env var name for a raw models.dev entry (`api_env_key`).
-pub fn api_env_key(pinfo: &Value) -> String {
+/// `env[0]` on a models.dev provider object, or `""`.
+pub fn provider_env_key_from_api(pinfo: &Value) -> String {
     match pinfo.get("env") {
         Some(Value::Array(list)) if !list.is_empty() => {
             if let Value::String(s) = &list[0] {
@@ -30,8 +30,8 @@ pub fn api_env_key(pinfo: &Value) -> String {
     }
 }
 
-/// Stored env var name from a providers.json entry (`first_env_key`).
-pub fn first_env_key(provider: &Value) -> String {
+/// `env_key` on a providers.json provider object, or `""`.
+pub fn provider_env_key_from_json(provider: &Value) -> String {
     match provider.get("env_key") {
         Some(Value::String(s)) => s.clone(),
         _ => String::new(),
@@ -435,7 +435,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
     let token_col = provider_state_token_col(providers);
     let env_w = providers
         .iter()
-        .map(|p| first_env_key(&Value::Object(p.clone())).len())
+        .map(|p| provider_env_key_from_json(&Value::Object(p.clone())).len())
         .max()
         .unwrap_or(0);
     names
@@ -451,7 +451,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
             let token = format!("[{state}]");
             let head = format!("{:<name_w$} - {:<id_w$}", name, pid);
             let mut left = format!("{:<token_col$}{:<tw$}", head, token, tw = PROVIDER_TOKEN_W);
-            let envk = first_env_key(&Value::Object(p.clone()));
+            let envk = provider_env_key_from_json(&Value::Object(p.clone()));
             if !envk.is_empty() {
                 left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
                 left.push_str(&format!("{envk:<env_w$} = "));
@@ -505,7 +505,7 @@ pub fn enabled_provider_env_vars(providers_doc: &Value) -> Vec<String> {
         if !p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
             continue;
         }
-        let env = first_env_key(p);
+        let env = provider_env_key_from_json(p);
         if !env.is_empty() && !env_vars.contains(&env) {
             env_vars.push(env);
         }

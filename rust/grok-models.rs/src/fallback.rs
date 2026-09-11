@@ -338,7 +338,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     .unwrap_or(&selected_id)
                     .to_string();
                 let enabled = crate::get_bool(&Value::Object(sel.clone()), "enabled", true);
-                let env = crate::first_env_key_from(&sel);
+                let env = crate::provider_env_key_from_json(&sel);
                 let doc = sel
                     .get("doc")
                     .and_then(Value::as_str)
