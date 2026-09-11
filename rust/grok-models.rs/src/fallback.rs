@@ -367,7 +367,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             if !env_key.is_empty() {
                 footer_parts.push(format!(
                     "Required env var: {}",
-                    core::env_status_line(&env_key)
+                    core::env_requirement_line(&env_key)
                 ));
             }
             let footer = if footer_parts.is_empty() {

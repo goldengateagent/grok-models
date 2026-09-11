@@ -455,16 +455,21 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
             if !envk.is_empty() {
                 left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
                 left.push_str(&format!("{envk:<env_w$} = "));
-                left.push_str(&env_value(&envk));
+                left.push_str(&quoted_truncated_env_value(&envk));
             }
             left
         })
         .collect()
 }
 
-/// `_env_value`: first 10 chars + ellipsis, quoted.
-pub fn env_value(env_var: &str) -> String {
-    let val = std::env::var(env_var).unwrap_or_default();
+/// Process value of a named env var; unset → `""`.
+pub fn env_var_value(name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
+}
+
+/// First 10 chars of the env value, quoted, with ellipsis; `""` if empty.
+pub fn quoted_truncated_env_value(env_var: &str) -> String {
+    let val = env_var_value(env_var);
     if val.is_empty() {
         "\"\"".to_string()
     } else {
@@ -476,18 +481,9 @@ fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// `_env_status_line`: `ENV_VAR = "prefix..."`.
-pub fn env_status_line(env_var: &str) -> String {
-    if env_var.is_empty() {
-        return String::new();
-    }
-    let val = std::env::var(env_var).unwrap_or_default();
-    let shown = if val.is_empty() {
-        "\"\"".to_string()
-    } else {
-        format!("\"{}...\"", truncate_chars(&val, 10))
-    };
-    format!("{env_var} = {shown}")
+/// `ENV_VAR = "prefix..."`. Callers pass a non-empty name.
+pub fn env_requirement_line(env_var: &str) -> String {
+    format!("{env_var} = {}", quoted_truncated_env_value(env_var))
 }
 
 /// Required API-key env vars for all enabled providers, doc order, deduped.
@@ -653,5 +649,19 @@ mod tests {
         let by_id = sort_model_indices(&ids, &models, Some("a-free"));
         assert_eq!(by_id.filtered.len(), 1);
         assert_eq!(ids[by_id.filtered[0]], "a-free");
+    }
+
+    #[test]
+    fn env_var_value_reads_set_var() {
+        let _guard = crate::test_support::grok_home_lock();
+        const VAR: &str = "GROK_MODELS_TEST_FETCH_KEY";
+        std::env::remove_var(VAR);
+        assert_eq!(env_var_value(""), "");
+        assert_eq!(env_var_value(VAR), "");
+        std::env::set_var(VAR, "secret-token");
+        assert_eq!(env_var_value(VAR), "secret-token");
+        std::env::set_var(VAR, "");
+        assert_eq!(env_var_value(VAR), "");
+        std::env::remove_var(VAR);
     }
 }

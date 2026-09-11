@@ -2998,7 +2998,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let footer = if env_key.is_empty() {
                 None
             } else {
-                Some(core::env_status_line(&env_key))
+                Some(core::env_requirement_line(&env_key))
             };
             let doc_url = target
                 .get("doc")

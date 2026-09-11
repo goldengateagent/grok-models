@@ -70,7 +70,7 @@ pub fn render_list_text(
             println!("{}", provider_state_line(provider));
             let env = crate::first_env_key_from(provider);
             if !env.is_empty() {
-                println!("    {}", core::env_status_line(&env));
+                println!("    {}", core::env_requirement_line(&env));
             }
         }
         println!();
@@ -225,7 +225,7 @@ pub fn render_models_text() -> Res<i32> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(pid);
-            env_rows.push((env.clone(), core::env_value(&env), pname.to_string()));
+            env_rows.push((env.clone(), core::quoted_truncated_env_value(&env), pname.to_string()));
         }
     }
     if !env_rows.is_empty() {

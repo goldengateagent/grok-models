@@ -33,17 +33,6 @@ pub fn fetch_models_dev() -> Res<Value> {
     fetch_json_url(MODELS_DEV_URL)
 }
 
-/// Value of `env_key` if that env var is set and non-empty.
-pub fn env_api_key(env_key: &str) -> Option<String> {
-    if env_key.is_empty() {
-        return None;
-    }
-    match std::env::var(env_key) {
-        Ok(v) if !v.is_empty() => Some(v),
-        _ => None,
-    }
-}
-
 pub fn http_get_json(url: &str) -> Res<Value> {
     http_get_json_with(url, None)
 }
@@ -182,24 +171,25 @@ pub fn try_fetch_provider_models(
     }
     let url = provider_models_url(base_url);
     let use_auth = provider_auth_models_list(provider.as_deref());
-    let key = if use_auth {
-        env_api_key(env_key)
+    let val = core::env_var_value(env_key);
+    let key = if use_auth && !val.is_empty() {
+        Some(val.as_str())
     } else {
         None
     };
-    let payload = match http_get_json_with(&url, key.as_deref()) {
+    let payload = match http_get_json_with(&url, key) {
         Ok(payload) => payload,
         Err(e) => {
             if use_auth || !is_http_auth_error(&e) {
                 return (None, Some(e.0));
             }
-            let Some(k) = env_api_key(env_key) else {
+            if val.is_empty() {
                 return (None, Some(e.0));
-            };
+            }
             if let Some(p) = provider {
                 p.insert("auth_models_list".into(), Value::Bool(true));
             }
-            match http_get_json_with(&url, Some(&k)) {
+            match http_get_json_with(&url, Some(&val)) {
                 Ok(payload) => payload,
                 Err(retry_e) => return (None, Some(retry_e.0)),
             }
@@ -1266,7 +1256,7 @@ pub fn print_env_requirements(providers_doc: &Value) {
     println!();
     println!("Required environment variables:");
     for env_var in &env_vars {
-        println!("  {}", core::env_status_line(env_var));
+        println!("  {}", core::env_requirement_line(env_var));
     }
 }
 
@@ -1325,20 +1315,6 @@ mod tests {
         assert!(!is_http_auth_error(&crate::SyncError(
             "HTTP failure fetching https://example/models: timeout".into()
         )));
-    }
-
-    #[test]
-    fn env_api_key_reads_set_var() {
-        let _guard = grok_home_lock();
-        const VAR: &str = "GROK_MODELS_TEST_FETCH_KEY";
-        std::env::remove_var(VAR);
-        assert_eq!(env_api_key(""), None);
-        assert_eq!(env_api_key(VAR), None);
-        std::env::set_var(VAR, "secret-token");
-        assert_eq!(env_api_key(VAR).as_deref(), Some("secret-token"));
-        std::env::set_var(VAR, "");
-        assert_eq!(env_api_key(VAR), None);
-        std::env::remove_var(VAR);
     }
 
     fn regex_lite_stamp(s: &str) -> bool {
