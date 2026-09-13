@@ -1608,7 +1608,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 // Model picker built on the filter widget (python `_curses_model_search_win`)
 // ---------------------------------------------------------------------------
 
-const MODEL_NAME_COL_MAX: usize = 32;
+const MODEL_NAME_COL_MAX: usize = 35;
 
 fn model_list_row(
     mname: &str,
@@ -1850,11 +1850,11 @@ impl<'a> AddProviderPicker<'a> {
         let added = self.added_ids();
         let mut rows: Vec<(String, String, bool)> = Vec::new();
         if let Some(obj) = self.api.as_object() {
-            for (pid, pinfo) in obj {
-                if !pinfo.is_object() {
+            for (pid, provider_models_dev) in obj {
+                if !provider_models_dev.is_object() {
                     continue;
                 }
-                let cat_name = pinfo
+                let cat_name = provider_models_dev
                     .get("name")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
@@ -2021,11 +2021,11 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
         .as_object()
         .map(|o| {
             o.iter()
-                .filter(|(_, pinfo)| pinfo.is_object())
-                .map(|(pid, pinfo)| {
+                .filter(|(_, provider_models_dev)| provider_models_dev.is_object())
+                .map(|(pid, provider_models_dev)| {
                     (
                         pid.clone(),
-                        pinfo.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        provider_models_dev.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
                     )
                 })
                 .collect()
@@ -2171,16 +2171,16 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
     let mut catalog: Vec<(String, String, String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = Default::default();
     if let Some(api_obj) = api.as_object() {
-        for (pid, pinfo) in api_obj {
-            if !pinfo.is_object() {
+        for (pid, provider_models_dev) in api_obj {
+            if !provider_models_dev.is_object() {
                 continue;
             }
-            let pname = pinfo
+            let pname = provider_models_dev
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(pid);
-            let api_models = pinfo.get("models").and_then(Value::as_object);
+            let api_models = provider_models_dev.get("models").and_then(Value::as_object);
             for (mid, minfo) in api_models.into_iter().flatten() {
                 let mname = minfo
                     .get("name")

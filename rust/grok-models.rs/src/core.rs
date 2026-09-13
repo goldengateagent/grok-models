@@ -17,8 +17,8 @@ pub fn first_letter_cap(text: &str) -> String {
 }
 
 /// `env[0]` on a models.dev provider object, or `""`.
-pub fn provider_env_key_from_api(pinfo: &Value) -> String {
-    match pinfo.get("env") {
+pub fn provider_env_key_from_api(provider_models_dev: &Value) -> String {
+    match provider_models_dev.get("env") {
         Some(Value::Array(list)) if !list.is_empty() => {
             if let Value::String(s) = &list[0] {
                 s.clone()
@@ -28,6 +28,11 @@ pub fn provider_env_key_from_api(pinfo: &Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// String at `key` on a JSON object, or `""`.
+pub fn get_json_str(obj: &Map<String, Value>, key: &str) -> String {
+    obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 /// `env_key` on a providers.json provider object, or `""`.

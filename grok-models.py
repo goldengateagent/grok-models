@@ -43,6 +43,11 @@ MODELS_DEV_URL = "https://models.dev/api.json"
 # When True, add-provider and sync take model ids from GET {base_url}/models
 # (OpenAI list). When False, the models.dev provider `models` object is the list.
 USE_PROVIDER_MODELS_ENDPOINT = True
+OLLAMA_CLOUD_PROVIDER_ID = "ollama-cloud"
+# Local Ollama OpenAI-compatible endpoint; used instead of the models.dev `api`.
+OLLAMA_CLOUD_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1/"
+# Cloud catalog used after the regular /models update for ollama-cloud.
+OLLAMA_CLOUD_MODELS_BASE_URL = "https://ollama.com/v1"
 
 TOML_SCALAR_FIELDS = (
     "model",
@@ -612,17 +617,15 @@ def _is_http_auth_error(exc: BaseException) -> bool:
     return msg.startswith("HTTP 401 ") or msg.startswith("HTTP 403 ")
 
 
-def provider_auth_models_list(provider: dict | None) -> bool:
+def provider_auth_models_list(provider: dict) -> bool:
     """True when this provider's /models list requires an API key."""
-    if not isinstance(provider, dict):
-        return False
     return provider.get("auth_models_list") is True
 
 
 def try_fetch_provider_models(
     base_url: str,
-    env_key: str = "",
-    provider: dict | None = None,
+    env_key: str,
+    provider: dict,
 ) -> tuple[list[tuple[str, str | None]] | None, str | None]:
     """GET {base_url}/models. Returns (rows, None) or (None, url) on failure.
 
@@ -634,9 +637,21 @@ def try_fetch_provider_models(
     auth_models_list true and retry with the key. Success leaves the flag
     unchanged. Some public lists hang if a key is sent.
     """
-    if not isinstance(base_url, str) or not base_url:
+    pid = provider.get("id")
+    if pid == OLLAMA_CLOUD_PROVIDER_ID:
+        url = provider_models_url(OLLAMA_CLOUD_MODELS_BASE_URL)
+    elif not isinstance(base_url, str) or not base_url:
         return None, None
-    url = provider_models_url(base_url)
+    else:
+        url = provider_models_url(base_url)
+    return _try_fetch_models_url(url, env_key, provider)
+
+
+def _try_fetch_models_url(
+    url: str,
+    env_key: str,
+    provider: dict,
+) -> tuple[list[tuple[str, str | None]] | None, str | None]:
     use_auth = provider_auth_models_list(provider)
     api_key = env_api_key(env_key) if use_auth else ""
     try:
@@ -644,8 +659,7 @@ def try_fetch_provider_models(
     except SyncError as exc:
         if use_auth or not env_api_key(env_key) or not _is_http_auth_error(exc):
             return None, str(exc)
-        if isinstance(provider, dict):
-            provider["auth_models_list"] = True
+        provider["auth_models_list"] = True
         try:
             payload = http_get_json(url, api_key=env_api_key(env_key))
         except SyncError as retry_exc:
@@ -656,8 +670,8 @@ def try_fetch_provider_models(
     return items, None
 
 
-def catalog_models_dict(pinfo: dict) -> dict:
-    models = pinfo.get("models")
+def catalog_models_dict(provider_models_dev: dict) -> dict:
+    models = provider_models_dev.get("models")
     return models if isinstance(models, dict) else {}
 
 
@@ -697,11 +711,12 @@ def seed_models_from_items(
 ) -> dict:
     models_map: dict = {}
     for mid, live_name in items:
+        catalog_id = catalog_lookup_id(provider_id, mid)
         entry: dict = {}
-        name = resolve_model_name(live_name, None, catalog_models, mid)
+        name = resolve_model_name(live_name, None, catalog_models, catalog_id)
         if name:
             entry["name"] = name
-        minfo = catalog_models.get(mid)
+        minfo = catalog_models.get(catalog_id)
         desc = catalog_description(minfo)
         if desc is not None:
             entry["description"] = desc
@@ -731,15 +746,16 @@ def reconcile_models_map(
             m = models_map[mid] = {}
 
         # Name: live /models wins, then the stored value, then the catalog.
+        catalog_id = catalog_lookup_id(provider_id, mid)
         stored = m.get("name") if isinstance(m.get("name"), str) else None
-        name = resolve_model_name(live_name, stored, catalog_models, mid)
+        name = resolve_model_name(live_name, stored, catalog_models, catalog_id)
         if name and m.get("name") != name:
             m["name"] = name
             stats["models_renamed"] = stats.get("models_renamed", 0) + 1
 
         # Fill missing attributes; refresh the description when the catalog
         # carries a different one. User-set values are never overwritten.
-        minfo = catalog_models.get(mid)
+        minfo = catalog_models.get(catalog_id)
         if isinstance(minfo, dict):
             enrich_model_entry(m, minfo, provider_id, provider_npm)
             desc = catalog_description(minfo)
@@ -763,15 +779,66 @@ def reconcile_models_map(
             stats["models_removed"] = stats.get("models_removed", 0) + 1
 
 
+def ollama_cloud_stored_id(live_id: str) -> str:
+    """Stored model id for an ollama.com cloud model.
+
+    `name:tag` → `name:tag-cloud`; otherwise `name:cloud`.
+    """
+    if ":" in live_id:
+        return f"{live_id}-cloud"
+    return f"{live_id}:cloud"
+
+
+def ollama_cloud_catalog_id(stored_id: str) -> str:
+    """models.dev key for a stored ollama-cloud id."""
+    if stored_id.endswith(":cloud"):
+        stem = stored_id[: -len(":cloud")]
+        if ":" not in stem:
+            return stem
+    if stored_id.endswith("-cloud"):
+        stem = stored_id[: -len("-cloud")]
+        if ":" in stem:
+            return stem
+    return stored_id
+
+
+def catalog_lookup_id(provider_id: str, stored_id: str) -> str:
+    if provider_id == OLLAMA_CLOUD_PROVIDER_ID:
+        return ollama_cloud_catalog_id(stored_id)
+    return stored_id
+
+
+def expand_ollama_cloud_items(
+    items: list[tuple[str, str | None]],
+    provider: dict,
+) -> list[tuple[str, str | None]]:
+    """Suffix ollama.com/catalog ids, then append localhost /models that
+    do not end in `cloud`."""
+    out = [(ollama_cloud_stored_id(mid), name) for mid, name in items]
+    local, _ = _try_fetch_models_url(
+        provider_models_url(OLLAMA_CLOUD_LOCAL_BASE_URL), env_key="", provider=provider
+    )
+    if local:
+        for mid, name in local:
+            if not mid.endswith("cloud"):
+                base = name if isinstance(name, str) and name else mid
+                out.append((mid, f"{base} (local)"))
+    return out
+
+
 def authority_items_for_provider(
-    pinfo: dict,
-    base_url: str,
-    quiet: bool = False,
-    env_key: str = "",
-    provider: dict | None = None,
+    provider_models_dev: dict,
+    provider: dict,
+    quiet: bool,
 ) -> tuple[list[tuple[str, str | None]], str | None]:
-    catalog = catalog_models_dict(pinfo)
-    if USE_PROVIDER_MODELS_ENDPOINT and base_url:
+    base_url = get_json_str(provider, "base_url")
+    env_key = get_json_str(provider, "env_key")
+    catalog = catalog_models_dict(provider_models_dev)
+    pid = provider.get("id")
+    fetch_live = USE_PROVIDER_MODELS_ENDPOINT and (
+        bool(base_url) or pid == OLLAMA_CLOUD_PROVIDER_ID
+    )
+    if fetch_live:
         live, err = try_fetch_provider_models(
             base_url, env_key=env_key, provider=provider
         )
@@ -792,12 +859,17 @@ def first_letter_cap(text: str) -> str:
     return text[0].upper() + text[1:]
 
 
-def api_env_key(pinfo: dict) -> str:
+def api_env_key(provider_models_dev: dict) -> str:
     """First env var name for this provider, from a raw models.dev entry."""
-    env = pinfo.get("env")
+    env = provider_models_dev.get("env")
     if isinstance(env, list) and env and isinstance(env[0], str):
         return env[0]
     return ""
+
+
+def get_json_str(obj: dict, key: str) -> str:
+    val = obj.get(key)
+    return val if isinstance(val, str) else ""
 
 
 def first_env_key(provider: dict) -> str:
@@ -852,10 +924,10 @@ def search_providers(models_dev: dict, term: str) -> str | None:
     """Search the models.dev provider list with term; return a chosen id."""
     term_l = term.lower()
     matches: list[tuple[str, str]] = []
-    for pid, pinfo in models_dev.items():
-        if not isinstance(pinfo, dict):
+    for pid, provider_models_dev in models_dev.items():
+        if not isinstance(provider_models_dev, dict):
             continue
-        name = pinfo.get("name") or ""
+        name = provider_models_dev.get("name") or ""
         if _provider_matches(pid, name, term_l):
             matches.append((pid, name))
     if not matches:
@@ -2409,7 +2481,7 @@ def _curses_filter_list_win(
             top = 0
 
 
-_MODEL_NAME_COL_MAX = 32
+_MODEL_NAME_COL_MAX = 35;
 _PROVIDER_NAME_COL_MAX = 25
 _MAIN_PROVIDER_NAME_COL_MAX = 15
 
@@ -2555,9 +2627,9 @@ def _curses_add_provider_win(providers_doc: dict, providers: list, stdscr) -> bo
     # Full catalog — already-added providers stay listed so the sections
     # show what is configured; they are just rendered differently.
     catalog = sorted(
-        (pid, pinfo.get("name") or "")
-        for pid, pinfo in models_dev.items()
-        if isinstance(pinfo, dict)
+        (pid, provider_models_dev.get("name") or "")
+        for pid, provider_models_dev in models_dev.items()
+        if isinstance(provider_models_dev, dict)
     )
     suggested = set(SUGGESTED_PROVIDER_IDS)
 
@@ -2719,11 +2791,11 @@ def _curses_add_model_win(providers_doc: dict, providers: list, stdscr) -> str |
     # listed so the Enabled section can show what is configured.
     catalog = []
     seen = set()
-    for pid, pinfo in models_dev.items():
-        if not isinstance(pinfo, dict):
+    for pid, provider_models_dev in models_dev.items():
+        if not isinstance(provider_models_dev, dict):
             continue
-        pname = pinfo.get("name") or pid
-        api_models = pinfo.get("models") if isinstance(pinfo.get("models"), dict) else {}
+        pname = provider_models_dev.get("name") or pid
+        api_models = provider_models_dev.get("models") if isinstance(provider_models_dev.get("models"), dict) else {}
         for mid, minfo in api_models.items():
             mname = minfo.get("name") if isinstance(minfo, dict) else None
             catalog.append((pid, mid, mname or mid, str(pname)))
@@ -4472,21 +4544,21 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         if not isinstance(provider, dict) or not provider.get("id"):
             continue
         pid = provider["id"]
-        pinfo = models_dev.get(pid)
-        if not isinstance(pinfo, dict):
+        provider_models_dev = models_dev.get(pid)
+        if not isinstance(provider_models_dev, dict):
             if not quiet:
                 print(f"  warning: provider {pid!r} not found in models.dev; skipping")
             stats["providers_missing"] += 1
             continue
-        catalog_models = catalog_models_dict(pinfo)
+        catalog_models = catalog_models_dict(provider_models_dev)
 
-        new_env_key = api_env_key(pinfo)
+        new_env_key = api_env_key(provider_models_dev)
         if new_env_key and provider.get("env_key") != new_env_key:
             provider["env_key"] = new_env_key
-        doc = catalog_doc(pinfo)
+        doc = catalog_doc(provider_models_dev)
         if doc:
             provider["doc"] = doc
-        npm = catalog_npm(pinfo)
+        npm = catalog_npm(provider_models_dev)
         if npm:
             provider["npm"] = npm
 
@@ -4497,30 +4569,28 @@ def update_providers_json(*, quiet: bool = False) -> dict:
 
         # A stored non-empty base_url wins over the catalog; missing/empty
         # backfills from the catalog. /models is fetched from this stored URL.
-        stored = provider.get("base_url")
-        if not isinstance(stored, str):
-            stored = ""
-        catalog_api = pinfo.get("api") or ""
-        if not stored and catalog_api:
+        catalog_api = provider_models_dev.get("api") or ""
+        if pid == OLLAMA_CLOUD_PROVIDER_ID:
+            catalog_api = OLLAMA_CLOUD_LOCAL_BASE_URL
+        if not get_json_str(provider, "base_url") and catalog_api:
             provider["base_url"] = catalog_api
-        base_url = stored or ""
 
         items, err = authority_items_for_provider(
-            pinfo,
-            base_url,
-            quiet=quiet,
-            env_key=first_env_key(provider),
+            provider_models_dev,
             provider=provider,
+            quiet=quiet,
         )
         if err:
             stats["live_fetch_errors"].append(err)
+        if pid == OLLAMA_CLOUD_PROVIDER_ID:
+            items = expand_ollama_cloud_items(items, provider=provider)
         reconcile_models_map(
             models_map,
             items,
             catalog_models,
             stats,
             pid,
-            catalog_npm(pinfo),
+            catalog_npm(provider_models_dev),
         )
         stats["providers_synced"] += 1
 
@@ -4669,42 +4739,46 @@ def add_provider_entry(
         if not quiet:
             print(f"Provider {provider_id!r} already exists.")
         return None
-    pinfo = models_dev.get(provider_id)
-    if not isinstance(pinfo, dict):
+    provider_models_dev = models_dev.get(provider_id)
+    if not isinstance(provider_models_dev, dict):
         fail(f"provider {provider_id!r} not found in models.dev")
-    catalog_models = catalog_models_dict(pinfo)
+    catalog_models = catalog_models_dict(provider_models_dev)
 
-    entry = {
+    provider = {
         "id": provider_id,
-        "name": pinfo.get("name") or provider_id,
+        "name": provider_models_dev.get("name") or provider_id,
     }
-    env = api_env_key(pinfo)
+    env = api_env_key(provider_models_dev)
     if env:
-        entry["env_key"] = env
-    doc = catalog_doc(pinfo)
+        provider["env_key"] = env
+    doc = catalog_doc(provider_models_dev)
     if doc:
-        entry["doc"] = doc
-    npm = catalog_npm(pinfo)
+        provider["doc"] = doc
+    npm = catalog_npm(provider_models_dev)
     if npm:
-        entry["npm"] = npm
-    api_base = pinfo.get("api")
-    if isinstance(api_base, str) and api_base:
-        entry["base_url"] = api_base
+        provider["npm"] = npm
+    if provider_id == OLLAMA_CLOUD_PROVIDER_ID:
+        provider["base_url"] = OLLAMA_CLOUD_LOCAL_BASE_URL
+    else:
+        api_base = provider_models_dev.get("api")
+        if isinstance(api_base, str) and api_base:
+            provider["base_url"] = api_base
     if provider_id.startswith("opencode"):
-        entry["extra_headers"] = {"x-opencode-session": "opencode-default-session-id"}
-        entry["env_http_headers"] = {"x-opencode-session": "TERM_SESSION_ID"}
-    base_url = entry.get("base_url") if isinstance(entry.get("base_url"), str) else ""
+        provider["extra_headers"] = {"x-opencode-session": "opencode-default-session-id"}
+        provider["env_http_headers"] = {"x-opencode-session": "TERM_SESSION_ID"}
     items, fetch_err_url = authority_items_for_provider(
-        pinfo, base_url, quiet=quiet, env_key=env, provider=entry
+        provider_models_dev, provider=provider, quiet=quiet
     )
+    if provider_id == OLLAMA_CLOUD_PROVIDER_ID:
+        items = expand_ollama_cloud_items(items, provider=provider)
     if not items:
         fail(f"provider {provider_id!r} has no models in models.dev")
     models_map = seed_models_from_items(
-        items, catalog_models, provider_id, catalog_npm(pinfo)
+        items, catalog_models, provider_id, catalog_npm(provider_models_dev)
     )
-    entry["enabled"] = True
-    entry["models"] = models_map
-    providers_doc["providers"].append(entry)
+    provider["enabled"] = True
+    provider["models"] = models_map
+    providers_doc["providers"].append(provider)
     dump_providers(PROVIDERS_PATH, providers_doc)
     if not quiet:
         print(f"Added provider {provider_id!r} with {len(models_map)} models (all disabled).")

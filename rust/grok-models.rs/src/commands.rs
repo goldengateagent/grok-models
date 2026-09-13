@@ -559,39 +559,48 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         }
         return Ok(None);
     }
-    let pinfo = match api.get(provider_id) {
+    let provider_models_dev = match api.get(provider_id) {
         Some(p) if p.is_object() => p.clone(),
         _ => return fail(format!("provider {} not found in models.dev", core::py_repr(provider_id))),
     };
-    let catalog = pinfo
+    let catalog = provider_models_dev
         .get("models")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut entry = Map::new();
-    entry.insert("id".into(), Value::String(provider_id.to_string()));
-    let name_val = pinfo.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
+    let mut provider = Map::new();
+    provider.insert("id".into(), Value::String(provider_id.to_string()));
+    let name_val = provider_models_dev.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
     let name_val = if crate::truthy(Some(&name_val)) {
         name_val
     } else {
         Value::String(provider_id.to_string())
     };
-    entry.insert("name".into(), name_val);
-    let env = core::provider_env_key_from_api(&pinfo);
+    provider.insert("name".into(), name_val);
+    let env = core::provider_env_key_from_api(&provider_models_dev);
     if !env.is_empty() {
-        entry.insert("env_key".into(), Value::String(env.clone()));
+        provider.insert("env_key".into(), Value::String(env.clone()));
     }
-    if let Some(doc_url) = jsonio::catalog_doc(&pinfo) {
-        entry.insert("doc".into(), Value::String(doc_url.to_string()));
+    if let Some(doc_url) = jsonio::catalog_doc(&provider_models_dev) {
+        provider.insert("doc".into(), Value::String(doc_url.to_string()));
     }
-    if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
-        entry.insert("npm".into(), Value::String(provider_npm.to_string()));
+    if let Some(provider_npm) = jsonio::catalog_npm(&provider_models_dev) {
+        provider.insert("npm".into(), Value::String(provider_npm.to_string()));
     }
     // Seed the provider-level base_url override from the catalog so the
     // config menu shows the configured endpoint even before any edit.
-    let api_url = pinfo.get("api").and_then(Value::as_str).unwrap_or_default();
+    // ollama-cloud talks to the local daemon, not the models.dev `api`.
+    let api_url = if provider_id == crate::sync::OLLAMA_CLOUD_PROVIDER_ID {
+        crate::sync::OLLAMA_CLOUD_LOCAL_BASE_URL.to_string()
+    } else {
+        provider_models_dev
+            .get("api")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     if !api_url.is_empty() {
-        entry.insert("base_url".into(), Value::String(api_url.to_string()));
+        provider.insert("base_url".into(), Value::String(api_url.clone()));
     }
     if provider_id.starts_with("opencode") {
         let mut extra = Map::new();
@@ -599,21 +608,22 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
             "x-opencode-session".into(),
             Value::String("opencode-default-session-id".into()),
         );
-        entry.insert("extra_headers".into(), Value::Object(extra));
+        provider.insert("extra_headers".into(), Value::Object(extra));
         let mut env_headers = Map::new();
         env_headers.insert(
             "x-opencode-session".into(),
             Value::String("TERM_SESSION_ID".into()),
         );
-        entry.insert("env_http_headers".into(), Value::Object(env_headers));
+        provider.insert("env_http_headers".into(), Value::Object(env_headers));
     }
-    let (items, fetch_err_url) = crate::sync::authority_items_for_provider(
-        &pinfo,
-        api_url,
+    let (mut items, fetch_err_url) = crate::sync::authority_items_for_provider(
+        &provider_models_dev,
+        &mut provider,
         quiet,
-        &env,
-        Some(&mut entry),
     );
+    if provider_id == crate::sync::OLLAMA_CLOUD_PROVIDER_ID {
+        items = crate::sync::expand_ollama_cloud_items(items, &mut provider);
+    }
     if items.is_empty() {
         return fail(format!(
             "provider {} has no models in models.dev",
@@ -624,16 +634,16 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         &items,
         &catalog,
         provider_id,
-        jsonio::catalog_npm(&pinfo),
+        jsonio::catalog_npm(&provider_models_dev),
     );
     let n_models = models_map.len();
-    entry.insert("enabled".into(), Value::Bool(true));
-    entry.insert("models".into(), Value::Object(models_map));
+    provider.insert("enabled".into(), Value::Bool(true));
+    provider.insert("models".into(), Value::Object(models_map));
 
     doc.get_mut("providers")
         .and_then(Value::as_array_mut)
         .unwrap()
-        .push(Value::Object(entry));
+        .push(Value::Object(provider));
     jsonio::dump_providers(&paths::providers_path(), doc)?;
     if !quiet {
         println!(
@@ -657,11 +667,11 @@ pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
     let term_l = term.to_lowercase();
     let mut matches: Vec<(String, String)> = Vec::new();
     if let Some(obj) = api.as_object() {
-        for (pid, pinfo) in obj {
-            if !pinfo.is_object() {
+        for (pid, provider_models_dev) in obj {
+            if !provider_models_dev.is_object() {
                 continue;
             }
-            let name = pinfo.get("name").and_then(Value::as_str).unwrap_or("");
+            let name = provider_models_dev.get("name").and_then(Value::as_str).unwrap_or("");
             if pid.to_lowercase().contains(&term_l) || name.to_lowercase().contains(&term_l) {
                 matches.push((pid.clone(), name.to_string()));
             }
@@ -940,6 +950,46 @@ mod tests {
             "empty catalog npm must not be stored"
         );
 
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+    }
+
+    #[test]
+    fn add_provider_entry_uses_local_base_url_for_ollama_cloud() {
+        let _guard = crate::test_support::grok_home_lock();
+        let pid = std::process::id();
+        let grok = std::env::temp_dir().join(format!("gm-add-ollama-grok-{pid}"));
+        let codex = std::env::temp_dir().join(format!("gm-add-ollama-codex-{pid}"));
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+
+        let api = serde_json::json!({
+            "ollama-cloud": {
+                "name": "Ollama Cloud",
+                "api": "https://ollama.com/v1",
+                "env": ["OLLAMA_API_KEY"],
+                "models": {
+                    "gemma4:31b": { "name": "Gemma 4" },
+                    "local-cloud": { "name": "Should Filter" }
+                }
+            }
+        });
+        let mut doc = serde_json::json!({ "providers": [] });
+        add_provider_entry(&mut doc, &api, "ollama-cloud", true).expect("add provider");
+        let prov = doc["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "ollama-cloud")
+            .expect("provider present");
+        assert_eq!(
+            prov["base_url"],
+            crate::sync::OLLAMA_CLOUD_LOCAL_BASE_URL
+        );
         let _ = std::fs::remove_dir_all(&grok);
         let _ = std::fs::remove_dir_all(&codex);
     }

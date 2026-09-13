@@ -12,6 +12,11 @@ pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 /// When true, add-provider and sync take model ids from GET {base_url}/models
 /// (OpenAI list). When false, the models.dev provider `models` object is the list.
 pub const USE_PROVIDER_MODELS_ENDPOINT: bool = true;
+pub const OLLAMA_CLOUD_PROVIDER_ID: &str = "ollama-cloud";
+/// Local Ollama OpenAI-compatible endpoint; used instead of the models.dev `api`.
+pub const OLLAMA_CLOUD_LOCAL_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
+/// Cloud catalog used after the regular /models update for ollama-cloud.
+pub const OLLAMA_CLOUD_MODELS_BASE_URL: &str = "https://ollama.com/v1";
 
 #[derive(Default)]
 pub struct Stats {
@@ -147,11 +152,8 @@ fn is_http_auth_error(err: &crate::SyncError) -> bool {
     err.0.starts_with("HTTP 401 ") || err.0.starts_with("HTTP 403 ")
 }
 
-fn provider_auth_models_list(provider: Option<&Map<String, Value>>) -> bool {
-    matches!(
-        provider.and_then(|p| p.get("auth_models_list")),
-        Some(Value::Bool(true))
-    )
+fn provider_auth_models_list(provider: &Map<String, Value>) -> bool {
+    matches!(provider.get("auth_models_list"), Some(Value::Bool(true)))
 }
 
 /// GET {base_url}/models. Returns (rows, None) or (None, Some(url)) on failure.
@@ -164,13 +166,24 @@ fn provider_auth_models_list(provider: Option<&Map<String, Value>>) -> bool {
 pub fn try_fetch_provider_models(
     base_url: &str,
     env_key: &str,
-    provider: Option<&mut Map<String, Value>>,
+    provider: &mut Map<String, Value>,
 ) -> (Option<Vec<(String, Option<String>)>>, Option<String>) {
-    if base_url.is_empty() {
+    let url = if is_ollama_cloud_provider(provider) {
+        provider_models_url(OLLAMA_CLOUD_MODELS_BASE_URL)
+    } else if base_url.is_empty() {
         return (None, None);
-    }
-    let url = provider_models_url(base_url);
-    let use_auth = provider_auth_models_list(provider.as_deref());
+    } else {
+        provider_models_url(base_url)
+    };
+    try_fetch_models_url(&url, env_key, provider)
+}
+
+fn try_fetch_models_url(
+    url: &str,
+    env_key: &str,
+    provider: &mut Map<String, Value>,
+) -> (Option<Vec<(String, Option<String>)>>, Option<String>) {
+    let use_auth = provider_auth_models_list(provider);
     let val = core::env_var_value(env_key);
     let key = if use_auth && !val.is_empty() {
         Some(val.as_str())
@@ -186,9 +199,7 @@ pub fn try_fetch_provider_models(
             if val.is_empty() {
                 return (None, Some(e.0));
             }
-            if let Some(p) = provider {
-                p.insert("auth_models_list".into(), Value::Bool(true));
-            }
+            provider.insert("auth_models_list".into(), Value::Bool(true));
             match http_get_json_with(&url, Some(&val)) {
                 Ok(payload) => payload,
                 Err(retry_e) => return (None, Some(retry_e.0)),
@@ -201,8 +212,8 @@ pub fn try_fetch_provider_models(
     }
 }
 
-fn catalog_models_map(pinfo: &Value) -> Map<String, Value> {
-    pinfo
+fn catalog_models_map(provider_models_dev: &Value) -> Map<String, Value> {
+    provider_models_dev
         .get("models")
         .and_then(Value::as_object)
         .cloned()
@@ -354,11 +365,12 @@ pub fn seed_models_from_items(
 ) -> Map<String, Value> {
     let mut models_map = Map::new();
     for (mid, live_name) in items {
+        let catalog_id = catalog_lookup_id(provider_id, mid);
         let mut entry = Map::new();
-        if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, mid) {
+        if let Some(name) = resolve_model_name(live_name.as_deref(), None, catalog, catalog_id) {
             entry.insert("name".into(), Value::String(name));
         }
-        if let Some(minfo) = catalog.get(mid) {
+        if let Some(minfo) = catalog.get(catalog_id) {
             crate::jsonio::seed_description(&mut entry, minfo);
             enrich_model_entry(&mut entry, minfo, provider_id, provider_npm);
         }
@@ -388,12 +400,16 @@ fn reconcile_models_map(
             *slot = Value::Object(Map::new());
         }
         let obj = slot.as_object_mut().unwrap();
+        let catalog_id = catalog_lookup_id(provider_id, mid);
 
         // Name: live /models wins, then the stored value, then the catalog.
         let stored = obj.get("name").and_then(Value::as_str).map(str::to_string);
-        if let Some(name) =
-            resolve_model_name(live_name.as_deref(), stored.as_deref(), catalog, mid)
-        {
+        if let Some(name) = resolve_model_name(
+            live_name.as_deref(),
+            stored.as_deref(),
+            catalog,
+            catalog_id,
+        ) {
             if obj.get("name") != Some(&Value::String(name.clone())) {
                 obj.insert("name".into(), Value::String(name));
                 stats.models_renamed += 1;
@@ -402,7 +418,7 @@ fn reconcile_models_map(
 
         // Fill missing attributes; refresh the description when the catalog
         // carries a different one. User-set values are never overwritten.
-        if let Some(minfo) = catalog.get(mid) {
+        if let Some(minfo) = catalog.get(catalog_id) {
             if minfo.is_object() {
                 enrich_model_entry(obj, minfo, provider_id, provider_npm);
                 if let Some(desc) = crate::jsonio::catalog_description(minfo) {
@@ -436,16 +452,84 @@ fn reconcile_models_map(
     }
 }
 
+/// Stored model id for an ollama.com cloud model.
+/// `name:tag` → `name:tag-cloud`; otherwise `name:cloud`.
+pub fn ollama_cloud_stored_id(live_id: &str) -> String {
+    if live_id.contains(':') {
+        format!("{live_id}-cloud")
+    } else {
+        format!("{live_id}:cloud")
+    }
+}
+
+/// models.dev key for a stored ollama-cloud id. Inverse of `ollama_cloud_stored_id`.
+pub fn ollama_cloud_catalog_id(stored_id: &str) -> &str {
+    if let Some(stem) = stored_id.strip_suffix(":cloud") {
+        if !stem.contains(':') {
+            return stem;
+        }
+    }
+    if let Some(stem) = stored_id.strip_suffix("-cloud") {
+        if stem.contains(':') {
+            return stem;
+        }
+    }
+    stored_id
+}
+
+fn catalog_lookup_id<'a>(provider_id: &str, stored_id: &'a str) -> &'a str {
+    if provider_id == OLLAMA_CLOUD_PROVIDER_ID {
+        ollama_cloud_catalog_id(stored_id)
+    } else {
+        stored_id
+    }
+}
+
+fn is_ollama_cloud_provider(provider: &Map<String, Value>) -> bool {
+    matches!(
+        provider.get("id").and_then(Value::as_str),
+        Some(OLLAMA_CLOUD_PROVIDER_ID)
+    )
+}
+
+/// Suffix ollama.com/catalog ids, then append localhost /models that do not
+/// end in `cloud`.
+pub fn expand_ollama_cloud_items(
+    items: Vec<(String, Option<String>)>,
+    provider: &mut Map<String, Value>,
+) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = items
+        .into_iter()
+        .map(|(mid, name)| (ollama_cloud_stored_id(&mid), name))
+        .collect();
+    let url = provider_models_url(OLLAMA_CLOUD_LOCAL_BASE_URL);
+    let (local, _) = try_fetch_models_url(&url, "", provider);
+    if let Some(local) = local {
+        for (mid, name) in local {
+            if !mid.ends_with("cloud") {
+                let labeled = match name {
+                    Some(n) if !n.is_empty() => format!("{n} (local)"),
+                    _ => format!("{mid} (local)"),
+                };
+                out.push((mid, Some(labeled)));
+            }
+        }
+    }
+    out
+}
+
 pub fn authority_items_for_provider(
-    pinfo: &Value,
-    base_url: &str,
+    provider_models_dev: &Value,
+    provider: &mut Map<String, Value>,
     quiet: bool,
-    env_key: &str,
-    provider: Option<&mut Map<String, Value>>,
 ) -> (Vec<(String, Option<String>)>, Option<String>) {
-    let catalog = catalog_models_map(pinfo);
-    if USE_PROVIDER_MODELS_ENDPOINT && !base_url.is_empty() {
-        let (live, err) = try_fetch_provider_models(base_url, env_key, provider);
+    let base_url = core::get_json_str(provider, "base_url");
+    let env_key = core::get_json_str(provider, "env_key");
+    let catalog = catalog_models_map(provider_models_dev);
+    let fetch_live = USE_PROVIDER_MODELS_ENDPOINT
+        && (!base_url.is_empty() || is_ollama_cloud_provider(provider));
+    if fetch_live {
+        let (live, err) = try_fetch_provider_models(&base_url, &env_key, provider);
         if let Some(live) = live {
             return (live, None);
         }
@@ -510,7 +594,7 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
             continue;
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
-        let Some(pinfo) = models_dev.get(&pid).filter(|p| p.is_object()).cloned() else {
+        let Some(provider_models_dev) = models_dev.get(&pid).filter(|p| p.is_object()).cloned() else {
             if !quiet {
                 println!(
                     "  warning: provider {} not found in models.dev; skipping",
@@ -521,74 +605,65 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
             continue;
         };
 
-        let catalog_models = catalog_models_map(&pinfo);
+        let catalog_models = catalog_models_map(&provider_models_dev);
 
         // Backfill provider-level fields from the catalog: env key, npm,
         // and a missing base_url (a stored non-empty base_url override wins).
-        let new_env_key = core::provider_env_key_from_api(&pinfo);
-        let effective_base_url: String;
-        let env_key: String;
+        let new_env_key = core::provider_env_key_from_api(&provider_models_dev);
         {
-            let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
+            let provider = find_provider_mut(&mut doc, &pid).unwrap();
             if !new_env_key.is_empty()
-                && prov_obj.get("env_key") != Some(&Value::String(new_env_key.clone()))
+                && provider.get("env_key") != Some(&Value::String(new_env_key.clone()))
             {
-                prov_obj.insert("env_key".into(), Value::String(new_env_key.clone()));
+                provider.insert("env_key".into(), Value::String(new_env_key.clone()));
             }
-            if let Some(doc_url) = jsonio::catalog_doc(&pinfo) {
-                prov_obj.insert("doc".into(), Value::String(doc_url.to_string()));
+            if let Some(doc_url) = jsonio::catalog_doc(&provider_models_dev) {
+                provider.insert("doc".into(), Value::String(doc_url.to_string()));
             }
-            if let Some(provider_npm) = jsonio::catalog_npm(&pinfo) {
-                prov_obj.insert("npm".into(), Value::String(provider_npm.to_string()));
+            if let Some(provider_npm) = jsonio::catalog_npm(&provider_models_dev) {
+                provider.insert("npm".into(), Value::String(provider_npm.to_string()));
             }
-            if !prov_obj.get("models").is_some_and(Value::is_object) {
-                prov_obj.insert("models".into(), Value::Object(Map::new()));
+            if !provider.get("models").is_some_and(Value::is_object) {
+                provider.insert("models".into(), Value::Object(Map::new()));
             }
-            let catalog_url = pinfo.get("api").and_then(Value::as_str).unwrap_or("");
-            match prov_obj.get("base_url").and_then(Value::as_str) {
-                Some(v) if !v.is_empty() => effective_base_url = v.to_string(),
-                _ => {
-                    if !catalog_url.is_empty() {
-                        prov_obj.insert(
-                            "base_url".into(),
-                            Value::String(catalog_url.to_string()),
-                        );
-                    }
-                    effective_base_url = catalog_url.to_string();
-                }
-            }
-            env_key = match prov_obj.get("env_key").and_then(Value::as_str) {
-                Some(s) => s.to_string(),
-                None => String::new(),
+            let catalog_url = if pid == OLLAMA_CLOUD_PROVIDER_ID {
+                OLLAMA_CLOUD_LOCAL_BASE_URL.to_string()
+            } else {
+                provider_models_dev
+                    .get("api")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
             };
+            if core::get_json_str(provider, "base_url").is_empty() && !catalog_url.is_empty() {
+                provider.insert("base_url".into(), Value::String(catalog_url));
+            }
         }
 
         // Bring the stored model list in line with the authoritative one:
         // add/remove/rename entries, then update each entry's attributes
         // from the current catalog. A 401/403 on an unauthenticated
         // /models fetch sets auth_models_list on the provider.
-        let (items, err) = {
-            let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
-            authority_items_for_provider(
-                &pinfo,
-                &effective_base_url,
-                quiet,
-                &env_key,
-                Some(prov_obj),
-            )
+        let (mut items, err) = {
+            let provider = find_provider_mut(&mut doc, &pid).unwrap();
+            authority_items_for_provider(&provider_models_dev, provider, quiet)
         };
         if let Some(e) = err {
             stats.live_fetch_errors.push(e);
         }
-        let prov_obj = find_provider_mut(&mut doc, &pid).unwrap();
-        let models_map = prov_obj.get_mut("models").unwrap().as_object_mut().unwrap();
+        if pid == OLLAMA_CLOUD_PROVIDER_ID {
+            let provider = find_provider_mut(&mut doc, &pid).unwrap();
+            items = expand_ollama_cloud_items(items, provider);
+        }
+        let provider = find_provider_mut(&mut doc, &pid).unwrap();
+        let models_map = provider.get_mut("models").unwrap().as_object_mut().unwrap();
         reconcile_models_map(
             models_map,
             &items,
             &catalog_models,
             &mut stats,
             &pid,
-            jsonio::catalog_npm(&pinfo),
+            jsonio::catalog_npm(&provider_models_dev),
         );
         stats.providers_synced += 1;
     }
@@ -1293,12 +1368,11 @@ mod tests {
     #[test]
     fn provider_auth_models_list_only_true() {
         let mut p = Map::new();
-        assert!(!provider_auth_models_list(Some(&p)));
+        assert!(!provider_auth_models_list(&p));
         p.insert("auth_models_list".into(), Value::Bool(false));
-        assert!(!provider_auth_models_list(Some(&p)));
+        assert!(!provider_auth_models_list(&p));
         p.insert("auth_models_list".into(), Value::Bool(true));
-        assert!(provider_auth_models_list(Some(&p)));
-        assert!(!provider_auth_models_list(None));
+        assert!(provider_auth_models_list(&p));
     }
 
     #[test]
@@ -1315,6 +1389,38 @@ mod tests {
         assert!(!is_http_auth_error(&crate::SyncError(
             "HTTP failure fetching https://example/models: timeout".into()
         )));
+    }
+
+    #[test]
+    fn ollama_cloud_stored_id_appends_cloud_suffix() {
+        assert_eq!(ollama_cloud_stored_id("glm-5.3"), "glm-5.3:cloud");
+        assert_eq!(ollama_cloud_stored_id("gemma4:31b"), "gemma4:31b-cloud");
+        assert_eq!(ollama_cloud_stored_id("gpt-oss:20b"), "gpt-oss:20b-cloud");
+    }
+
+    #[test]
+    fn ollama_cloud_catalog_id_inverts_stored_id() {
+        assert_eq!(ollama_cloud_catalog_id("glm-5.3:cloud"), "glm-5.3");
+        assert_eq!(ollama_cloud_catalog_id("gemma4:31b-cloud"), "gemma4:31b");
+        assert_eq!(ollama_cloud_catalog_id("gpt-oss:20b-cloud"), "gpt-oss:20b");
+        assert_eq!(ollama_cloud_catalog_id("local"), "local");
+        assert_eq!(ollama_cloud_catalog_id("gemma4:31b"), "gemma4:31b");
+    }
+
+    #[test]
+    fn seed_ollama_cloud_backfills_from_unsuffixed_catalog_id() {
+        let catalog = serde_json::json!({
+            "gemma4:31b": { "name": "Gemma 4" }
+        });
+        let catalog = catalog.as_object().unwrap().clone();
+        let items = vec![
+            ("gemma4:31b-cloud".into(), None),
+            ("local".into(), Some("Local".into())),
+        ];
+        let map = seed_models_from_items(&items, &catalog, OLLAMA_CLOUD_PROVIDER_ID, None);
+        assert_eq!(map["gemma4:31b-cloud"]["name"], "Gemma 4");
+        assert_eq!(map["local"]["name"], "Local");
+        assert_eq!(map["local"].get("description"), None);
     }
 
     fn regex_lite_stamp(s: &str) -> bool {
