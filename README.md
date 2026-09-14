@@ -20,6 +20,8 @@ transform the same data to configure Codex custom models.
 [Modified configuration files](#modified-configuration-files)
 [Agentic conding](#agentic-coding)
 
+![grok-models TUI](images/grok-models.png)
+
 </div>
 
 ---
