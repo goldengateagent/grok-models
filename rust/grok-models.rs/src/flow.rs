@@ -37,11 +37,9 @@ pub fn cmd_config() -> Res<i32> {
     let _ = providers; // silence unused
 
     if changed {
-        let (path, stats) = sync::run_sync()?;
-        if let Some(path) = path {
-            sync::print_sync_report(&stats, &path, &doc);
-            sync::print_relaunch();
-        }
+        let path = sync::update_config_toml()?;
+        sync::print_sync_report(&path, &doc);
+        sync::print_relaunch();
     }
     Ok(0)
 }

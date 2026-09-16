@@ -69,6 +69,197 @@ OPTIONAL_META_FIELDS = (
 
 _models_dev_api = None
 
+# Keys in both maps stay sorted ascending.
+BENCHMARKS = {
+    "claude-4-5-haiku-reasoning": {"name": "Claude 4.5 Haiku (Reasoning)", "index": 17.6, "coding": 43.9},
+    "claude-4-5-sonnet-thinking": {"name": "Claude 4.5 Sonnet (Reasoning)", "index": 21.2, "coding": 52.1},
+    "claude-4-sonnet-thinking": {"name": "Claude 4 Sonnet (Reasoning)", "index": 18.9, "coding": 37.6},
+    "claude-fable-5": {"name": "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)", "index": 49.7, "coding": 76.5},
+    "claude-fable-5-1": {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)", "index": 53.4, "coding": 81.6},
+    "claude-opus-4-5": {"name": "Claude Opus 4.5 (Non-reasoning)", "index": 23.7, "coding": 0.0},
+    "claude-opus-4-6": {"name": "Claude Opus 4.6 (Non-reasoning, High Effort)", "index": 26.4, "coding": 0.0},
+    "claude-opus-4-7": {"name": "Claude Opus 4.7 (Adaptive Reasoning, Max Effort)", "index": 40.7, "coding": 73.6},
+    "claude-opus-4-8": {"name": "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)", "index": 42, "coding": 74.3},
+    "claude-opus-5": {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)", "index": 50.7, "coding": 78},
+    "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6 (Non-reasoning, High Effort)", "index": 24.7, "coding": 0.0},
+    "claude-sonnet-5": {"name": "Claude Sonnet 5 (Adaptive Reasoning, Max Effort)", "index": 38.4, "coding": 71.5},
+    "deepseek-v4-1-flash": {"name": "DeepSeek V4.1 Flash (Reasoning, Max Effort)", "index": 39.5, "coding": 0.0},
+    "deepseek-v4-flash": {"name": "DeepSeek V4 Flash 0731 (Reasoning, Max Effort)", "index": 34.5, "coding": 69.1},
+    "deepseek-v4-flash-vision": {"name": "DeepSeek V4 Flash Vision (Reasoning, Max Effort)", "index": 35, "coding": 65},
+    "deepseek-v4-pro": {"name": "DeepSeek V4 Pro 0813 (Reasoning, Max Effort)", "index": 36.3, "coding": 68.8},
+    "gemini-3-6-flash": {"name": "Gemini 3.6 Flash (high)", "index": 34.3, "coding": 69.2},
+    "gemini-3-7-flash": {"name": "Gemini 3.7 Flash (high)", "index": 39.4, "coding": 76.1},
+    "gemini-3-8-flash": {"name": "Gemini 3.8 Flash (high)", "index": 41.2, "coding": 76.3},
+    "gemma-4-31b": {"name": "Gemma 4 31B (Reasoning)", "index": 15.4, "coding": 43.4},
+    "glm-5-2": {"name": "GLM-5.2 (max)", "index": 34, "coding": 68.8},
+    "glm-5-3": {"name": "GLM-5.3 (max)", "index": 44.9, "coding": 74.8},
+    "glm-5-3-flash": {"name": "GLM-5.3-Flash", "index": 41.9, "coding": 71.5},
+    "gpt-4": {"name": "GPT-4", "index": 6.7, "coding": 13.1},
+    "gpt-4-1": {"name": "GPT-4.1", "index": 12.7, "coding": 0.0},
+    "gpt-4o": {"name": "GPT-4o (Nov '24)", "index": 8.4, "coding": 0.0},
+    "gpt-4o-mini": {"name": "GPT-4o mini", "index": 6.7, "coding": 11.4},
+    "gpt-5": {"name": "GPT-5 (high)", "index": 23, "coding": 37.8},
+    "gpt-5-1": {"name": "GPT-5.1 (high)", "index": 24.7, "coding": 49.4},
+    "gpt-5-2": {"name": "GPT-5.2 (xhigh)", "index": 30.4, "coding": 0.0},
+    "gpt-5-4": {"name": "GPT-5.4 (xhigh)", "index": 39, "coding": 71.1},
+    "gpt-5-5": {"name": "GPT-5.5 (xhigh)", "index": 38.6, "coding": 74.9},
+    "gpt-5-6-luna": {"name": "GPT-5.6 Luna (max)", "index": 37.5, "coding": 71.4},
+    "gpt-5-6-sol": {"name": "GPT-5.6 Sol (max)", "index": 47.1, "coding": 77.4},
+    "gpt-5-6-terra": {"name": "GPT-5.6 Terra (max)", "index": 42.3, "coding": 76.7},
+    "gpt-6-astra": {"name": "GPT-6 Astra (max)", "index": 52.8, "coding": 76.9},
+    "gpt-oss-120b": {"name": "gpt-oss-120b (high)", "index": 12.3, "coding": 30.4},
+    "gpt-oss-20b": {"name": "gpt-oss-20b (high)", "index": 9, "coding": 20.7},
+    "grok-4-5": {"name": "Grok 4.5 (high)", "index": 39.1, "coding": 72.4},
+    "grok-4-6": {"name": "Grok 4.6 (high)", "index": 44.4, "coding": 76.8},
+    "hy3": {"name": "Hy3", "index": 25.8, "coding": 58.8},
+    "kimi-k2-7-code": {"name": "Kimi K2.7 Code", "index": 26.3, "coding": 60.8},
+    "kimi-k3": {"name": "Kimi K3 (max)", "index": 43.8, "coding": 76.2},
+    "ling-3-0-flash": {"name": "Ling 3.0 Flash", "index": 20.6, "coding": 50.6},
+    "ling-3-0-flash-vl": {"name": "Ling-3.0-flash-VL", "index": 25, "coding": 57},
+    "longcat-2-0": {"name": "LongCat 2.0", "index": 19.7, "coding": 45.3},
+    "mimo-v2-5-0424": {"name": "MiMo-V2.5", "index": 22.3, "coding": 56.8},
+    "minimax-m3": {"name": "MiniMax-M3", "index": 29.6, "coding": 58.6},
+    "muse-spark-1-2": {"name": "Muse Spark 1.2 (xhigh)", "index": 39.8, "coding": 72.2},
+    "muse-spark-1-3": {"name": "Muse Spark 1.3 (max)", "index": 48.2, "coding": 75.8},
+    "nemotron-3-5-lightning": {"name": "Nemotron 3.5 Lightning", "index": 13.6, "coding": 26.8},
+    "north-mini-code": {"name": "North Mini Code", "index": 9.9, "coding": 36.5},
+    "nvidia-nemotron-3-ultra-550b-a55b": {"name": "Nemotron 3 Ultra 550B A55B (Reasoning)", "index": 23.4, "coding": 49.3},
+    "qwen3-7-max": {"name": "Qwen3.7 Max", "index": 29.9, "coding": 66},
+    "qwen3-7-plus": {"name": "Qwen3.7 Plus", "index": 25.8, "coding": 55.9},
+    "qwen3-8-flash-next": {"name": "Qwen3.8-Flash-Next", "index": 39.9, "coding": 73.1},
+    "qwen3-8-max": {"name": "Qwen3.8 Max (0902)", "index": 45.4, "coding": 76.2},
+}
+
+MODEL_TO_SLUG = {
+    "anthropic/claude-fable-5": "claude-fable-5",
+    "anthropic/claude-fable-5.1": "claude-fable-5-1",
+    "anthropic/claude-opus-5": "claude-opus-5",
+    "anthropic/claude-sonnet-5": "claude-sonnet-5",
+    "claude-fable-5": "claude-fable-5",
+    "claude-fable-5-1": "claude-fable-5-1",
+    "claude-haiku-4-5": "claude-4-5-haiku-reasoning",
+    "claude-opus-4-5": "claude-opus-4-5",
+    "claude-opus-4-6": "claude-opus-4-6",
+    "claude-opus-4-7": "claude-opus-4-7",
+    "claude-opus-4-8": "claude-opus-4-8",
+    "claude-opus-5": "claude-opus-5",
+    "claude-sonnet-4": "claude-4-sonnet-thinking",
+    "claude-sonnet-4-5": "claude-4-5-sonnet-thinking",
+    "claude-sonnet-4-6": "claude-sonnet-4-6",
+    "claude-sonnet-5": "claude-sonnet-5",
+    "cohere/north-mini-code:free": "north-mini-code",
+    "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4-1-flash",
+    "deepseek-v4-flash": "deepseek-v4-flash",
+    "deepseek-v4-flash-free": "deepseek-v4-flash",
+    "deepseek-v4-flash-vision-exp": "deepseek-v4-flash-vision",
+    "deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek-v4.1-flash": "deepseek-v4-1-flash",
+    "deepseek-v4.1-flash:cloud": "deepseek-v4-1-flash",
+    "deepseek/deepseek-v4.1-flash": "deepseek-v4-1-flash",
+    "dots-studio/dots-3-note-preview:free": "",
+    "gemini-3.6-flash": "gemini-3-6-flash",
+    "gemini-3.7-flash": "gemini-3-7-flash",
+    "gemini-3.8-flash": "gemini-3-8-flash",
+    "gemma4:31b-cloud": "gemma-4-31b",
+    "glm-5.2": "glm-5-2",
+    "glm-5.3": "glm-5-3",
+    "glm-5.3-flash": "glm-5-3-flash",
+    "glm-5.3-flash:cloud": "glm-5-3-flash",
+    "glm-5.3:cloud": "glm-5-3",
+    "google/gemini-3.8-flash": "gemini-3-8-flash",
+    "google/gemma-4-31b-it": "gemma-4-31b",
+    "google/gemma-4-31b-it:free": "gemma-4-31b",
+    "gpt-5.6-luna": "gpt-5-6-luna",
+    "gpt-5.6-sol": "gpt-5-6-sol",
+    "gpt-5.6-terra": "gpt-5-6-terra",
+    "gpt-6-astra": "gpt-6-astra",
+    "gpt-oss:120b-cloud": "gpt-oss-120b",
+    "grok-4.5": "grok-4-5",
+    "grok-4.6": "grok-4-6",
+    "hy3": "hy3",
+    "inclusionai/ling-3.0-flash-fin:free": "ling-3-0-flash",
+    "inclusionai/ling-3.0-flash-sante:free": "ling-3-0-flash",
+    "inclusionai/ling-3.0-flash-vl:free": "ling-3-0-flash-vl",
+    "kimi-k2.7-code": "kimi-k2-7-code",
+    "kimi-k2.7-code:cloud": "kimi-k2-7-code",
+    "kimi-k3": "kimi-k3",
+    "kimi-k3:cloud": "kimi-k3",
+    "ling-3.0-flash-fin-free": "ling-3-0-flash",
+    "liquid/lfm-2.5-2.6b:free": "",
+    "longcat-2.0": "longcat-2-0",
+    "meta/muse-spark-1.2": "muse-spark-1-2",
+    "meta/muse-spark-1.2-contributor": "muse-spark-1-2",
+    "meta/muse-spark-1.3": "muse-spark-1-3",
+    "meta/muse-spark-1.3-contributor": "muse-spark-1-3",
+    "mimo-v2.5": "mimo-v2-5-0424",
+    "mimo-v2.5-free": "mimo-v2-5-0424",
+    "minimax-m3": "minimax-m3",
+    "minimax-m3:cloud": "minimax-m3",
+    "minimax/minimax-m3": "minimax-m3",
+    "moonshotai/kimi-k3": "kimi-k3",
+    "muse-spark-1.2": "muse-spark-1-2",
+    "muse-spark-1.2-contributor": "muse-spark-1-2",
+    "muse-spark-1.2-contributor-free": "muse-spark-1-2",
+    "muse-spark-1.3": "muse-spark-1-3",
+    "muse-spark-1.3-contributor": "muse-spark-1-3",
+    "muse-spark-1.3-contributor-free": "muse-spark-1-3",
+    "nemotron-3-ultra-free": "nvidia-nemotron-3-ultra-550b-a55b",
+    "nemotron-3-ultra:cloud": "nvidia-nemotron-3-ultra-550b-a55b",
+    "nemotron-3.5-lightning-free": "nemotron-3-5-lightning",
+    "nex-agi/nex-n2.5-mini:free": "",
+    "nex-agi/nex-n2.5-pro:free": "",
+    "nvidia/nemotron-3-ultra-550b-a55b": "nvidia-nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3-ultra-550b-a55b:free": "nvidia-nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-lightning": "nemotron-3-5-lightning",
+    "nvidia/nemotron-3.5-lightning:free": "nemotron-3-5-lightning",
+    "openai/gpt-4": "gpt-4",
+    "openai/gpt-4.1": "gpt-4-1",
+    "openai/gpt-4o": "gpt-4o",
+    "openai/gpt-4o-mini": "gpt-4o-mini",
+    "openai/gpt-5": "gpt-5",
+    "openai/gpt-5.1": "gpt-5-1",
+    "openai/gpt-5.2": "gpt-5-2",
+    "openai/gpt-5.4": "gpt-5-4",
+    "openai/gpt-5.5": "gpt-5-5",
+    "openai/gpt-5.6-luna": "gpt-5-6-luna",
+    "openai/gpt-5.6-luna-pro": "gpt-5-6-luna",
+    "openai/gpt-5.6-sol": "gpt-5-6-sol",
+    "openai/gpt-5.6-sol-pro": "gpt-5-6-sol",
+    "openai/gpt-5.6-terra": "gpt-5-6-terra",
+    "openai/gpt-5.6-terra-pro": "gpt-5-6-terra",
+    "openai/gpt-6-astra": "gpt-6-astra",
+    "openai/gpt-6-astra-pro": "gpt-6-astra",
+    "openai/gpt-oss-120b": "gpt-oss-120b",
+    "openai/gpt-oss-20b": "gpt-oss-20b",
+    "openrouter/free": "",
+    "qwen/qwen3.8-flash": "qwen3-8-flash-next",
+    "qwen/qwen3.8-max-0902": "qwen3-8-max",
+    "qwen3.5:397b-cloud": "",
+    "qwen3.7-max": "qwen3-7-max",
+    "qwen3.7-plus": "qwen3-7-plus",
+    "qwen3.8-flash": "qwen3-8-flash-next",
+    "qwen3.8-max": "qwen3-8-max",
+    "tencent/hy3": "hy3",
+    "x-ai/grok-4.5": "grok-4-5",
+    "x-ai/grok-4.6": "grok-4-6",
+    "z-ai/glm-5.3": "glm-5-3",
+    "z-ai/glm-5.3-flash": "glm-5-3-flash",
+}
+
+
+def scores_for_live_id(mid: str) -> dict | None:
+    slug = MODEL_TO_SLUG.get(mid)
+    if not slug:
+        return None
+    return BENCHMARKS.get(slug)
+
+
+def _score_sort_value(mid: str, field: str) -> float:
+    s = scores_for_live_id(mid)
+    if s is None:
+        return float("-inf")
+    return float(s[field])
+
 
 class SyncError(Exception):
     """Fatal sync error; main() maps this to a non-zero exit."""
@@ -786,7 +977,6 @@ def reconcile_models_map(
     models_map: dict,
     items: list[tuple[str, str | None]],
     catalog_models: dict,
-    stats: dict,
     provider_id: str,
     provider_npm: str | None,
 ) -> None:
@@ -804,7 +994,6 @@ def reconcile_models_map(
         name = resolve_model_name(live_name, stored, catalog_models, catalog_id)
         if name and m.get("name") != name:
             m["name"] = name
-            stats["models_renamed"] = stats.get("models_renamed", 0) + 1
 
         # Fill missing attributes; refresh the description when the catalog
         # carries a different one. User-set values are never overwritten.
@@ -814,22 +1003,17 @@ def reconcile_models_map(
             desc = catalog_description(minfo)
             if desc is not None and m.get("description") != desc:
                 m["description"] = desc
-                stats["descriptions_updated"] = (
-                    stats.get("descriptions_updated", 0) + 1
-                )
         if "api_backend" not in m:
             write_api_backend(m, provider_id, provider_npm)
 
         # New entries start disabled.
         if is_new:
             m["enabled"] = False
-            stats["models_added"] = stats.get("models_added", 0) + 1
 
     # Remove entries the authority list no longer carries.
     for mid in list(models_map):
         if mid not in authority:
             del models_map[mid]
-            stats["models_removed"] = stats.get("models_removed", 0) + 1
 
 
 def ollama_cloud_stored_id(live_id: str) -> str:
@@ -1390,17 +1574,18 @@ def _curses_theme_bkgd(stdscr) -> None:
     _emit_sgr_bg()
 
 
-def _curses_draw_header(stdscr, text: str) -> None:
-    """Draw the full-width title row on the theme background."""
+def _curses_draw_header(stdscr, text: str, y: int = 0) -> None:
+    """Draw a full-width title row on the theme background."""
     height, width = stdscr.getmaxyx()
     try:
-        stdscr.addstr(0, 0, "\u00a0" * (width - 1), curses.color_pair(P.SELECTED))
+        stdscr.addstr(y, 0, "\u00a0" * (width - 1), curses.color_pair(P.SELECTED))
         _addstr_cols(
-            stdscr, 0, 2, _clip_cols(text, max(0, width - 4)),
+            stdscr, y, 2, _clip_cols(text, max(0, width - 4)),
             curses.color_pair(P.SELECTED) | curses.A_BOLD,
         )
     except curses.error:
         pass
+    _ = height
 
 
 def _curses_draw_legend(
@@ -2332,6 +2517,8 @@ def _curses_filter_list_win(
     on_enter=None,
     bottom_padding: int = 0,
     status_fn=None,
+    header_bar=None,
+    header_columns=None,
 ) -> None:
     """Generic type-to-filter list widget drawn into an existing stdscr.
     compute_view(entries, query) -> (ordered_entries, separators); separators
@@ -2387,11 +2574,16 @@ def _curses_filter_list_win(
         _curses_theme_bkgd(stdscr)
 
         # Header with filter
-        _curses_draw_header(
-            stdscr, f"  {title}  ({len(filtered)})  |  Filter: {query}"
-        )
-
+        if header_bar is not None:
+            _curses_draw_header(stdscr, header_bar(title, len(filtered), query))
+        else:
+            _curses_draw_header(
+                stdscr, f"  {title}  ({len(filtered)})  |  Filter: {query}"
+            )
         list_top = 2
+        if header_columns is not None:
+            _curses_draw_header(stdscr, header_columns(), y=2)
+            list_top = 3
         # Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
         list_h = max(1, height - list_top - 4 - bottom_padding)
         if snap_to_current:
@@ -2408,7 +2600,7 @@ def _curses_filter_list_win(
 
         if not filtered:
             try:
-                stdscr.addstr(2, 0, "  (no matches)", curses.color_pair(P.MUTED))
+                stdscr.addstr(list_top, 0, "  (no matches)", curses.color_pair(P.MUTED))
             except curses.error:
                 pass
 
@@ -2416,7 +2608,7 @@ def _curses_filter_list_win(
             vis_i = top + row
             if vis_i >= len(view):
                 break
-            y = 2 + row
+            y = list_top + row
             kind = view[vis_i]
             if kind[0] == "sep":
                 try:
@@ -2537,20 +2729,49 @@ def _curses_filter_list_win(
 _MODEL_NAME_COL_MAX = 35;
 _PROVIDER_NAME_COL_MAX = 25
 _MAIN_PROVIDER_NAME_COL_MAX = 15
+_INDEX_COL_W = 5
+_CODING_COL_W = 6
+_MODE_COL_W = 10
+_ENABLED_SORT_CYCLE = ("model", "provider", "index", "coding")
 
 
-def _model_list_row(mname, pname, enabled, is_free, name_w, pname_w):
+def _score_cells(mid: str) -> tuple[str, str, int]:
+    s = scores_for_live_id(mid)
+    if s is None:
+        return (" " * _INDEX_COL_W, " " * _CODING_COL_W, P.MUTED)
+    return (
+        f"{s['index']:{_INDEX_COL_W}.1f}",
+        f"{s['coding']:{_CODING_COL_W}.1f}",
+        P.VALUE,
+    )
+
+
+def _model_list_row(
+    mname, pname, enabled, is_free, name_w, pname_w, mid="", with_scores=False
+):
     name_pair = P.ENABLED if enabled else (P.FREE if is_free else P.TEXT)
     state = "[enabled]" if enabled else "[disabled]"
     state_pair = P.ENABLED if enabled else P.ERROR
-    return [
+    plab = f"({pname[:_PROVIDER_NAME_COL_MAX]})"
+    segs = [
         ("  ", P.TEXT),
         (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), name_pair),
-        ("  ", P.TEXT),
-        (f"({pname[:_PROVIDER_NAME_COL_MAX]})".ljust(pname_w), P.TEXT),
-        ("  ", P.TEXT),
-        (state, state_pair),
     ]
+    if with_scores:
+        index_cell, coding_cell, score_pair = _score_cells(mid)
+        segs.extend([
+            ("  ", P.TEXT),
+            (index_cell, score_pair),
+            ("  ", P.TEXT),
+            (coding_cell, score_pair),
+        ])
+    segs.extend([
+        ("  ", P.TEXT),
+        (plab.ljust(pname_w), P.TEXT),
+        ("  ", P.TEXT),
+        (state.ljust(_MODE_COL_W), state_pair),
+    ])
+    return segs
 
 
 def _curses_model_search_win(
@@ -2587,14 +2808,31 @@ def _curses_model_search_win(
             max((len(_mname(mid)) for mid in ordered), default=0),
             _MODEL_NAME_COL_MAX,
         )
+        name_w = max(name_w, len("Model"))
         pname_w = min(len(pname), _PROVIDER_NAME_COL_MAX) + 2
+        pname_w = max(pname_w, len("(Provider)"))
         return ordered, separators
 
     def render(mid, _is_sel):
         m = models[mid]
         enabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
         is_free = "free" in mid.lower()
-        return _model_list_row(_mname(mid), pname, enabled, is_free, name_w, pname_w)
+        return _model_list_row(
+            _mname(mid), pname, enabled, is_free, name_w, pname_w, mid, True
+        )
+
+    def header_bar(title, count, query):
+        return f"  {title}  ({count}) | Type To Filter: {query}"
+
+    def header_columns():
+        prov = f"({'Provider'.ljust(max(0, pname_w - 2))})"
+        return (
+            f"{'Model'.ljust(name_w)}  "
+            f"{'Index':>{_INDEX_COL_W}}  "
+            f"{'Coding':>{_CODING_COL_W}}  "
+            f"{prov.ljust(pname_w)}  "
+            f"{'Mode'.ljust(_MODE_COL_W)}"
+        )
 
     def toggle(mid):
         nonlocal changed
@@ -2607,11 +2845,13 @@ def _curses_model_search_win(
 
     _curses_filter_list_win(
         ids, stdscr,
-        title=f"{provider_title} | Configure Model",
-        legend=[("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("type", "filter")],
+        title="Configure Models",
+        legend=[("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("Type", "filter")],
         compute_view=compute_view,
         render=render,
         on_enter=toggle,
+        header_bar=header_bar,
+        header_columns=header_columns,
     )
     return changed
 
@@ -3122,7 +3362,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
     def _curses_config_loop(stdscr, providers_doc, providers) -> bool:
         changed = False
         status_msg = None
-        sort_by_name = False
+        enabled_sort = "model"
         menu_cursor = 0
         model_focus = None
         while True:
@@ -3166,13 +3406,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             pi = _curses_select_win(
                 stdscr, labels, "Select Provider (changes sync on exit)",
                 status=status_msg,
-                preview=_build_config_models_preview(providers_doc, sort_by_name),
+                preview=_build_config_models_preview(providers_doc, enabled_sort),
                 initial=menu_cursor,
                 section_sep_before=len(ordered),
                 model_initial=model_focus,
             )
             if isinstance(pi, tuple) and pi and pi[0] is _SORT_TOGGLED:
-                sort_by_name = not sort_by_name
+                i = _ENABLED_SORT_CYCLE.index(enabled_sort)
+                enabled_sort = _ENABLED_SORT_CYCLE[(i + 1) % len(_ENABLED_SORT_CYCLE)]
                 menu_cursor = pi[1]
                 continue
             if isinstance(pi, tuple) and pi and pi[0] == "model":
@@ -3740,6 +3981,7 @@ def print_env_requirements(providers_doc: dict) -> None:
     print("Required environment variables:")
     for env_var in env_vars:
         print(f"  {_env_status_line(env_var)}")
+    print()
 
 
 def render_models_text() -> int:
@@ -3813,12 +4055,11 @@ def _model_reasoning_level(m: dict) -> str:
 
 
 def _build_config_models_preview(
-    providers_doc: dict, sort_by_name: bool = False
+    providers_doc: dict, sort: str = "model"
 ) -> list:
     """Build the --models-style enabled-models listing as colored segment
     lines, for rendering in the empty space under the TUI main menu.
-    Default order is providers.json (provider-name) order; sort_by_name
-    reorders the model rows by display name without writing anything."""
+    `sort` is model, provider, index, or coding."""
     providers = [
         p for p in providers_doc.get("providers", [])
         if isinstance(p, dict) and p.get("id")
@@ -3839,27 +4080,55 @@ def _build_config_models_preview(
                 continue
             mname = m.get("name") or mid
             model_rows.append((mname, pname, pid, mid))
-    if sort_by_name:
+    if sort == "model":
         model_rows.sort(key=lambda r: (r[0].lower(), r[1].lower(), r[2], r[3]))
+    elif sort == "provider":
+        model_rows.sort(key=lambda r: (r[1].lower(), r[0].lower(), r[2], r[3]))
+    elif sort == "index":
+        model_rows.sort(
+            key=lambda r: (-_score_sort_value(r[3], "index"), r[0].lower())
+        )
+    elif sort == "coding":
+        model_rows.sort(
+            key=lambda r: (-_score_sort_value(r[3], "coding"), r[0].lower())
+        )
     total_enabled = len(model_rows)
-    # First element is a heading marker: ("heading", text) -> drawn as a
-    # full-width blue bar, like the screen title. Count sits on the bar
-    # so paging cannot park a second "Summary" line on the status row.
-    lines.append(("heading", f"Enabled Models: {total_enabled}"))
-    lines.append([("", P.TEXT)])  # gap under the models header
-    model_width = max((len(r[0]) for r in model_rows), default=0)
+    title = f"Enabled Models: {total_enabled}"
     rows_with_levels = [
         (mname, pname, pid, mid, _model_reasoning_level(_model_entry(providers, pid, mid)))
         for mname, pname, pid, mid in model_rows
     ]
-    level_cell_width = max((len(r[4]) + 2 for r in rows_with_levels), default=0)
+    name_w = max(
+        (min(len(r[0]), _MODEL_NAME_COL_MAX) for r in rows_with_levels),
+        default=0,
+    )
+    name_w = max(name_w, len(title))
+    level_w = max((len(r[4]) for r in rows_with_levels), default=0)
+    level_w = max(level_w, len("Default"))
+    prov_w = max((len(r[1]) for r in rows_with_levels), default=0)
+    prov_w = max(prov_w, len("Provider"))
+    # Heading marker -> full-width blue bar. Column labels share this bar.
+    lines.append((
+        "heading",
+        f"{title.ljust(name_w)}  "
+        f"{'Index':>{_INDEX_COL_W}}  {'Coding':>{_CODING_COL_W}}  "
+        f"({'Default'.ljust(level_w)})  ({'Provider'.ljust(prov_w)})",
+    ))
+    lines.append([("", P.TEXT)])  # gap under the models header
     for mname, pname, pid, mid, level in rows_with_levels:
         level_pair = P.FREE if level != "none" else P.MUTED
+        index_cell, coding_cell, score_pair = _score_cells(mid)
         lines.append(("model", pid, mid, [
             ("● ", P.ENABLED),
-            (mname.ljust(model_width), P.VALUE),
-            (f" ({level}) ".ljust(level_cell_width + 2), level_pair),
-            (f"({pname})", P.TEXT),
+            (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), P.VALUE),
+            ("  ", P.TEXT),
+            (index_cell, score_pair),
+            ("  ", P.TEXT),
+            (coding_cell, score_pair),
+            ("  ", P.TEXT),
+            (f"({level.ljust(level_w)})", level_pair),
+            ("  ", P.TEXT),
+            (f"({pname.ljust(prov_w)})", P.TEXT),
         ]))
     if not total_enabled:
         lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
@@ -3884,9 +4153,9 @@ def cmd_disable_all() -> int:
         print("All models already disabled.")
         return 0
     dump_providers(PROVIDERS_PATH, providers_doc)
-    path, stats = run_sync()
+    path, _stats = run_sync()
     if path is not None:
-        print_sync_report(stats, path, providers_doc)
+        print_sync_report(path, providers_doc)
         print_relaunch()
     return 0
 
@@ -4025,9 +4294,9 @@ def cmd_toggle(enable_targets: list[str], disable_targets: list[str]) -> int:
             f"warning: provider {pid!r} is disabled; enable it too or its "
             f"models won't be written to config.toml"
         )
-    path, stats = run_sync()
+    path, _stats = run_sync()
     if path is not None:
-        print_sync_report(stats, path, providers_doc)
+        print_sync_report(path, providers_doc)
         print_relaunch()
     return 0
 
@@ -4651,13 +4920,6 @@ def update_providers_json(*, quiet: bool = False) -> dict:
     providers_doc = load_providers()
     stats = {
         "providers_synced": 0,
-        "models_added": 0,
-        "models_removed": 0,
-        "models_renamed": 0,
-        "descriptions_updated": 0,
-        "models_missing": 0,
-        "providers_missing": 0,
-        "tables_written": 0,
         "live_fetch_errors": [],
     }
 
@@ -4673,7 +4935,6 @@ def update_providers_json(*, quiet: bool = False) -> dict:
         if not isinstance(provider_models_dev, dict):
             if not quiet:
                 print(f"  warning: provider {pid!r} not found in models.dev; skipping")
-            stats["providers_missing"] += 1
             continue
         catalog_models = catalog_models_dict(provider_models_dev)
 
@@ -4713,7 +4974,6 @@ def update_providers_json(*, quiet: bool = False) -> dict:
             models_map,
             items,
             catalog_models,
-            stats,
             pid,
             catalog_npm(provider_models_dev),
         )
@@ -4845,9 +5105,9 @@ def run_sync() -> tuple[Path | None, dict]:
 
 
 
-def print_sync_report(stats: dict, path: Path, providers_doc: dict) -> None:
-    """Sync summary followed by required env vars for enabled providers."""
-    print_summary(stats, path)
+def print_sync_report(path: Path, providers_doc: dict) -> None:
+    """Updated path followed by required env vars for enabled providers."""
+    print_summary(path)
     print_env_requirements(providers_doc)
 
 
@@ -5133,37 +5393,28 @@ def cmd_config() -> int:
         changed = _numbered_config_flow(providers_doc, providers)
 
     if changed:
-        path, stats = run_sync()
-        if path is not None:
-            print_sync_report(stats, path, providers_doc)
-            print_relaunch()
+        path = update_config_toml()
+        print_sync_report(path, providers_doc)
+        print_relaunch()
     return 0
 
 
-def print_summary(stats: dict, path: Path) -> None:
+def print_summary(path: Path) -> None:
     print()
-    print(f"Updated {path}")
-    print("Sync Summary:")
-    print(f"  providers synced: {stats.get('providers_synced', 0)}")
-    print(f"  models added: {stats.get('models_added', 0)}")
-    print(f"  models removed: {stats.get('models_removed', 0)}")
-    print(f"  models renamed: {stats.get('models_renamed', 0)}")
-    print(f"  descriptions updated: {stats.get('descriptions_updated', 0)}")
-    print(f"  models missing (skipped): {stats.get('models_missing', 0)}")
-    print(f"  providers missing (skipped): {stats.get('providers_missing', 0)}")
-    print(f"  tables written: {stats.get('tables_written', 0)}")
+    print(f"Updated: {path}")
 
 
 def print_relaunch() -> None:
     print("Relaunch Grok Build for model changes")
+    print()
 
 
 def cmd_sync() -> int:
     providers_doc = load_providers()
-    path, stats = run_sync()
+    path, _stats = run_sync()
     if path is None:
         return 0
-    print_sync_report(stats, path, providers_doc)
+    print_sync_report(path, providers_doc)
     print_relaunch()
     return 0
 

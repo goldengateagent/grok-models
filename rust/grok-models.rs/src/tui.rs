@@ -523,11 +523,15 @@ fn split_state_token(line: &str) -> Option<(String, String, String)> {
 // ---------------------------------------------------------------------------
 
 fn draw_header<S: Stdscr>(stdscr: &mut S, text: &str) {
+    draw_header_at(stdscr, 0, text);
+}
+
+fn draw_header_at<S: Stdscr>(stdscr: &mut S, y: i32, text: &str) {
     let (h, w) = stdscr.getmaxyx();
     let paint = Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold();
     let row_fill = "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
-    stdscr.addstr(0, 0, &row_fill, paint);
-    stdscr.addstr(0, 2, text, paint);
+    stdscr.addstr(y, 0, &row_fill, paint);
+    stdscr.addstr(y, 2, text, paint);
     let _ = h;
 }
 
@@ -575,10 +579,29 @@ fn draw_legend<S: Stdscr>(
 pub enum SelectOutcome {
     Picked(usize),
     Cancelled,
-    /// Main-menu `S`: toggle Enabled Models sort; carries the current cursor.
+    /// Main-menu `S`: cycle Enabled Models sort; carries the current cursor.
     SortToggled(usize),
     /// Enter on an Enabled Models row.
     ModelPicked { pid: String, mid: String, scroll: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnabledSort {
+    Model,
+    Provider,
+    IndexDesc,
+    CodingDesc,
+}
+
+impl EnabledSort {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Model => Self::Provider,
+            Self::Provider => Self::IndexDesc,
+            Self::IndexDesc => Self::CodingDesc,
+            Self::CodingDesc => Self::Model,
+        }
+    }
 }
 
 /// A line drawn in the TUI main-menu preview panel beneath the provider
@@ -1323,6 +1346,14 @@ pub trait FilterList {
     /// Enter on an entry: return true to keep the window open, false to close.
     /// Receives the active stdscr so models can draw overlays (inline errors).
     fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &Self::Entry) -> bool;
+    /// Optional full header-bar text. `None` uses the default title/count/filter.
+    fn header_bar(&self, _title: &str, _count: usize, _query: &str) -> Option<String> {
+        None
+    }
+    /// Optional second header line (column labels). Drawn at y=1.
+    fn header_columns(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Visual row in the filter list: a separator occupies its own row before
@@ -1419,12 +1450,18 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
         stdscr.erase();
         let (h, w) = stdscr.getmaxyx();
         paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-        draw_header(
-            stdscr,
-            &format!("  {title}  ({})  |  Filter: {query}", filtered.len()),
-        );
+        let header = model
+            .header_bar(title, filtered.len(), &query)
+            .unwrap_or_else(|| format!("  {title}  ({})  |  Filter: {query}", filtered.len()));
+        draw_header(stdscr, &header);
+        let has_cols = if let Some(cols) = model.header_columns() {
+            draw_header_at(stdscr, 2, &cols);
+            true
+        } else {
+            false
+        };
 
-        let list_top = 2usize;
+        let list_top = if has_cols { 3usize } else { 2usize };
         // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
         let list_h = ((h as usize)
             .saturating_sub(list_top + 4 + bottom_pad))
@@ -1445,7 +1482,12 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
         }
 
         if filtered.is_empty() {
-            stdscr.addstr(2, 0, "  (no matches)", Paint::plain(tn_color(P::Muted), bg_color(P::Muted)));
+            stdscr.addstr(
+                list_top as i32,
+                0,
+                "  (no matches)",
+                Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
+            );
         }
 
         for row in 0..list_h {
@@ -1610,6 +1652,10 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 
 const MODEL_NAME_COL_MAX: usize = 35;
 
+const INDEX_COL_W: usize = 5;
+const CODING_COL_W: usize = 6;
+const MODE_COL_W: usize = 10;
+
 fn model_list_row(
     mname: &str,
     pname: &str,
@@ -1617,6 +1663,8 @@ fn model_list_row(
     is_free: bool,
     name_w: usize,
     pname_w: usize,
+    mid: &str,
+    with_scores: bool,
 ) -> Vec<(String, P)> {
     let name_pair = if enabled {
         P::Enabled
@@ -1630,14 +1678,34 @@ fn model_list_row(
     let plab = format!("({pname})");
     let state = if enabled { "[enabled]" } else { "[disabled]" };
     let state_pair = if enabled { P::Enabled } else { P::Error };
-    vec![
+    let mut segs = vec![
         ("  ".to_string(), P::Text),
         (format!("{mname:<name_w$}"), name_pair),
-        ("  ".to_string(), P::Text),
-        (format!("{plab:<pname_w$}"), P::Text),
-        ("  ".to_string(), P::Text),
-        (state.to_string(), state_pair),
-    ]
+    ];
+    if with_scores {
+        let (index_cell, coding_cell, score_pair) =
+            match crate::benchmarks::scores_for_live_id(mid) {
+                Some(s) => (
+                    format!("{:>w$.1}", s.index, w = INDEX_COL_W),
+                    format!("{:>w$.1}", s.coding, w = CODING_COL_W),
+                    P::Value,
+                ),
+                None => (
+                    " ".repeat(INDEX_COL_W),
+                    " ".repeat(CODING_COL_W),
+                    P::Muted,
+                ),
+            };
+        segs.push(("  ".to_string(), P::Text));
+        segs.push((index_cell, score_pair));
+        segs.push(("  ".to_string(), P::Text));
+        segs.push((coding_cell, score_pair));
+    }
+    segs.push(("  ".to_string(), P::Text));
+    segs.push((format!("{plab:<pname_w$}"), P::Text));
+    segs.push(("  ".to_string(), P::Text));
+    segs.push((format!("{state:<MODE_COL_W$}"), state_pair));
+    segs
 }
 
 struct ModelPicker<'a> {
@@ -1672,8 +1740,14 @@ impl<'a> FilterList for ModelPicker<'a> {
                 .unwrap_or_else(|| mid.clone());
             name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
         }
-        self.name_w = name_w;
-        self.pname_w = self.pname.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2;
+        self.name_w = name_w.max("Model".chars().count());
+        self.pname_w = self
+            .pname
+            .chars()
+            .count()
+            .min(core::PROVIDER_NAME_COL_MAX)
+            + 2;
+        self.pname_w = self.pname_w.max("(Provider)".chars().count());
         (ordered, separators)
     }
 
@@ -1689,7 +1763,29 @@ impl<'a> FilterList for ModelPicker<'a> {
             is_free,
             self.name_w,
             self.pname_w,
+            mid,
+            true,
         )
+    }
+
+    fn header_bar(&self, title: &str, count: usize, query: &str) -> Option<String> {
+        Some(format!("  {title}  ({count}) | Type To Filter: {query}"))
+    }
+
+    fn header_columns(&self) -> Option<String> {
+        let prov = format!("({:w$})", "Provider", w = self.pname_w.saturating_sub(2));
+        Some(format!(
+            "{model:<name_w$}  {index:>iw$}  {coding:>cw$}  {prov:<pw$}  {mode:<mw$}",
+            model = "Model",
+            name_w = self.name_w,
+            index = "Index",
+            iw = INDEX_COL_W,
+            coding = "Coding",
+            cw = CODING_COL_W,
+            pw = self.pname_w,
+            mode = "Mode",
+            mw = MODE_COL_W,
+        ))
     }
 
     fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, mid: &String) -> bool {
@@ -1728,7 +1824,7 @@ pub fn model_search_win<S: Stdscr>(
             ("↑/↓/←/→".to_string(), "nav".to_string()),
             ("ESC".to_string(), "back".to_string()),
             ("Enter".to_string(), "toggle".to_string()),
-            ("type".to_string(), "filter".to_string()),
+            ("Type".to_string(), "filter".to_string()),
         ],
         &mut picker,
     );
@@ -2342,6 +2438,8 @@ impl<'a> FilterList for AddModelPicker<'a> {
             is_free,
             self.name_w,
             self.pname_w,
+            mid,
+            false,
         )
     }
 
@@ -2480,9 +2578,9 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
 /// Build the `--models`-style enabled-models listing as `PreviewLine`s, for
 /// rendering in the empty space under the TUI main menu. Mirrors
 /// Python's `_build_config_models_preview`: enabled models in providers.json
-/// order, then an env-var status box and a summary line. `sort_by_name`
-/// reorders the model rows by display name without writing anything.
-pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<PreviewLine> {
+/// order, then an env-var status box and a summary line. `sort` reorders the
+/// model rows without writing anything.
+pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<PreviewLine> {
     let providers: Vec<&Map<String, Value>> = doc
         .get("providers")
         .and_then(Value::as_array)
@@ -2515,29 +2613,40 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
             model_rows.push((mname, pname.clone(), pid.to_string(), mid.clone()));
         }
     }
-    if sort_by_name {
-        model_rows.sort_by(|a, b| {
-            (
-                a.0.to_lowercase(),
-                a.1.to_lowercase(),
-                a.2.clone(),
-                a.3.clone(),
-            )
-                .cmp(&(
-                    b.0.to_lowercase(),
-                    b.1.to_lowercase(),
-                    b.2.clone(),
-                    b.3.clone(),
-                ))
-        });
+    match sort {
+        EnabledSort::Model => {
+            model_rows.sort_by(|a, b| {
+                a.0.to_lowercase()
+                    .cmp(&b.0.to_lowercase())
+                    .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            });
+        }
+        EnabledSort::Provider => {
+            model_rows.sort_by(|a, b| {
+                a.1.to_lowercase()
+                    .cmp(&b.1.to_lowercase())
+                    .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            });
+        }
+        EnabledSort::IndexDesc => {
+            model_rows.sort_by(|a, b| {
+                score_desc(a.3.as_str(), b.3.as_str(), |s| s.index)
+                    .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            });
+        }
+        EnabledSort::CodingDesc => {
+            model_rows.sort_by(|a, b| {
+                score_desc(a.3.as_str(), b.3.as_str(), |s| s.coding)
+                    .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            });
+        }
     }
     let total_enabled = model_rows.len();
-    // Heading marker -> full-width blue bar, like the screen title.
-    // Count sits on the bar so paging cannot park a second "Summary"
-    // line on the status row.
-    lines.push(PreviewLine::Heading(format!("Enabled Models: {total_enabled}")));
-    lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
-    let model_width = model_rows.iter().map(|r| r.0.chars().count()).max().unwrap_or(0);
+    let title = format!("Enabled Models: {total_enabled}");
     let rows_with_levels: Vec<(String, String, String, String, String)> = model_rows
         .iter()
         .map(|(mname, pname, pid, mid)| {
@@ -2545,19 +2654,79 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
             (mname.clone(), pname.clone(), pid.clone(), mid.clone(), level)
         })
         .collect();
-    let level_cell_width = rows_with_levels.iter().map(|r| r.4.chars().count() + 2).max().unwrap_or(0);
+    let name_w = rows_with_levels
+        .iter()
+        .map(|r| r.0.chars().count().min(MODEL_NAME_COL_MAX))
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count());
+    let level_w = rows_with_levels
+        .iter()
+        .map(|r| r.4.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("Default".chars().count());
+    let prov_w = rows_with_levels
+        .iter()
+        .map(|r| r.1.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("Provider".chars().count());
+    const INDEX_W: usize = 5;
+    const CODING_W: usize = 6;
+    fn pad_cell(s: &str, w: usize) -> String {
+        format!("{s}{}", " ".repeat(w.saturating_sub(s.chars().count())))
+    }
+    // Heading marker -> full-width blue bar, like the screen title.
+    // Count sits on the bar so paging cannot park a second "Summary"
+    // line on the status row. Column labels share this bar; title sits
+    // in the name column. Order: model | index | coding | level | provider.
+    lines.push(PreviewLine::Heading(format!(
+        "{}  {:>w_i$}  {:>w_c$}  ({})  ({})",
+        pad_cell(&title, name_w),
+        "Index",
+        "Coding",
+        pad_cell("Default", level_w),
+        pad_cell("Provider", prov_w),
+        w_i = INDEX_W,
+        w_c = CODING_W,
+    )));
+    lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
     for (mname, pname, pid, mid, level) in &rows_with_levels {
         let level_pair = if level != "none" { P::Free } else { P::Muted };
-        let pad_m = model_width.saturating_sub(mname.chars().count());
-        let pad_l = (level_cell_width + 2).saturating_sub(level.chars().count() + 4);
+        let (index_cell, coding_cell, score_pair) =
+            match crate::benchmarks::scores_for_live_id(mid) {
+                Some(s) => (
+                    format!("{:>w$.1}", s.index, w = INDEX_W),
+                    format!("{:>w$.1}", s.coding, w = CODING_W),
+                    P::Value,
+                ),
+                None => (
+                    " ".repeat(INDEX_W),
+                    " ".repeat(CODING_W),
+                    P::Muted,
+                ),
+            };
         lines.push(PreviewLine::Model {
             pid: pid.clone(),
             mid: mid.clone(),
             segs: vec![
                 ("● ".to_string(), P::Enabled),
-                (format!("{mname}{}", " ".repeat(pad_m)), P::Value),
-                (format!(" ({}) {}", level, " ".repeat(pad_l)), level_pair),
-                (format!("({pname})"), P::Text),
+                (
+                    pad_cell(
+                        &mname.chars().take(MODEL_NAME_COL_MAX).collect::<String>(),
+                        name_w,
+                    ),
+                    P::Value,
+                ),
+                ("  ".to_string(), P::Text),
+                (index_cell, score_pair),
+                ("  ".to_string(), P::Text),
+                (coding_cell, score_pair),
+                ("  ".to_string(), P::Text),
+                (format!("({})", pad_cell(level, level_w)), level_pair),
+                ("  ".to_string(), P::Text),
+                (format!("({})", pad_cell(pname, prov_w)), P::Text),
             ],
         });
     }
@@ -2571,6 +2740,20 @@ pub fn build_config_models_preview(doc: &Value, sort_by_name: bool) -> Vec<Previ
     }
 
     lines
+}
+
+fn score_desc(
+    a_mid: &str,
+    b_mid: &str,
+    pick: impl Fn(&crate::benchmarks::Scores) -> f32,
+) -> std::cmp::Ordering {
+    let av = crate::benchmarks::scores_for_live_id(a_mid)
+        .map(&pick)
+        .unwrap_or(f32::NEG_INFINITY);
+    let bv = crate::benchmarks::scores_for_live_id(b_mid)
+        .map(&pick)
+        .unwrap_or(f32::NEG_INFINITY);
+    bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 fn model_reasoning_level(doc: &Value, pid: &str, mid: &str) -> String {
@@ -2706,7 +2889,7 @@ pub fn run_config_flow(doc: &mut Value) -> Res<bool> {
 pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Res<bool> {
     let mut changed = false;
     let mut status_msg: Option<String> = None;
-    let mut sort_by_name = false;
+    let mut enabled_sort = EnabledSort::Model;
     let mut menu_cursor = 0usize;
     let mut model_focus: Option<(String, String, usize)> = None;
     loop {
@@ -2759,7 +2942,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         }
         labels.push("Add Provider".to_string());
         labels.push("Add Model".to_string());
-        let preview = build_config_models_preview(doc, sort_by_name);
+        let preview = build_config_models_preview(doc, enabled_sort);
         // Trailing-block rows (Codex Config, Model Descriptions, Web Search, …) are
         // selectable; Enter lands on them as SelectOutcome::Picked.
         let pi = match select_win(stdscr,
@@ -2780,7 +2963,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             None => return Ok(changed),
             Some(SelectOutcome::Cancelled) => return Ok(changed),
             Some(SelectOutcome::SortToggled(i)) => {
-                sort_by_name = !sort_by_name;
+                enabled_sort = enabled_sort.cycle();
                 menu_cursor = i;
                 continue;
             }
@@ -3111,7 +3294,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .unwrap_or(target["id"].as_str().unwrap_or_default());
-                        let provider_title = format!("Provider: {pname} | Configure Model");
+                        let provider_title = "Configure Models".to_string();
                         model_search_win(stdscr, &ids, &mut models, &provider_title, &id_str, pname);
                         // Sync BOTH the live `target` copy and the doc: the
                         // action menu renders from `target`, so re-entering
@@ -4676,7 +4859,7 @@ mod tests {
         let enabled_row = picker.render(&ordered[0], false);
         assert_eq!(enabled_row[1], (format!("{:<9}", "Alpha One"), P::Enabled));
         assert_eq!(enabled_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
-        assert_eq!(enabled_row[5], ("[enabled]".into(), P::Enabled));
+        assert_eq!(enabled_row[5], (format!("{:<10}", "[enabled]"), P::Enabled));
         assert!(
             enabled_row.iter().all(|(t, _)| !t.contains("zeta/") && !t.contains("/alpha")),
             "enabled row still shows model/provider id"
@@ -4685,12 +4868,12 @@ mod tests {
         let free_row = picker.render(&ordered[1], false);
         assert_eq!(free_row[1], (format!("{:<9}", "Zeta Free"), P::Free));
         assert_eq!(free_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
-        assert_eq!(free_row[5], ("[disabled]".into(), P::Error));
+        assert_eq!(free_row[5], (format!("{:<10}", "[disabled]"), P::Error));
 
         let rest_row = picker.render(&ordered[2], false);
         assert_eq!(rest_row[1], (format!("{:<9}", "beta"), P::Text));
         assert_eq!(rest_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
-        assert_eq!(rest_row[5], ("[disabled]".into(), P::Error));
+        assert_eq!(rest_row[5], (format!("{:<10}", "[disabled]"), P::Error));
 
         let mut f = FakeStdscr::new(20, 80);
         // Enter on an already-enabled row disables it. The picker stays
@@ -4771,10 +4954,10 @@ mod tests {
 
         // The preview builder produces the heading and enabled-model rows;
         // env cells live on the provider list, not in this pane.
-        let preview = build_config_models_preview(&doc, false);
+        let preview = build_config_models_preview(&doc, EnabledSort::Model);
         assert!(preview
             .iter()
-            .any(|l| matches!(l, PreviewLine::Heading(t) if t == "Enabled Models: 1")));
+            .any(|l| matches!(l, PreviewLine::Heading(t) if t.starts_with("Enabled Models: 1"))));
         assert!(
             !preview.iter().any(|l| matches!(
                 l,
@@ -4981,20 +5164,64 @@ mod tests {
                     "id": "b-prov",
                     "name": "Beta Prov",
                     "enabled": true,
-                    "models": { "m1": { "name": "Zulu", "enabled": true } }
+                    "models": { "m1": { "name": "Alpha", "enabled": true } }
                 },
                 {
                     "id": "a-prov",
                     "name": "Alpha Prov",
                     "enabled": true,
-                    "models": { "m2": { "name": "Alpha", "enabled": true } }
+                    "models": { "m2": { "name": "Zulu", "enabled": true } }
                 }
             ]
         });
-        let by_prov = preview_model_names(&build_config_models_preview(&doc, false));
+        let by_model = preview_model_names(&build_config_models_preview(&doc, EnabledSort::Model));
+        assert_eq!(by_model, ["Alpha", "Zulu"]);
+        let by_prov = preview_model_names(&build_config_models_preview(&doc, EnabledSort::Provider));
         assert_eq!(by_prov, ["Zulu", "Alpha"]);
-        let by_name = preview_model_names(&build_config_models_preview(&doc, true));
-        assert_eq!(by_name, ["Alpha", "Zulu"]);
+    }
+
+    #[test]
+    fn preview_sort_by_index_and_coding_desc() {
+        use serde_json::json;
+        let doc = json!({
+            "providers": [
+                {
+                    "id": "p1",
+                    "name": "P1",
+                    "enabled": true,
+                    "models": { "hy3": { "name": "Hy3", "enabled": true } }
+                },
+                {
+                    "id": "p2",
+                    "name": "P2",
+                    "enabled": true,
+                    "models": { "grok-4.6": { "name": "Grok", "enabled": true } }
+                },
+                {
+                    "id": "p3",
+                    "name": "P3",
+                    "enabled": true,
+                    "models": { "no-scores": { "name": "None", "enabled": true } }
+                }
+            ]
+        });
+        let by_index =
+            preview_model_names(&build_config_models_preview(&doc, EnabledSort::IndexDesc));
+        assert_eq!(by_index, ["Grok", "Hy3", "None"]);
+        let by_coding =
+            preview_model_names(&build_config_models_preview(&doc, EnabledSort::CodingDesc));
+        assert_eq!(by_coding, ["Grok", "Hy3", "None"]);
+        let preview = build_config_models_preview(&doc, EnabledSort::Model);
+        let header = preview.iter().find_map(|l| match l {
+            PreviewLine::Heading(t) if t.contains("Index") => Some(t.clone()),
+            _ => None,
+        });
+        let header = header.expect("missing column header");
+        assert!(header.starts_with("Enabled Models:"), "{header}");
+        assert!(header.contains("Default"), "{header}");
+        assert!(header.contains("Provider"), "{header}");
+        assert!(header.contains("Index"), "{header}");
+        assert!(header.contains("Coding"), "{header}");
     }
 
     #[test]
@@ -5021,10 +5248,11 @@ mod tests {
         assert_eq!(ordered, ["pro", "hy3-free", "omega"]);
         assert_eq!(seps, vec![(1, P::Enabled), (2, P::Free)]);
 
+        let nw = picker.name_w;
         let enabled_row = picker.render(&"pro".to_string(), false);
-        assert_eq!(enabled_row[1], (format!("{:<8}", "Pro"), P::Enabled));
-        assert_eq!(enabled_row[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
-        assert_eq!(enabled_row[5], ("[enabled]".into(), P::Enabled));
+        assert_eq!(enabled_row[1], (format!("{:<nw$}", "Pro"), P::Enabled));
+        assert_eq!(enabled_row[7], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(enabled_row[9], (format!("{:<10}", "[enabled]"), P::Enabled));
         assert!(
             enabled_row
                 .iter()
@@ -5037,9 +5265,9 @@ mod tests {
         );
 
         let free_row = picker.render(&"hy3-free".to_string(), false);
-        assert_eq!(free_row[1], (format!("{:<8}", "HY3 Free"), P::Free));
-        assert_eq!(free_row[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
-        assert_eq!(free_row[5], ("[disabled]".into(), P::Error));
+        assert_eq!(free_row[1], (format!("{:<nw$}", "HY3 Free"), P::Free));
+        assert_eq!(free_row[7], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(free_row[9], (format!("{:<10}", "[disabled]"), P::Error));
         assert!(
             is_blue(tn_color(free_row[1].1)),
             "free model name not blue"
@@ -5050,15 +5278,15 @@ mod tests {
         );
 
         let sel = picker.render(&"pro".to_string(), true);
-        assert_eq!(sel[1], (format!("{:<8}", "Pro"), P::Enabled));
-        assert_eq!(sel[3], (format!("{:<13}", "(OpenCode Go)"), P::Text));
-        assert_eq!(sel[5], ("[enabled]".into(), P::Enabled));
+        assert_eq!(sel[1], (format!("{:<nw$}", "Pro"), P::Enabled));
+        assert_eq!(sel[7], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(sel[9], (format!("{:<10}", "[enabled]"), P::Enabled));
 
         picker.pname = "MiniMax Token Plan (minimaxi.com)".into();
         let _ = picker.compute_view(&ids, "");
         let clipped = picker.render(&"pro".to_string(), false);
         assert_eq!(
-            clipped[3],
+            clipped[7],
             (format!("{:<27}", "(MiniMax Token Plan (minim)"), P::Text)
         );
         picker.pname = "OpenCode Go".into();
@@ -5068,17 +5296,41 @@ mod tests {
         filter_list_win(
             &mut f,
             &ids,
-            "Configure Model",
+            "Configure Models",
             &[("ESC".into(), "back".into())],
             &mut picker,
         );
         let calls = f.recorded();
-        let pro = token_paints(&calls, &format!("{:<8}", "Pro"));
+        let headers: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, t, _)| t.contains("Configure Models"))
+            .map(|(_, _, t, _)| t.clone())
+            .collect();
+        assert!(
+            headers
+                .iter()
+                .any(|t| t.contains("Configure Models") && t.contains("Type To Filter")),
+            "missing title/filter line: {headers:?}"
+        );
+        let col_headers: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, t, _)| t.contains("Index") && t.contains("Coding"))
+            .map(|(_, _, t, _)| t.clone())
+            .collect();
+        assert!(
+            col_headers.iter().any(|t| t.contains("Model")
+                && t.contains("Index")
+                && t.contains("Coding")
+                && t.contains("Provider")
+                && t.contains("Mode")),
+            "missing column header: {col_headers:?}"
+        );
+        let pro = token_paints(&calls, &format!("{:<nw$}", "Pro"));
         assert!(
             pro.iter().any(|p| is_green(p.fg)),
             "selected enabled name turned white: {pro:?}"
         );
-        let state = token_paints(&calls, "[enabled]");
+        let state = token_paints(&calls, &format!("{:<10}", "[enabled]"));
         assert!(
             state.iter().any(|p| is_green(p.fg)),
             "selected enabled state turned white: {state:?}"

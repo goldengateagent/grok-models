@@ -13,6 +13,7 @@
 //! - `tui`:       Ratatui/Crossterm screens (curses equivalent)
 //! - `flow`:      interactive TUI orchestration (TUI + numbered fallback)
 
+pub mod benchmarks;
 pub mod cli;
 pub mod commands;
 pub mod core;

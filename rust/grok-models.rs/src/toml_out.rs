@@ -317,7 +317,7 @@ fn strip_removed_and_unowned_sections(
 
 /// `validate_toml_text` — parse with a real TOML parser like tomllib.
 pub fn validate_toml_text(text: &str) -> Res<()> {
-    match text.parse::<toml::Value>() {
+    match text.parse::<toml::Table>() {
         Ok(_) => Ok(()),
         Err(e) => fail(format!("invalid TOML write: {e}")),
     }

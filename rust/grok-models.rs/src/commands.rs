@@ -484,9 +484,9 @@ models won't be written to config.toml",
             core::py_repr(&pid)
         );
     }
-    let (path, stats) = sync::run_sync()?;
+    let (path, _stats) = sync::run_sync()?;
     if let Some(path) = path {
-        sync::print_sync_report(&stats, &path, &doc);
+        sync::print_sync_report(&path, &doc);
         sync::print_relaunch();
     }
     Ok(0)
@@ -539,9 +539,9 @@ pub fn cmd_disable_all() -> Res<i32> {
         return Ok(0);
     }
     jsonio::dump_providers(&providers_path, &mut doc)?;
-    let (path, stats) = sync::run_sync()?;
+    let (path, _stats) = sync::run_sync()?;
     if let Some(path) = path {
-        sync::print_sync_report(&stats, &path, &doc);
+        sync::print_sync_report(&path, &doc);
         sync::print_relaunch();
     }
     Ok(0)
@@ -849,11 +849,11 @@ pub fn cmd_search(term: &str) -> Res<i32> {
 /// `cmd_sync` (default run)
 pub fn cmd_sync() -> Res<i32> {
     let doc = jsonio::load_providers()?;
-    let (path, stats) = sync::run_sync()?;
+    let (path, _stats) = sync::run_sync()?;
     match path {
         None => Ok(0),
         Some(path) => {
-            sync::print_sync_report(&stats, &path, &doc);
+            sync::print_sync_report(&path, &doc);
             sync::print_relaunch();
             Ok(0)
         }

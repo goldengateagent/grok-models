@@ -21,13 +21,6 @@ pub const OLLAMA_CLOUD_MODELS_BASE_URL: &str = "https://ollama.com/v1";
 #[derive(Default)]
 pub struct Stats {
     pub providers_synced: u64,
-    pub models_added: u64,
-    pub models_removed: u64,
-    pub models_renamed: u64,
-    pub descriptions_updated: u64,
-    pub models_missing: u64,
-    pub providers_missing: u64,
-    pub tables_written: u64,
     pub live_fetch_errors: Vec<String>,
 }
 
@@ -43,47 +36,35 @@ pub fn http_get_json(url: &str) -> Res<Value> {
 }
 
 pub fn http_get_json_with(url: &str, api_key: Option<&str>) -> Res<Value> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .timeout_connect(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
+    let timeout = std::time::Duration::from_secs(HTTP_TIMEOUT_SECS);
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .timeout_connect(Some(timeout))
         .user_agent("grok-models.py")
+        .http_status_as_error(false)
         .build();
-    let mut request = agent.get(url).set("Accept", "application/json");
+    let agent = ureq::Agent::new_with_config(config);
+    let mut request = agent.get(url).header("Accept", "application/json");
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        request = request.set("Authorization", &format!("Bearer {key}"));
+        request = request.header("Authorization", format!("Bearer {key}"));
     }
     match request.call() {
-        Ok(resp) => {
-            let status = resp.status();
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let text = match resp.body_mut().read_to_string() {
+                Ok(t) => t,
+                Err(e) => {
+                    return fail(format!("HTTP failure fetching {url}: {e}"));
+                }
+            };
             if status != 200 {
-                // Python reads the error body (first 300 chars) into the message.
-                let body = resp
-                    .into_string()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(300)
-                    .collect::<String>();
+                let body: String = text.chars().take(300).collect();
                 return fail(format!("HTTP {status} fetching {url}: {body}"));
             }
-            let mut reader = resp.into_reader();
-            let mut raw = Vec::new();
-            reader
-                .read_to_end(&mut raw)
-                .map_err(|e| crate::SyncError(format!("HTTP failure fetching {url}: {e}")))?;
-            let text = String::from_utf8_lossy(&raw).to_string();
             match serde_json::from_str::<Value>(&text) {
                 Ok(v) => Ok(v),
                 Err(e) => fail(format!("invalid JSON from {url}: {e}")),
             }
-        }
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp
-                .into_string()
-                .unwrap_or_default()
-                .chars()
-                .take(300)
-                .collect::<String>();
-            fail(format!("HTTP {code} fetching {url}: {body}"))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -387,7 +368,6 @@ fn reconcile_models_map(
     models_map: &mut Map<String, Value>,
     items: &[(String, Option<String>)],
     catalog: &Map<String, Value>,
-    stats: &mut Stats,
     provider_id: &str,
     provider_npm: Option<&str>,
 ) {
@@ -412,7 +392,6 @@ fn reconcile_models_map(
         ) {
             if obj.get("name") != Some(&Value::String(name.clone())) {
                 obj.insert("name".into(), Value::String(name));
-                stats.models_renamed += 1;
             }
         }
 
@@ -424,7 +403,6 @@ fn reconcile_models_map(
                 if let Some(desc) = crate::jsonio::catalog_description(minfo) {
                     if obj.get("description").and_then(Value::as_str) != Some(desc) {
                         obj.insert("description".into(), Value::String(desc.to_string()));
-                        stats.descriptions_updated += 1;
                     }
                 }
             }
@@ -436,7 +414,6 @@ fn reconcile_models_map(
         // New entries start disabled.
         if is_new {
             obj.insert("enabled".into(), Value::Bool(false));
-            stats.models_added += 1;
         }
     }
 
@@ -448,7 +425,6 @@ fn reconcile_models_map(
         .collect();
     for mid in stale {
         models_map.remove(&mid);
-        stats.models_removed += 1;
     }
 }
 
@@ -601,7 +577,6 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
                     core::py_repr(&pid)
                 );
             }
-            stats.providers_missing += 1;
             continue;
         };
 
@@ -661,7 +636,6 @@ pub fn update_providers_json_with(quiet: bool) -> Res<Stats> {
             models_map,
             &items,
             &catalog_models,
-            &mut stats,
             &pid,
             jsonio::catalog_npm(&provider_models_dev),
         );
@@ -1305,23 +1279,15 @@ fn find_provider_mut<'a>(doc: &'a mut Value, pid: &str) -> Option<&'a mut Map<St
 }
 
 /// `print_summary`
-pub fn print_summary(stats: &Stats, path: &std::path::Path) {
+pub fn print_summary(path: &std::path::Path) {
     println!();
-    println!("Updated {}", path.display());
-    println!("Sync Summary:");
-    println!("  providers synced: {}", stats.providers_synced);
-    println!("  models added: {}", stats.models_added);
-    println!("  models removed: {}", stats.models_removed);
-    println!("  models renamed: {}", stats.models_renamed);
-    println!("  descriptions updated: {}", stats.descriptions_updated);
-    println!("  models missing (skipped): {}", stats.models_missing);
-    println!("  providers missing (skipped): {}", stats.providers_missing);
-    println!("  tables written: {}", stats.tables_written);
+    println!("Updated: {}", path.display());
 }
 
 /// `print_relaunch`
 pub fn print_relaunch() {
     println!("Relaunch Grok Build for model changes");
+    println!();
 }
 
 /// `print_env_requirements`
@@ -1335,11 +1301,12 @@ pub fn print_env_requirements(providers_doc: &Value) {
     for env_var in &env_vars {
         println!("  {}", core::env_requirement_line(env_var));
     }
+    println!();
 }
 
 /// `print_sync_report`
-pub fn print_sync_report(stats: &Stats, path: &std::path::Path, providers_doc: &Value) {
-    print_summary(stats, path);
+pub fn print_sync_report(path: &std::path::Path, providers_doc: &Value) {
+    print_summary(path);
     print_env_requirements(providers_doc);
 }
 
@@ -2097,7 +2064,6 @@ mod tests {
     fn reconcile_writes_api_backend_on_new_and_refreshes() {
         let mut models_map = Map::new();
         let items = vec![("m".to_string(), Some("M".to_string()))];
-        let mut stats = Stats::default();
         let catalog = serde_json::json!({
             "m": {
                 "name": "M",
@@ -2108,7 +2074,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
@@ -2124,7 +2089,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog_anthropic.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
@@ -2143,13 +2107,11 @@ mod tests {
             other => panic!("expected object, got {other}"),
         };
         let items = vec![("live-only".to_string(), Some("Live".to_string()))];
-        let mut stats = Stats::default();
         let catalog = serde_json::json!({});
         reconcile_models_map(
             &mut models_map,
             &items,
             catalog.as_object().unwrap(),
-            &mut stats,
             "prov",
             Some("@ai-sdk/openai-compatible"),
         );
@@ -2169,7 +2131,6 @@ mod tests {
             other => panic!("expected object, got {other}"),
         };
         let items = vec![("m".to_string(), Some("M".to_string()))];
-        let mut stats = Stats::default();
 
         let catalog = serde_json::json!({
             "m": {
@@ -2181,7 +2142,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
@@ -2192,7 +2152,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog_no_npm.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
@@ -2216,7 +2175,6 @@ mod tests {
             other => panic!("expected object, got {other}"),
         };
         let items = vec![("m".to_string(), Some("M".to_string()))];
-        let mut stats = Stats::default();
 
         let catalog = serde_json::json!({
             "m": {
@@ -2231,7 +2189,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
@@ -2245,7 +2202,6 @@ mod tests {
             &mut models_map,
             &items,
             catalog_no_mods.as_object().unwrap(),
-            &mut stats,
             "prov",
             None,
         );
