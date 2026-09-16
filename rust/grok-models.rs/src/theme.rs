@@ -26,6 +26,9 @@ pub const ACCENT: [(u8, u8, u8); 3] = [
 /// Tokyo Nights red, used for the `[disabled]` state token (Python `P.ERROR`).
 pub const RED: (u8, u8, u8) = (247, 118, 142); // #f7768e
 
+/// Tokyo Night yellow — active sort-column label on the blue header bar.
+pub const YELLOW: Rgb = Rgb { r: 224, g: 175, b: 104 }; // #e0af68
+
 /// Curses pair ids preserved from the Python `P` enum (1..=10, plus `Error`).
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -176,10 +179,11 @@ fn comp(target: u8, bg: u8, alpha: f64) -> u8 {
 }
 
 /// Build an SGR string for fg+bg truecolor paint.
-pub fn sgr_paint(fg: Rgb, bg: Rgb, bold: bool) -> String {
+pub fn sgr_paint(fg: Rgb, bg: Rgb, bold: bool, underline: bool) -> String {
     let bold_part = if bold { "1;" } else { "" };
+    let ul_part = if underline { "4;" } else { "" };
     format!(
-        "\x1b[{bold_part}38;2;{r};{g};{b};48;2;{br};{bg};{bb}m",
+        "\x1b[{bold_part}{ul_part}38;2;{r};{g};{b};48;2;{br};{bg};{bb}m",
         r = fg.r,
         g = fg.g,
         b = fg.b,

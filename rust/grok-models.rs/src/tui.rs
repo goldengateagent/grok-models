@@ -96,6 +96,8 @@ pub enum Key {
     WheelUp(i32),
     /// Mouse-wheel down; payload is the 0-based row the event landed on.
     WheelDown(i32),
+    /// Input poll timed out; used to blink the search cursor.
+    Tick,
     Eof,
 }
 
@@ -110,11 +112,17 @@ pub struct Paint {
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,
+    pub underline: bool,
 }
 
 impl Paint {
     pub fn plain(fg: Rgb, bg: Rgb) -> Paint {
-        Paint { fg, bg, bold: false }
+        Paint {
+            fg,
+            bg,
+            bold: false,
+            underline: false,
+        }
     }
     pub fn bold(mut self) -> Paint {
         self.bold = true;
@@ -124,6 +132,10 @@ impl Paint {
         if cond {
             self.bold = true;
         }
+        self
+    }
+    pub fn underline(mut self) -> Paint {
+        self.underline = true;
         self
     }
 }
@@ -535,6 +547,49 @@ fn draw_header_at<S: Stdscr>(stdscr: &mut S, y: i32, text: &str) {
     let _ = h;
 }
 
+fn sort_header_paint(hot: bool) -> Paint {
+    let bg = bg_color(P::Selected);
+    if hot {
+        Paint::plain(theme::YELLOW, bg).bold().underline()
+    } else {
+        Paint::plain(tn_color(P::Selected), bg).bold()
+    }
+}
+
+/// `(n)` left-padded to 3-digit width so `| Search:` does not shift as
+/// the match count goes from 1 to 3 digits.
+fn filter_search_header(title: &str, count: usize, query: &str) -> String {
+    let n = format!("({count})");
+    format!("  {title}  {n:<5} | Search: {query}")
+}
+
+fn sort_col_seg(label: &str, width: usize, align_right: bool, hot: bool) -> Vec<(String, bool)> {
+    let pad = width.saturating_sub(label.chars().count());
+    let spaces = " ".repeat(pad);
+    if align_right {
+        vec![(spaces, false), (label.to_string(), hot)]
+    } else {
+        vec![(label.to_string(), hot), (spaces, false)]
+    }
+}
+
+fn draw_header_segs<S: Stdscr>(stdscr: &mut S, y: i32, x0: i32, segs: &[(String, bool)]) {
+    let (h, w) = stdscr.getmaxyx();
+    let bar = Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold();
+    let row_fill = "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
+    stdscr.addstr(y, 0, &row_fill, bar);
+    let mut x = x0;
+    let max_x = (w.max(1) as usize).saturating_sub(1);
+    for (text, hot) in segs {
+        if (x as usize) >= max_x {
+            break;
+        }
+        stdscr.addstr(y, x, text, sort_header_paint(*hot));
+        x += str_cols(text) as i32;
+    }
+    let _ = h;
+}
+
 fn draw_legend<S: Stdscr>(
     stdscr: &mut S,
     entries: &[(String, String)],
@@ -589,27 +644,39 @@ pub enum SelectOutcome {
 pub enum EnabledSort {
     Model,
     Provider,
-    IndexDesc,
+    IntelDesc,
     CodingDesc,
 }
 
 impl EnabledSort {
     fn cycle(self) -> Self {
         match self {
-            Self::Model => Self::Provider,
-            Self::Provider => Self::IndexDesc,
-            Self::IndexDesc => Self::CodingDesc,
+            Self::Model => Self::IntelDesc,
+            Self::IntelDesc => Self::CodingDesc,
+            Self::CodingDesc => Self::Provider,
+            Self::Provider => Self::Model,
+        }
+    }
+
+    /// Configure Models is one provider, so skip sort-by-provider.
+    fn cycle_same_provider(self) -> Self {
+        match self {
+            Self::Model | Self::Provider => Self::IntelDesc,
+            Self::IntelDesc => Self::CodingDesc,
             Self::CodingDesc => Self::Model,
         }
     }
 }
 
 /// A line drawn in the TUI main-menu preview panel beneath the provider
-/// list. A `Heading` is a full-width blue bar (like the screen title); a `Segs`
+/// list. A `Heading` is a full-width blue bar (like the screen title); a
+/// `HeadingCols` bar is the same with per-label sort highlight; a `Segs`
 /// line is a sequence of `(text, color)` segments (like `--models` output).
 #[derive(Clone)]
 pub enum PreviewLine {
     Heading(String),
+    /// Column labels on the blue bar. `true` = this label is the active sort.
+    HeadingCols(Vec<(String, bool)>),
     Segs(Vec<(String, P)>),
     Model {
         pid: String,
@@ -1069,6 +1136,9 @@ pub fn select_win<S: Stdscr>(
                             stdscr.addstr(y, 0, &hfill, hp);
                             stdscr.addstr(y, 4, text, hp.bold());
                         }
+                        PreviewLine::HeadingCols(parts) => {
+                            draw_header_segs(stdscr, y, 4, parts);
+                        }
                         PreviewLine::Segs(segs) => {
                             draw_seg_line(stdscr, y, 2, segs, (w.max(1) as usize).saturating_sub(3));
                         }
@@ -1299,7 +1369,7 @@ pub fn select_win<S: Stdscr>(
                 }
             }
             Key::Left | Key::Esc if back_on_left => return Some(SelectOutcome::Cancelled),
-            Key::Char('q') if !back_on_left => return Some(SelectOutcome::Cancelled),
+            Key::Char('q') | Key::Char('Q') if !back_on_left => return Some(SelectOutcome::Cancelled),
             Key::Char('s') | Key::Char('S') if !back_on_left => {
                 return Some(SelectOutcome::SortToggled(current));
             }
@@ -1351,8 +1421,13 @@ pub trait FilterList {
         None
     }
     /// Optional second header line (column labels). Drawn at y=1.
-    fn header_columns(&self) -> Option<String> {
+    fn header_columns(&self) -> Option<Vec<(String, bool)>> {
         None
+    }
+    /// `S`/`s` sort toggle. Return true if the key was consumed (recompute
+    /// the view); false lets it fall through as a filter character.
+    fn on_sort(&mut self) -> bool {
+        false
     }
 }
 
@@ -1422,6 +1497,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
     let mut cached_q: Option<String> = None;
     let mut cached_view: Option<(Vec<M::Entry>, Vec<(usize, P)>)> = None;
     let mut dirty = true;
+    let mut cursor_on = true;
     loop {
         if dirty || cached_q.as_deref() != Some(query.as_str()) {
             cached_view = Some(model.compute_view(entries, &query));
@@ -1452,16 +1528,34 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
         paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
         let header = model
             .header_bar(title, filtered.len(), &query)
-            .unwrap_or_else(|| format!("  {title}  ({})  |  Filter: {query}", filtered.len()));
+            .unwrap_or_else(|| filter_search_header(title, filtered.len(), &query));
         draw_header(stdscr, &header);
+        if cursor_on {
+            let cx = 2 + str_cols(&header) as i32;
+            stdscr.addstr(
+                0,
+                cx,
+                "█",
+                Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold(),
+            );
+        }
         let has_cols = if let Some(cols) = model.header_columns() {
-            draw_header_at(stdscr, 2, &cols);
+            draw_header_segs(stdscr, 2, 2, &cols);
+            let (h, w) = stdscr.getmaxyx();
+            let _ = h;
+            let rule = "─".repeat((w.max(1) as usize).saturating_sub(1));
+            stdscr.addstr(
+                3,
+                0,
+                &rule,
+                Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)),
+            );
             true
         } else {
             false
         };
 
-        let list_top = if has_cols { 3usize } else { 2usize };
+        let list_top = if has_cols { 4usize } else { 2usize };
         // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
         let list_h = ((h as usize)
             .saturating_sub(list_top + 4 + bottom_pad))
@@ -1547,7 +1641,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 
         match stdscr.getch() {
             Key::Resize => {}
-            Key::Esc => return,
+            Key::Esc | Key::Eof => return,
             Key::Interrupt => return,
             Key::Up if current > 0 => current -= 1,
             Key::Down if current + 1 < filtered.len() => current += 1,
@@ -1596,6 +1690,18 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                     } else if current + 1 < filtered.len() {
                         current += 1;
                     }
+                }
+            }
+            Key::Tick => {
+                cursor_on = !cursor_on;
+            }
+            Key::Char('S') => {
+                if model.on_sort() {
+                    dirty = true;
+                } else {
+                    query.push('S');
+                    current = 0;
+                    top = 0;
                 }
             }
             Key::Char(c) if c.is_ascii_graphic() || c == ' ' => {
@@ -1652,7 +1758,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 
 const MODEL_NAME_COL_MAX: usize = 35;
 
-const INDEX_COL_W: usize = 5;
+const INTEL_COL_W: usize = 5;
 const CODING_COL_W: usize = 6;
 const MODE_COL_W: usize = 10;
 
@@ -1683,21 +1789,21 @@ fn model_list_row(
         (format!("{mname:<name_w$}"), name_pair),
     ];
     if with_scores {
-        let (index_cell, coding_cell, score_pair) =
+        let (intel_cell, coding_cell, score_pair) =
             match crate::benchmarks::scores_for_live_id(mid) {
                 Some(s) => (
-                    format!("{:>w$.1}", s.index, w = INDEX_COL_W),
+                    format!("{:>w$.1}", s.intel, w = INTEL_COL_W),
                     format!("{:>w$.1}", s.coding, w = CODING_COL_W),
                     P::Value,
                 ),
                 None => (
-                    " ".repeat(INDEX_COL_W),
+                    " ".repeat(INTEL_COL_W),
                     " ".repeat(CODING_COL_W),
                     P::Muted,
                 ),
             };
         segs.push(("  ".to_string(), P::Text));
-        segs.push((index_cell, score_pair));
+        segs.push((intel_cell, score_pair));
         segs.push(("  ".to_string(), P::Text));
         segs.push((coding_cell, score_pair));
     }
@@ -1715,6 +1821,65 @@ struct ModelPicker<'a> {
     changed: bool,
     name_w: usize,
     pname_w: usize,
+    sort: EnabledSort,
+}
+
+fn configure_model_group(models: &Map<String, Value>, mid: &str) -> u8 {
+    let enabled = models
+        .get(mid)
+        .is_some_and(|v| v.is_object() && crate::get_bool_val(v, "enabled", true));
+    if enabled {
+        0
+    } else if mid.to_lowercase().contains("free") {
+        1
+    } else {
+        2
+    }
+}
+
+fn reorder_configure_models(
+    ordered: &mut [String],
+    models: &Map<String, Value>,
+    sort: EnabledSort,
+) {
+    let by_intel = match sort {
+        EnabledSort::IntelDesc => true,
+        EnabledSort::CodingDesc => false,
+        EnabledSort::Model | EnabledSort::Provider => return,
+    };
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < ordered.len() {
+        let group = configure_model_group(models, &ordered[i]);
+        let start = i;
+        i += 1;
+        while i < ordered.len() && configure_model_group(models, &ordered[i]) == group {
+            i += 1;
+        }
+        ranges.push((start, i));
+    }
+    for (start, end) in ranges {
+        ordered[start..end].sort_by(|a, b| {
+            let ord = if by_intel {
+                score_desc(a, b, |s| s.intel)
+            } else {
+                score_desc(a, b, |s| s.coding)
+            };
+            ord.then_with(|| {
+                let an = models
+                    .get(a)
+                    .map(|v| crate::name_or(v, a))
+                    .unwrap_or_else(|| a.clone())
+                    .to_lowercase();
+                let bn = models
+                    .get(b)
+                    .map(|v| crate::name_or(v, b))
+                    .unwrap_or_else(|| b.clone())
+                    .to_lowercase();
+                an.cmp(&bn)
+            })
+        });
+    }
 }
 
 impl<'a> FilterList for ModelPicker<'a> {
@@ -1722,7 +1887,8 @@ impl<'a> FilterList for ModelPicker<'a> {
 
     fn compute_view(&mut self, _entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
         let sorted = core::sort_model_indices(self.ids, self.models, Some(query));
-        let ordered: Vec<String> = sorted.filtered.iter().map(|&i| self.ids[i].clone()).collect();
+        let mut ordered: Vec<String> = sorted.filtered.iter().map(|&i| self.ids[i].clone()).collect();
+        reorder_configure_models(&mut ordered, self.models, self.sort);
         let mut separators: Vec<(usize, P)> = Vec::new();
         if 0 < sorted.enabled_count && sorted.enabled_count < ordered.len() {
             separators.push((sorted.enabled_count, P::Enabled));
@@ -1747,7 +1913,7 @@ impl<'a> FilterList for ModelPicker<'a> {
             .count()
             .min(core::PROVIDER_NAME_COL_MAX)
             + 2;
-        self.pname_w = self.pname_w.max("(Provider)".chars().count());
+        self.pname_w = self.pname_w.max("Provider".chars().count());
         (ordered, separators)
     }
 
@@ -1769,23 +1935,37 @@ impl<'a> FilterList for ModelPicker<'a> {
     }
 
     fn header_bar(&self, title: &str, count: usize, query: &str) -> Option<String> {
-        Some(format!("  {title}  ({count}) | Type To Filter: {query}"))
+        Some(filter_search_header(title, count, query))
     }
 
-    fn header_columns(&self) -> Option<String> {
-        let prov = format!("({:w$})", "Provider", w = self.pname_w.saturating_sub(2));
-        Some(format!(
-            "{model:<name_w$}  {index:>iw$}  {coding:>cw$}  {prov:<pw$}  {mode:<mw$}",
-            model = "Model",
-            name_w = self.name_w,
-            index = "Index",
-            iw = INDEX_COL_W,
-            coding = "Coding",
-            cw = CODING_COL_W,
-            pw = self.pname_w,
-            mode = "Mode",
-            mw = MODE_COL_W,
-        ))
+    fn header_columns(&self) -> Option<Vec<(String, bool)>> {
+        let sort = self.sort;
+        let mut segs = Vec::new();
+        segs.extend(sort_col_seg(
+            "Model",
+            self.name_w,
+            false,
+            matches!(sort, EnabledSort::Model),
+        ));
+        segs.push(("  ".into(), false));
+        segs.extend(sort_col_seg(
+            "Intel",
+            INTEL_COL_W,
+            true,
+            matches!(sort, EnabledSort::IntelDesc),
+        ));
+        segs.push(("  ".into(), false));
+        segs.extend(sort_col_seg(
+            "Coding",
+            CODING_COL_W,
+            true,
+            matches!(sort, EnabledSort::CodingDesc),
+        ));
+        segs.push(("  ".into(), false));
+        segs.extend(sort_col_seg("Provider", self.pname_w, false, false));
+        segs.push(("  ".into(), false));
+        segs.extend(sort_col_seg("Mode", MODE_COL_W, false, false));
+        Some(segs)
     }
 
     fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, mid: &String) -> bool {
@@ -1797,6 +1977,11 @@ impl<'a> FilterList for ModelPicker<'a> {
         entry.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(!cur));
         self.changed = true;
         true // stay open
+    }
+
+    fn on_sort(&mut self) -> bool {
+        self.sort = self.sort.cycle_same_provider();
+        true
     }
 }
 
@@ -1815,6 +2000,7 @@ pub fn model_search_win<S: Stdscr>(
         changed: false,
         name_w: 0,
         pname_w: 0,
+        sort: EnabledSort::Model,
     };
     filter_list_win(
         stdscr,
@@ -1824,6 +2010,7 @@ pub fn model_search_win<S: Stdscr>(
             ("↑/↓/←/→".to_string(), "nav".to_string()),
             ("ESC".to_string(), "back".to_string()),
             ("Enter".to_string(), "toggle".to_string()),
+            ("Shift+S".to_string(), "sort".to_string()),
             ("Type".to_string(), "filter".to_string()),
         ],
         &mut picker,
@@ -2632,9 +2819,9 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
                     .then_with(|| a.3.cmp(&b.3))
             });
         }
-        EnabledSort::IndexDesc => {
+        EnabledSort::IntelDesc => {
             model_rows.sort_by(|a, b| {
-                score_desc(a.3.as_str(), b.3.as_str(), |s| s.index)
+                score_desc(a.3.as_str(), b.3.as_str(), |s| s.intel)
                     .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
             });
         }
@@ -2662,17 +2849,17 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
         .max(title.chars().count());
     let level_w = rows_with_levels
         .iter()
-        .map(|r| r.4.chars().count())
+        .map(|r| r.4.chars().count() + 2)
         .max()
         .unwrap_or(0)
         .max("Default".chars().count());
     let prov_w = rows_with_levels
         .iter()
-        .map(|r| r.1.chars().count())
+        .map(|r| r.1.chars().count() + 2)
         .max()
         .unwrap_or(0)
         .max("Provider".chars().count());
-    const INDEX_W: usize = 5;
+    const INTEL_W: usize = 5;
     const CODING_W: usize = 6;
     fn pad_cell(s: &str, w: usize) -> String {
         format!("{s}{}", " ".repeat(w.saturating_sub(s.chars().count())))
@@ -2680,29 +2867,50 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
     // Heading marker -> full-width blue bar, like the screen title.
     // Count sits on the bar so paging cannot park a second "Summary"
     // line on the status row. Column labels share this bar; title sits
-    // in the name column. Order: model | index | coding | level | provider.
-    lines.push(PreviewLine::Heading(format!(
-        "{}  {:>w_i$}  {:>w_c$}  ({})  ({})",
-        pad_cell(&title, name_w),
-        "Index",
+    // in the name column. Order: model | intel | coding | level | provider.
+    let mut head: Vec<(String, bool)> = Vec::new();
+    head.extend(sort_col_seg(
+        &title,
+        name_w,
+        false,
+        matches!(sort, EnabledSort::Model),
+    ));
+    head.push(("  ".into(), false));
+    head.extend(sort_col_seg(
+        "Intel",
+        INTEL_W,
+        true,
+        matches!(sort, EnabledSort::IntelDesc),
+    ));
+    head.push(("  ".into(), false));
+    head.extend(sort_col_seg(
         "Coding",
-        pad_cell("Default", level_w),
-        pad_cell("Provider", prov_w),
-        w_i = INDEX_W,
-        w_c = CODING_W,
-    )));
+        CODING_W,
+        true,
+        matches!(sort, EnabledSort::CodingDesc),
+    ));
+    head.push(("  ".into(), false));
+    head.extend(sort_col_seg("Default", level_w, false, false));
+    head.push(("  ".into(), false));
+    head.extend(sort_col_seg(
+        "Provider",
+        prov_w,
+        false,
+        matches!(sort, EnabledSort::Provider),
+    ));
+    lines.push(PreviewLine::HeadingCols(head));
     lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
     for (mname, pname, pid, mid, level) in &rows_with_levels {
         let level_pair = if level != "none" { P::Free } else { P::Muted };
-        let (index_cell, coding_cell, score_pair) =
+        let (intel_cell, coding_cell, score_pair) =
             match crate::benchmarks::scores_for_live_id(mid) {
                 Some(s) => (
-                    format!("{:>w$.1}", s.index, w = INDEX_W),
+                    format!("{:>w$.1}", s.intel, w = INTEL_W),
                     format!("{:>w$.1}", s.coding, w = CODING_W),
                     P::Value,
                 ),
                 None => (
-                    " ".repeat(INDEX_W),
+                    " ".repeat(INTEL_W),
                     " ".repeat(CODING_W),
                     P::Muted,
                 ),
@@ -2717,16 +2925,16 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
                         &mname.chars().take(MODEL_NAME_COL_MAX).collect::<String>(),
                         name_w,
                     ),
-                    P::Value,
+                    P::Enabled,
                 ),
                 ("  ".to_string(), P::Text),
-                (index_cell, score_pair),
+                (intel_cell, score_pair),
                 ("  ".to_string(), P::Text),
                 (coding_cell, score_pair),
                 ("  ".to_string(), P::Text),
-                (format!("({})", pad_cell(level, level_w)), level_pair),
+                (pad_cell(&format!("({level})"), level_w), level_pair),
                 ("  ".to_string(), P::Text),
-                (format!("({})", pad_cell(pname, prov_w)), P::Text),
+                (pad_cell(&format!("({pname})"), prov_w), P::Text),
             ],
         });
     }
@@ -3420,7 +3628,7 @@ fn remove_provider(doc: &mut Value, pid: &str) {
 #[cfg(test)]
 fn emit_cell<W: std::io::Write>(w: &mut W, y: i32, x: i32, s: &str, paint: Paint) {
     let _ = write!(w, "\x1b[{};{}H", y.max(0) + 1, x.max(0) + 1);
-    let sgr = theme::sgr_paint(paint.fg, paint.bg, paint.bold);
+    let sgr = theme::sgr_paint(paint.fg, paint.bg, paint.bold, paint.underline);
     let _ = write!(w, "{}{}\x1b[0m", sgr, s);
 }
 
@@ -3536,6 +3744,9 @@ fn paint_style(p: Paint) -> Style {
     if p.bold {
         s = s.add_modifier(Modifier::BOLD);
     }
+    if p.underline {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
     s
 }
 
@@ -3558,7 +3769,7 @@ fn map_crossterm_key(k: event::KeyEvent) -> Option<Key> {
         KeyCode::Esc => Key::Esc,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
-        KeyCode::Char(c) => Key::Char(c.to_ascii_lowercase()),
+        KeyCode::Char(c) => Key::Char(c),
         _ => return None,
     })
 }
@@ -3631,7 +3842,7 @@ impl Stdscr for RealStdscr {
     fn getch(&mut self) -> Key {
         loop {
             match event::poll(Duration::from_millis(500)) {
-                Ok(false) => continue,
+                Ok(false) => return Key::Tick,
                 Err(_) => return Key::Eof,
                 Ok(true) => match event::read() {
                     Ok(Event::Key(k)) => {
@@ -3974,9 +4185,21 @@ mod tests {
             "unfiltered count missing: {headers:?}"
         );
         assert!(
-            headers.iter().any(|t| t.contains("(1)") && t.contains("Filter: b")),
+            headers.iter().any(|t| t.contains("(1)") && t.contains("Search: b")),
             "filtered count missing: {headers:?}"
         );
+    }
+
+    #[test]
+    fn filter_search_header_keeps_search_column_fixed() {
+        let a = filter_search_header("Configure Models", 1, "muse");
+        let b = filter_search_header("Configure Models", 12, "muse");
+        let c = filter_search_header("Configure Models", 123, "muse");
+        let pos = |s: &str| s.find("Search:").unwrap();
+        assert_eq!(pos(&a), pos(&b));
+        assert_eq!(pos(&b), pos(&c));
+        assert!(a.contains("(1)"));
+        assert!(c.contains("(123)"));
     }
 
     #[test]
@@ -4100,6 +4323,7 @@ mod tests {
             changed: false,
             name_w: 0,
             pname_w: 0,
+            sort: EnabledSort::Model,
         };
         filter_list_win(
             &mut f,
@@ -4955,9 +5179,12 @@ mod tests {
         // The preview builder produces the heading and enabled-model rows;
         // env cells live on the provider list, not in this pane.
         let preview = build_config_models_preview(&doc, EnabledSort::Model);
-        assert!(preview
-            .iter()
-            .any(|l| matches!(l, PreviewLine::Heading(t) if t.starts_with("Enabled Models: 1"))));
+        assert!(preview.iter().any(|l| match l {
+            PreviewLine::HeadingCols(parts) => parts
+                .iter()
+                .any(|(t, _)| t.starts_with("Enabled Models: 1")),
+            _ => false,
+        }));
         assert!(
             !preview.iter().any(|l| matches!(
                 l,
@@ -5148,7 +5375,7 @@ mod tests {
             .filter_map(|line| match line {
                 PreviewLine::Segs(segs) | PreviewLine::Model { segs, .. } => segs
                     .iter()
-                    .find(|(_, p)| *p == P::Value)
+                    .find(|(t, p)| *p == P::Enabled && !t.starts_with('●'))
                     .map(|(t, _)| t.trim_end().to_string()),
                 _ => None,
             })
@@ -5181,7 +5408,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_sort_by_index_and_coding_desc() {
+    fn preview_sort_by_intel_and_coding_desc() {
         use serde_json::json;
         let doc = json!({
             "providers": [
@@ -5205,23 +5432,47 @@ mod tests {
                 }
             ]
         });
-        let by_index =
-            preview_model_names(&build_config_models_preview(&doc, EnabledSort::IndexDesc));
-        assert_eq!(by_index, ["Grok", "Hy3", "None"]);
+        let by_intel =
+            preview_model_names(&build_config_models_preview(&doc, EnabledSort::IntelDesc));
+        assert_eq!(by_intel, ["Grok", "Hy3", "None"]);
         let by_coding =
             preview_model_names(&build_config_models_preview(&doc, EnabledSort::CodingDesc));
         assert_eq!(by_coding, ["Grok", "Hy3", "None"]);
         let preview = build_config_models_preview(&doc, EnabledSort::Model);
         let header = preview.iter().find_map(|l| match l {
-            PreviewLine::Heading(t) if t.contains("Index") => Some(t.clone()),
+            PreviewLine::HeadingCols(parts) => {
+                let t: String = parts.iter().map(|(s, _)| s.as_str()).collect();
+                if t.contains("Intel") {
+                    Some(t)
+                } else {
+                    None
+                }
+            }
             _ => None,
         });
         let header = header.expect("missing column header");
         assert!(header.starts_with("Enabled Models:"), "{header}");
         assert!(header.contains("Default"), "{header}");
         assert!(header.contains("Provider"), "{header}");
-        assert!(header.contains("Index"), "{header}");
+        assert!(header.contains("Intel"), "{header}");
         assert!(header.contains("Coding"), "{header}");
+
+        let model_hot = preview.iter().find_map(|l| match l {
+            PreviewLine::HeadingCols(parts) => parts
+                .iter()
+                .find(|(s, _)| s.starts_with("Enabled Models"))
+                .map(|(_, h)| *h),
+            _ => None,
+        });
+        assert_eq!(model_hot, Some(true));
+        let intel_preview = build_config_models_preview(&doc, EnabledSort::IntelDesc);
+        let intel_hot = intel_preview.iter().find_map(|l| match l {
+            PreviewLine::HeadingCols(parts) => {
+                parts.iter().find(|(s, _)| s == "Intel").map(|(_, h)| *h)
+            }
+            _ => None,
+        });
+        assert_eq!(intel_hot, Some(true));
     }
 
     #[test]
@@ -5243,10 +5494,16 @@ mod tests {
             changed: false,
             name_w: 0,
             pname_w: 0,
+            sort: EnabledSort::Model,
         };
         let (ordered, seps) = picker.compute_view(&ids, "");
         assert_eq!(ordered, ["pro", "hy3-free", "omega"]);
         assert_eq!(seps, vec![(1, P::Enabled), (2, P::Free)]);
+
+        picker.sort = EnabledSort::IntelDesc;
+        let (by_intel, seps_i) = picker.compute_view(&ids, "");
+        assert_eq!(seps_i, seps, "sort must keep enabled | free | rest buckets");
+        assert_eq!(by_intel[0], "pro");
 
         let nw = picker.name_w;
         let enabled_row = picker.render(&"pro".to_string(), false);
@@ -5309,21 +5566,21 @@ mod tests {
         assert!(
             headers
                 .iter()
-                .any(|t| t.contains("Configure Models") && t.contains("Type To Filter")),
+                .any(|t| t.contains("Configure Models") && t.contains("Search:")),
             "missing title/filter line: {headers:?}"
         );
-        let col_headers: Vec<_> = calls
+        let joined: String = calls
             .iter()
-            .filter(|(_, _, t, _)| t.contains("Index") && t.contains("Coding"))
-            .map(|(_, _, t, _)| t.clone())
+            .filter(|(y, _, _, _)| *y == 2)
+            .map(|(_, _, t, _)| t.as_str())
             .collect();
         assert!(
-            col_headers.iter().any(|t| t.contains("Model")
-                && t.contains("Index")
-                && t.contains("Coding")
-                && t.contains("Provider")
-                && t.contains("Mode")),
-            "missing column header: {col_headers:?}"
+            joined.contains("Model")
+                && joined.contains("Intel")
+                && joined.contains("Coding")
+                && joined.contains("Provider")
+                && joined.contains("Mode"),
+            "missing column header: {joined:?}"
         );
         let pro = token_paints(&calls, &format!("{:<nw$}", "Pro"));
         assert!(
@@ -5334,6 +5591,89 @@ mod tests {
         assert!(
             state.iter().any(|p| is_green(p.fg)),
             "selected enabled state turned white: {state:?}"
+        );
+    }
+
+    #[test]
+    fn configure_models_s_cycles_sort_without_provider_and_skips_filter() {
+        use serde_json::json;
+        let ids = vec![
+            "hy3".to_string(),
+            "grok-4.6".to_string(),
+            "aaa-free".to_string(),
+        ];
+        let mut models = json!({
+            "hy3": { "name": "Hy3", "enabled": true },
+            "grok-4.6": { "name": "Grok", "enabled": true },
+            "aaa-free": { "name": "Aaa Free", "enabled": false }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut picker = ModelPicker {
+            ids: &ids,
+            models: &mut models,
+            pname: "P".into(),
+            changed: false,
+            name_w: 0,
+            pname_w: 0,
+            sort: EnabledSort::Model,
+        };
+        let (by_name, seps) = picker.compute_view(&ids, "");
+        assert_eq!(by_name, ["grok-4.6", "hy3", "aaa-free"]);
+        assert_eq!(seps, vec![(2, P::Enabled)]);
+
+        picker.sort = EnabledSort::IntelDesc;
+        let (by_intel, seps_i) = picker.compute_view(&ids, "");
+        assert_eq!(seps_i, seps);
+        assert_eq!(&by_intel[..2], ["grok-4.6", "hy3"]);
+
+        assert_eq!(EnabledSort::Model.cycle(), EnabledSort::IntelDesc);
+        assert_eq!(EnabledSort::IntelDesc.cycle(), EnabledSort::CodingDesc);
+        assert_eq!(EnabledSort::CodingDesc.cycle(), EnabledSort::Provider);
+        assert_eq!(EnabledSort::Provider.cycle(), EnabledSort::Model);
+        assert_eq!(
+            EnabledSort::Model.cycle_same_provider(),
+            EnabledSort::IntelDesc
+        );
+        assert_eq!(
+            EnabledSort::IntelDesc.cycle_same_provider(),
+            EnabledSort::CodingDesc
+        );
+        assert_eq!(
+            EnabledSort::CodingDesc.cycle_same_provider(),
+            EnabledSort::Model
+        );
+        assert_eq!(
+            EnabledSort::Provider.cycle_same_provider(),
+            EnabledSort::IntelDesc
+        );
+
+        let mut f = FakeStdscr::new(20, 80);
+        f.script(Key::Char('S'));
+        f.script(Key::Esc);
+        filter_list_win(
+            &mut f,
+            &ids,
+            "Configure Models",
+            &[
+                ("Shift+S".into(), "sort".into()),
+                ("Type".into(), "filter".into()),
+            ],
+            &mut picker,
+        );
+        assert_eq!(picker.sort, EnabledSort::CodingDesc);
+        let calls = f.recorded();
+        let headers: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, t, _)| t.contains("Search:"))
+            .map(|(_, _, t, _)| t.clone())
+            .collect();
+        assert!(
+            headers
+                .iter()
+                .any(|t| t.contains("Search:") && !t.contains("Search: S") && !t.contains("Search: s")),
+            "Shift+S should not type into the filter: {headers:?}"
         );
     }
 

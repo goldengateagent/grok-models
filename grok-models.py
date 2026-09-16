@@ -71,68 +71,95 @@ _models_dev_api = None
 
 # Keys in both maps stay sorted ascending.
 BENCHMARKS = {
-    "claude-4-5-haiku-reasoning": {"name": "Claude 4.5 Haiku (Reasoning)", "index": 17.6, "coding": 43.9},
-    "claude-4-5-sonnet-thinking": {"name": "Claude 4.5 Sonnet (Reasoning)", "index": 21.2, "coding": 52.1},
-    "claude-4-sonnet-thinking": {"name": "Claude 4 Sonnet (Reasoning)", "index": 18.9, "coding": 37.6},
-    "claude-fable-5": {"name": "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)", "index": 49.7, "coding": 76.5},
-    "claude-fable-5-1": {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)", "index": 53.4, "coding": 81.6},
-    "claude-opus-4-5": {"name": "Claude Opus 4.5 (Non-reasoning)", "index": 23.7, "coding": 0.0},
-    "claude-opus-4-6": {"name": "Claude Opus 4.6 (Non-reasoning, High Effort)", "index": 26.4, "coding": 0.0},
-    "claude-opus-4-7": {"name": "Claude Opus 4.7 (Adaptive Reasoning, Max Effort)", "index": 40.7, "coding": 73.6},
-    "claude-opus-4-8": {"name": "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)", "index": 42, "coding": 74.3},
-    "claude-opus-5": {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)", "index": 50.7, "coding": 78},
-    "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6 (Non-reasoning, High Effort)", "index": 24.7, "coding": 0.0},
-    "claude-sonnet-5": {"name": "Claude Sonnet 5 (Adaptive Reasoning, Max Effort)", "index": 38.4, "coding": 71.5},
-    "deepseek-v4-1-flash": {"name": "DeepSeek V4.1 Flash (Reasoning, Max Effort)", "index": 39.5, "coding": 0.0},
-    "deepseek-v4-flash": {"name": "DeepSeek V4 Flash 0731 (Reasoning, Max Effort)", "index": 34.5, "coding": 69.1},
-    "deepseek-v4-flash-vision": {"name": "DeepSeek V4 Flash Vision (Reasoning, Max Effort)", "index": 35, "coding": 65},
-    "deepseek-v4-pro": {"name": "DeepSeek V4 Pro 0813 (Reasoning, Max Effort)", "index": 36.3, "coding": 68.8},
-    "gemini-3-6-flash": {"name": "Gemini 3.6 Flash (high)", "index": 34.3, "coding": 69.2},
-    "gemini-3-7-flash": {"name": "Gemini 3.7 Flash (high)", "index": 39.4, "coding": 76.1},
-    "gemini-3-8-flash": {"name": "Gemini 3.8 Flash (high)", "index": 41.2, "coding": 76.3},
-    "gemma-4-31b": {"name": "Gemma 4 31B (Reasoning)", "index": 15.4, "coding": 43.4},
-    "glm-5-2": {"name": "GLM-5.2 (max)", "index": 34, "coding": 68.8},
-    "glm-5-3": {"name": "GLM-5.3 (max)", "index": 44.9, "coding": 74.8},
-    "glm-5-3-flash": {"name": "GLM-5.3-Flash", "index": 41.9, "coding": 71.5},
-    "gpt-4": {"name": "GPT-4", "index": 6.7, "coding": 13.1},
-    "gpt-4-1": {"name": "GPT-4.1", "index": 12.7, "coding": 0.0},
-    "gpt-4o": {"name": "GPT-4o (Nov '24)", "index": 8.4, "coding": 0.0},
-    "gpt-4o-mini": {"name": "GPT-4o mini", "index": 6.7, "coding": 11.4},
-    "gpt-5": {"name": "GPT-5 (high)", "index": 23, "coding": 37.8},
-    "gpt-5-1": {"name": "GPT-5.1 (high)", "index": 24.7, "coding": 49.4},
-    "gpt-5-2": {"name": "GPT-5.2 (xhigh)", "index": 30.4, "coding": 0.0},
-    "gpt-5-4": {"name": "GPT-5.4 (xhigh)", "index": 39, "coding": 71.1},
-    "gpt-5-5": {"name": "GPT-5.5 (xhigh)", "index": 38.6, "coding": 74.9},
-    "gpt-5-6-luna": {"name": "GPT-5.6 Luna (max)", "index": 37.5, "coding": 71.4},
-    "gpt-5-6-sol": {"name": "GPT-5.6 Sol (max)", "index": 47.1, "coding": 77.4},
-    "gpt-5-6-terra": {"name": "GPT-5.6 Terra (max)", "index": 42.3, "coding": 76.7},
-    "gpt-6-astra": {"name": "GPT-6 Astra (max)", "index": 52.8, "coding": 76.9},
-    "gpt-oss-120b": {"name": "gpt-oss-120b (high)", "index": 12.3, "coding": 30.4},
-    "gpt-oss-20b": {"name": "gpt-oss-20b (high)", "index": 9, "coding": 20.7},
-    "grok-4-5": {"name": "Grok 4.5 (high)", "index": 39.1, "coding": 72.4},
-    "grok-4-6": {"name": "Grok 4.6 (high)", "index": 44.4, "coding": 76.8},
-    "hy3": {"name": "Hy3", "index": 25.8, "coding": 58.8},
-    "kimi-k2-7-code": {"name": "Kimi K2.7 Code", "index": 26.3, "coding": 60.8},
-    "kimi-k3": {"name": "Kimi K3 (max)", "index": 43.8, "coding": 76.2},
-    "ling-3-0-flash": {"name": "Ling 3.0 Flash", "index": 20.6, "coding": 50.6},
-    "ling-3-0-flash-vl": {"name": "Ling-3.0-flash-VL", "index": 25, "coding": 57},
-    "longcat-2-0": {"name": "LongCat 2.0", "index": 19.7, "coding": 45.3},
-    "mimo-v2-5-0424": {"name": "MiMo-V2.5", "index": 22.3, "coding": 56.8},
-    "minimax-m3": {"name": "MiniMax-M3", "index": 29.6, "coding": 58.6},
-    "muse-spark-1-2": {"name": "Muse Spark 1.2 (xhigh)", "index": 39.8, "coding": 72.2},
-    "muse-spark-1-3": {"name": "Muse Spark 1.3 (max)", "index": 48.2, "coding": 75.8},
-    "nemotron-3-5-lightning": {"name": "Nemotron 3.5 Lightning", "index": 13.6, "coding": 26.8},
-    "north-mini-code": {"name": "North Mini Code", "index": 9.9, "coding": 36.5},
-    "nvidia-nemotron-3-ultra-550b-a55b": {"name": "Nemotron 3 Ultra 550B A55B (Reasoning)", "index": 23.4, "coding": 49.3},
-    "qwen3-7-max": {"name": "Qwen3.7 Max", "index": 29.9, "coding": 66},
-    "qwen3-7-plus": {"name": "Qwen3.7 Plus", "index": 25.8, "coding": 55.9},
-    "qwen3-8-flash-next": {"name": "Qwen3.8-Flash-Next", "index": 39.9, "coding": 73.1},
-    "qwen3-8-max": {"name": "Qwen3.8 Max (0902)", "index": 45.4, "coding": 76.2},
+    "claude-4-5-haiku-reasoning": {"name": "Claude 4.5 Haiku (Reasoning)", "intel": 17.6, "coding": 43.9},
+    "claude-4-5-sonnet-thinking": {"name": "Claude 4.5 Sonnet (Reasoning)", "intel": 21.2, "coding": 52.1},
+    "claude-4-sonnet-thinking": {"name": "Claude 4 Sonnet (Reasoning)", "intel": 18.9, "coding": 37.6},
+    "claude-fable-5": {"name": "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)", "intel": 49.7, "coding": 76.5},
+    "claude-fable-5-1": {"name": "Claude Fable 5.1 (Adaptive Reasoning, Max Effort, Default Fallback)", "intel": 53.4, "coding": 81.6},
+    "claude-opus-4-5": {"name": "Claude Opus 4.5 (Non-reasoning)", "intel": 23.7, "coding": 0.0},
+    "claude-opus-4-6": {"name": "Claude Opus 4.6 (Non-reasoning, High Effort)", "intel": 26.4, "coding": 0.0},
+    "claude-opus-4-7": {"name": "Claude Opus 4.7 (Adaptive Reasoning, Max Effort)", "intel": 40.7, "coding": 73.6},
+    "claude-opus-4-8": {"name": "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)", "intel": 42.0, "coding": 74.3},
+    "claude-opus-5": {"name": "Claude Opus 5 (Adaptive Reasoning, Max Effort)", "intel": 50.7, "coding": 78.0},
+    "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6 (Non-reasoning, High Effort)", "intel": 24.7, "coding": 0.0},
+    "claude-sonnet-5": {"name": "Claude Sonnet 5 (Adaptive Reasoning, Max Effort)", "intel": 38.4, "coding": 71.5},
+    "deepseek-v4-1-flash": {"name": "DeepSeek V4.1 Flash (Reasoning, Max Effort)", "intel": 39.5, "coding": 0.0},
+    "deepseek-v4-flash": {"name": "DeepSeek V4 Flash 0731 (Reasoning, Max Effort)", "intel": 34.5, "coding": 69.1},
+    "deepseek-v4-flash-vision": {"name": "DeepSeek V4 Flash Vision (Reasoning, Max Effort)", "intel": 35.0, "coding": 65.0},
+    "deepseek-v4-pro": {"name": "DeepSeek V4 Pro 0813 (Reasoning, Max Effort)", "intel": 36.3, "coding": 68.8},
+    "gemini-3-6-flash": {"name": "Gemini 3.6 Flash (high)", "intel": 34.3, "coding": 69.2},
+    "gemini-3-7-flash": {"name": "Gemini 3.7 Flash (high)", "intel": 39.4, "coding": 76.1},
+    "gemini-3-8-flash": {"name": "Gemini 3.8 Flash (high)", "intel": 41.2, "coding": 76.3},
+    "gemma-4-26b-a4b": {"name": "Gemma 4 26B A4B (Reasoning)", "intel": 16.7, "coding": 39.3},
+    "gemma-4-31b": {"name": "Gemma 4 31B (Reasoning)", "intel": 15.4, "coding": 43.4},
+    "glm-5": {"name": "GLM-5 (Reasoning)", "intel": 27.9, "coding": 0.0},
+    "glm-5-1": {"name": "GLM-5.1 (Reasoning)", "intel": 26.4, "coding": 55.8},
+    "glm-5-2": {"name": "GLM-5.2 (max)", "intel": 34.0, "coding": 68.8},
+    "glm-5-3": {"name": "GLM-5.3 (max)", "intel": 44.9, "coding": 74.8},
+    "glm-5-3-flash": {"name": "GLM-5.3-Flash", "intel": 41.9, "coding": 71.5},
+    "gpt-4": {"name": "GPT-4", "intel": 6.7, "coding": 13.1},
+    "gpt-4-1": {"name": "GPT-4.1", "intel": 12.7, "coding": 0.0},
+    "gpt-4o": {"name": "GPT-4o (Nov '24)", "intel": 8.4, "coding": 0.0},
+    "gpt-4o-mini": {"name": "GPT-4o mini", "intel": 6.7, "coding": 11.4},
+    "gpt-5": {"name": "GPT-5 (high)", "intel": 23.0, "coding": 37.8},
+    "gpt-5-1": {"name": "GPT-5.1 (high)", "intel": 24.7, "coding": 49.4},
+    "gpt-5-2": {"name": "GPT-5.2 (xhigh)", "intel": 30.4, "coding": 0.0},
+    "gpt-5-4": {"name": "GPT-5.4 (xhigh)", "intel": 39.0, "coding": 71.1},
+    "gpt-5-5": {"name": "GPT-5.5 (xhigh)", "intel": 38.6, "coding": 74.9},
+    "gpt-5-6-luna": {"name": "GPT-5.6 Luna (max)", "intel": 37.5, "coding": 71.4},
+    "gpt-5-6-sol": {"name": "GPT-5.6 Sol (max)", "intel": 47.1, "coding": 77.4},
+    "gpt-5-6-terra": {"name": "GPT-5.6 Terra (max)", "intel": 42.3, "coding": 76.7},
+    "gpt-6-astra": {"name": "GPT-6 Astra (max)", "intel": 52.8, "coding": 76.9},
+    "gpt-oss-120b": {"name": "gpt-oss-120b (high)", "intel": 12.3, "coding": 30.4},
+    "gpt-oss-20b": {"name": "gpt-oss-20b (high)", "intel": 9.0, "coding": 20.7},
+    "grok-4-5": {"name": "Grok 4.5 (high)", "intel": 39.1, "coding": 72.4},
+    "grok-4-6": {"name": "Grok 4.6 (high)", "intel": 44.4, "coding": 76.8},
+    "hy3": {"name": "Hy3", "intel": 25.8, "coding": 58.8},
+    "inkling": {"name": "Inkling (xhigh)", "intel": 25.5, "coding": 52.1},
+    "inkling-small": {"name": "Inkling Small", "intel": 26.1, "coding": 52.9},
+    "kimi-k2-7-code": {"name": "Kimi K2.7 Code", "intel": 26.3, "coding": 60.8},
+    "kimi-k3": {"name": "Kimi K3 (max)", "intel": 43.8, "coding": 76.2},
+    "ling-3-0-flash": {"name": "Ling 3.0 Flash", "intel": 20.6, "coding": 50.6},
+    "ling-3-0-flash-vl": {"name": "Ling-3.0-flash-VL", "intel": 25.0, "coding": 57.0},
+    "longcat-2-0": {"name": "LongCat 2.0", "intel": 19.7, "coding": 45.3},
+    "mimo-v2-5-0424": {"name": "MiMo-V2.5", "intel": 22.3, "coding": 56.8},
+    "mimo-v2-5-pro": {"name": "MiMo-V2.5-Pro", "intel": 26.4, "coding": 60.2},
+    "minimax-m3": {"name": "MiniMax-M3", "intel": 29.6, "coding": 58.6},
+    "mistral-large-3": {"name": "Mistral Large 3", "intel": 9.7, "coding": 20.1},
+    "mistral-small-4": {"name": "Mistral Small 4 (Reasoning)", "intel": 11.5, "coding": 26.6},
+    "muse-glimmer": {"name": "Muse Glimmer (high)", "intel": 18.1, "coding": 49.0},
+    "muse-spark-1-2": {"name": "Muse Spark 1.2 (xhigh)", "intel": 39.8, "coding": 72.2},
+    "muse-spark-1-3": {"name": "Muse Spark 1.3 (max)", "intel": 48.2, "coding": 75.8},
+    "nemotron-3-5-lightning": {"name": "Nemotron 3.5 Lightning", "intel": 13.6, "coding": 26.8},
+    "nemotron-3-nano-omni-30b-a3b": {"name": "Nemotron 3 Nano Omni 30B A3B Reasoning", "intel": 10.3, "coding": 13.8},
+    "north-mini-code": {"name": "North Mini Code", "intel": 9.9, "coding": 36.5},
+    "nova-2-0-lite-reasoning": {"name": "Nova 2.0 Lite (high)", "intel": 13.4, "coding": 23.0},
+    "nova-lite": {"name": "Nova Lite", "intel": 6.7, "coding": 0.0},
+    "nova-micro": {"name": "Nova Micro", "intel": 5.9, "coding": 0.0},
+    "nova-premier": {"name": "Nova Premier", "intel": 9.2, "coding": 0.0},
+    "nova-pro": {"name": "Nova Pro", "intel": 7.0, "coding": 0.0},
+    "nvidia-nemotron-3-nano-30b-a3b-reasoning": {"name": "NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)", "intel": 8.9, "coding": 14.4},
+    "nvidia-nemotron-3-super-120b-a12b": {"name": "Nemotron 3 Super 120B A12B (Reasoning)", "intel": 13.6, "coding": 37.7},
+    "nvidia-nemotron-3-ultra-550b-a55b": {"name": "Nemotron 3 Ultra 550B A55B (Reasoning)", "intel": 23.4, "coding": 49.3},
+    "qwen3-5-397b-a17b": {"name": "Qwen3.5 397B A17B (Reasoning)", "intel": 19.1, "coding": 48.2},
+    "qwen3-7-max": {"name": "Qwen3.7 Max", "intel": 29.9, "coding": 66.0},
+    "qwen3-7-plus": {"name": "Qwen3.7 Plus", "intel": 25.8, "coding": 55.9},
+    "qwen3-8-flash-next": {"name": "Qwen3.8-Flash-Next", "intel": 39.9, "coding": 73.1},
+    "qwen3-8-max": {"name": "Qwen3.8 Max (0902)", "intel": 45.4, "coding": 76.2},
+    "step-3-7-flash": {"name": "Step 3.7 Flash", "intel": 19.5, "coding": 39.6},
 }
 
 MODEL_TO_SLUG = {
+    "amazon/nova-2-lite-v1": "nova-2-0-lite-reasoning",
+    "amazon/nova-lite-v1": "nova-lite",
+    "amazon/nova-micro-v1": "nova-micro",
+    "amazon/nova-premier-v1": "nova-premier",
+    "amazon/nova-pro-v1": "nova-pro",
     "anthropic/claude-fable-5": "claude-fable-5",
     "anthropic/claude-fable-5.1": "claude-fable-5-1",
+    "anthropic/claude-opus-4.6": "claude-opus-4-6",
+    "anthropic/claude-opus-4.7": "claude-opus-4-7",
+    "anthropic/claude-opus-4.8": "claude-opus-4-8",
     "anthropic/claude-opus-5": "claude-opus-5",
     "anthropic/claude-sonnet-5": "claude-sonnet-5",
     "claude-fable-5": "claude-fable-5",
@@ -152,9 +179,12 @@ MODEL_TO_SLUG = {
     "deepseek-v4-flash": "deepseek-v4-flash",
     "deepseek-v4-flash-free": "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp": "deepseek-v4-flash-vision",
+    "deepseek-v4-flash:0731-cloud": "deepseek-v4-flash",
     "deepseek-v4-pro": "deepseek-v4-pro",
     "deepseek-v4.1-flash": "deepseek-v4-1-flash",
     "deepseek-v4.1-flash:cloud": "deepseek-v4-1-flash",
+    "deepseek/deepseek-v4-flash-0731": "deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-vision-exp": "deepseek-v4-flash-vision",
     "deepseek/deepseek-v4.1-flash": "deepseek-v4-1-flash",
     "dots-studio/dots-3-note-preview:free": "",
     "gemini-3.6-flash": "gemini-3-6-flash",
@@ -162,13 +192,19 @@ MODEL_TO_SLUG = {
     "gemini-3.8-flash": "gemini-3-8-flash",
     "gemma4:31b-cloud": "gemma-4-31b",
     "glm-5.2": "glm-5-2",
+    "glm-5.2:cloud": "glm-5-2",
     "glm-5.3": "glm-5-3",
     "glm-5.3-flash": "glm-5-3-flash",
     "glm-5.3-flash:cloud": "glm-5-3-flash",
     "glm-5.3:cloud": "glm-5-3",
+    "google/gemini-3.6-flash": "gemini-3-6-flash",
+    "google/gemini-3.7-flash": "gemini-3-7-flash",
     "google/gemini-3.8-flash": "gemini-3-8-flash",
+    "google/gemma-4-26b-a4b-it:free": "gemma-4-26b-a4b",
     "google/gemma-4-31b-it": "gemma-4-31b",
     "google/gemma-4-31b-it:free": "gemma-4-31b",
+    "gpt-5.4": "gpt-5-4",
+    "gpt-5.5": "gpt-5-5",
     "gpt-5.6-luna": "gpt-5-6-luna",
     "gpt-5.6-sol": "gpt-5-6-sol",
     "gpt-5.6-terra": "gpt-5-6-terra",
@@ -177,8 +213,12 @@ MODEL_TO_SLUG = {
     "grok-4.5": "grok-4-5",
     "grok-4.6": "grok-4-6",
     "hy3": "hy3",
+    "hy4-preview": "",
+    "inclusionai/ling-3.0-flash": "ling-3-0-flash",
+    "inclusionai/ling-3.0-flash-fin": "ling-3-0-flash",
     "inclusionai/ling-3.0-flash-fin:free": "ling-3-0-flash",
     "inclusionai/ling-3.0-flash-sante:free": "ling-3-0-flash",
+    "inclusionai/ling-3.0-flash-vl": "ling-3-0-flash-vl",
     "inclusionai/ling-3.0-flash-vl:free": "ling-3-0-flash-vl",
     "kimi-k2.7-code": "kimi-k2-7-code",
     "kimi-k2.7-code:cloud": "kimi-k2-7-code",
@@ -187,15 +227,21 @@ MODEL_TO_SLUG = {
     "ling-3.0-flash-fin-free": "ling-3-0-flash",
     "liquid/lfm-2.5-2.6b:free": "",
     "longcat-2.0": "longcat-2-0",
+    "meta/muse-glimmer-30b": "muse-glimmer",
     "meta/muse-spark-1.2": "muse-spark-1-2",
     "meta/muse-spark-1.2-contributor": "muse-spark-1-2",
     "meta/muse-spark-1.3": "muse-spark-1-3",
     "meta/muse-spark-1.3-contributor": "muse-spark-1-3",
     "mimo-v2.5": "mimo-v2-5-0424",
     "mimo-v2.5-free": "mimo-v2-5-0424",
+    "mimo-v2.5-pro": "mimo-v2-5-pro",
     "minimax-m3": "minimax-m3",
     "minimax-m3:cloud": "minimax-m3",
     "minimax/minimax-m3": "minimax-m3",
+    "mistral-large-3:675b-cloud": "mistral-large-3",
+    "mistralai/mistral-nemo": "",
+    "mistralai/mistral-small-2603": "mistral-small-4",
+    "moonshotai/kimi-k2.7-code": "kimi-k2-7-code",
     "moonshotai/kimi-k3": "kimi-k3",
     "muse-spark-1.2": "muse-spark-1-2",
     "muse-spark-1.2-contributor": "muse-spark-1-2",
@@ -203,13 +249,19 @@ MODEL_TO_SLUG = {
     "muse-spark-1.3": "muse-spark-1-3",
     "muse-spark-1.3-contributor": "muse-spark-1-3",
     "muse-spark-1.3-contributor-free": "muse-spark-1-3",
+    "nemotron-3-nano:30b-cloud": "nvidia-nemotron-3-nano-30b-a3b-reasoning",
+    "nemotron-3-super:cloud": "nvidia-nemotron-3-super-120b-a12b",
     "nemotron-3-ultra-free": "nvidia-nemotron-3-ultra-550b-a55b",
     "nemotron-3-ultra:cloud": "nvidia-nemotron-3-ultra-550b-a55b",
     "nemotron-3.5-lightning-free": "nemotron-3-5-lightning",
     "nex-agi/nex-n2.5-mini:free": "",
     "nex-agi/nex-n2.5-pro:free": "",
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16": "nemotron-3-5-lightning",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": "nemotron-3-nano-omni-30b-a3b",
+    "nvidia/nemotron-3-super-120b-a12b:free": "nvidia-nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-ultra-550b-a55b": "nvidia-nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3-ultra-550b-a55b:free": "nvidia-nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-content-safety:free": "",
     "nvidia/nemotron-3.5-lightning": "nemotron-3-5-lightning",
     "nvidia/nemotron-3.5-lightning:free": "nemotron-3-5-lightning",
     "openai/gpt-4": "gpt-4",
@@ -232,18 +284,34 @@ MODEL_TO_SLUG = {
     "openai/gpt-oss-120b": "gpt-oss-120b",
     "openai/gpt-oss-20b": "gpt-oss-20b",
     "openrouter/free": "",
+    "poolside/laguna-s-2.1": "",
+    "poolside/laguna-s-2.1:free": "",
+    "poolside/laguna-xs-2.1": "",
+    "poolside/laguna-xs-2.1:free": "",
     "qwen/qwen3.8-flash": "qwen3-8-flash-next",
     "qwen/qwen3.8-max-0902": "qwen3-8-max",
-    "qwen3.5:397b-cloud": "",
+    "qwen3.5:397b-cloud": "qwen3-5-397b-a17b",
     "qwen3.7-max": "qwen3-7-max",
     "qwen3.7-plus": "qwen3-7-plus",
     "qwen3.8-flash": "qwen3-8-flash-next",
     "qwen3.8-max": "qwen3-8-max",
+    "stepfun/step-3.7-flash:free": "step-3-7-flash",
+    "tencent/Hy3": "hy3",
     "tencent/hy3": "hy3",
+    "tencent/hy4-preview": "",
+    "thinkingmachines/inkling-small:free": "inkling-small",
+    "thinkingmachines/inkling:free": "inkling",
     "x-ai/grok-4.5": "grok-4-5",
     "x-ai/grok-4.6": "grok-4-6",
+    "xiaomi/mimo-v2.5": "mimo-v2-5-0424",
+    "z-ai/glm-5": "glm-5",
+    "z-ai/glm-5.1": "glm-5-1",
+    "z-ai/glm-5.2": "glm-5-2",
+    "z-ai/glm-5.2:free": "glm-5-2",
     "z-ai/glm-5.3": "glm-5-3",
     "z-ai/glm-5.3-flash": "glm-5-3-flash",
+    "zai-org/GLM-5.3": "glm-5-3",
+    "zai-org/GLM-5.3-Flash": "glm-5-3-flash",
 }
 
 
@@ -1218,6 +1286,7 @@ _TN = {
     "cyan": (125, 207, 255),       # #7dcfff  free tags / running
     "green": (158, 206, 106),      # #9ece6a  success / on
     "red": (247, 118, 142),        # #f7768e  error / missing key
+    "yellow": (224, 175, 104),     # #e0af68  active sort-column header
 }
 
 # Color pair ids used by the TUI. Backgrounds are pinned to the theme bg so
@@ -1243,6 +1312,7 @@ class P:
     CODE_STRING = 17  # white on black — string constants in code block
     CODE_SYMBOL = 18  # blue on black — symbols (=, quotes) in code block
     CODE_VAR = 19     # green on black — variable names in code block
+    SORT_HEADER = 21  # yellow on selection bg — active sort column label
 
 
 def _char_cols(ch: str) -> int:
@@ -1342,6 +1412,7 @@ def _curses_init_colors() -> None:
     cyan = rgb(*_TN["cyan"])
     green = rgb(*_TN["green"])
     red = rgb(*_TN["red"])
+    yellow = rgb(*_TN["yellow"])
     bg = rgb(*_TN["bg"])
     visual = rgb(*_TN["bg_visual"])
 
@@ -1378,6 +1449,7 @@ def _curses_init_colors() -> None:
         P.CODE_STRING: (code_string, code_bg),
         P.CODE_SYMBOL: (_code_symbol, code_bg),
         P.CODE_VAR: (code_var, code_bg),
+        P.SORT_HEADER: (yellow, visual),
     }
     ok_ids: list[int] = []
     for pid, (f, b) in pairs.items():
@@ -1583,6 +1655,35 @@ def _curses_draw_header(stdscr, text: str, y: int = 0) -> None:
             stdscr, y, 2, _clip_cols(text, max(0, width - 4)),
             curses.color_pair(P.SELECTED) | curses.A_BOLD,
         )
+    except curses.error:
+        pass
+    _ = height
+
+
+def _sort_header_attr(hot: bool) -> int:
+    if hot:
+        return _cp(P.SORT_HEADER) | curses.A_BOLD | curses.A_UNDERLINE
+    return _cp(P.SELECTED) | curses.A_BOLD
+
+
+def _sort_col_seg(label: str, width: int, align_right: bool, hot: bool) -> list:
+    pad = max(0, width - len(label))
+    spaces = " " * pad
+    if align_right:
+        return [(spaces, False), (label, hot)]
+    return [(label, hot), (spaces, False)]
+
+
+def _curses_draw_header_segs(stdscr, segs, y: int = 0, x0: int = 2) -> None:
+    height, width = stdscr.getmaxyx()
+    try:
+        stdscr.addstr(y, 0, "\u00a0" * (width - 1), curses.color_pair(P.SELECTED))
+        x = x0
+        for text, hot in segs:
+            if x >= width - 1:
+                break
+            _addstr_cols(stdscr, y, x, text, _sort_header_attr(hot))
+            x += _str_cols(text)
     except curses.error:
         pass
     _ = height
@@ -2134,15 +2235,10 @@ def _curses_select_win(
                 for i, segs in enumerate(draw_lines):
                     y = avail_top + i
                     if isinstance(segs, tuple) and segs[0] == "heading":
-                        # Full-width blue background bar, like the title.
-                        try:
-                            stdscr.addstr(y, 0, " " * (width - 1), curses.color_pair(P.SELECTED))
-                            stdscr.addstr(
-                                y, 4, segs[1][:width - 4],
-                                curses.color_pair(P.SELECTED) | curses.A_BOLD,
-                            )
-                        except curses.error:
-                            pass
+                        parts = segs[1]
+                        if isinstance(parts, str):
+                            parts = [(parts, False)]
+                        _curses_draw_header_segs(stdscr, parts, y=y, x0=4)
                     else:
                         draw = segs[3] if isinstance(segs, tuple) and segs[0] == "model" else segs
                         is_model_sel = (
@@ -2506,6 +2602,11 @@ def _filter_list_view_rows(filtered, separators):
     return view
 
 
+def _filter_search_header(title: str, count: int, query: str) -> str:
+    n = f"({count})"
+    return f"  {title}  {n:<5} | Search: {query}"
+
+
 def _curses_filter_list_win(
     entries: list,
     stdscr,
@@ -2519,6 +2620,7 @@ def _curses_filter_list_win(
     status_fn=None,
     header_bar=None,
     header_columns=None,
+    on_sort=None,
 ) -> None:
     """Generic type-to-filter list widget drawn into an existing stdscr.
     compute_view(entries, query) -> (ordered_entries, separators); separators
@@ -2551,6 +2653,7 @@ def _curses_filter_list_win(
     _view_q = None
     _view = None
     _view_dirty = True
+    cursor_on = True
     while True:
         if query != _view_q or _view_dirty:
             filtered, separators = compute_view(entries, query)
@@ -2575,15 +2678,28 @@ def _curses_filter_list_win(
 
         # Header with filter
         if header_bar is not None:
-            _curses_draw_header(stdscr, header_bar(title, len(filtered), query))
+            header = header_bar(title, len(filtered), query)
         else:
-            _curses_draw_header(
-                stdscr, f"  {title}  ({len(filtered)})  |  Filter: {query}"
-            )
+            header = _filter_search_header(title, len(filtered), query)
+        _curses_draw_header(stdscr, header)
+        if cursor_on:
+            try:
+                _addstr_cols(
+                    stdscr, 0, 2 + _str_cols(header), "█",
+                    curses.color_pair(P.SELECTED) | curses.A_BOLD,
+                )
+            except curses.error:
+                pass
         list_top = 2
         if header_columns is not None:
-            _curses_draw_header(stdscr, header_columns(), y=2)
-            list_top = 3
+            _curses_draw_header_segs(stdscr, header_columns(), y=2, x0=2)
+            try:
+                stdscr.addstr(
+                    3, 0, "─" * (width - 1), curses.color_pair(P.CHEVRON)
+                )
+            except curses.error:
+                pass
+            list_top = 4
         # Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
         list_h = max(1, height - list_top - 4 - bottom_padding)
         if snap_to_current:
@@ -2654,7 +2770,12 @@ def _curses_filter_list_win(
 
         stdscr.refresh()
         _emit_sgr_bg()
+        stdscr.timeout(500)
         ch = _curses_getch(stdscr)
+        stdscr.timeout(-1)
+        if ch in (-1, curses.ERR):
+            cursor_on = not cursor_on
+            continue
         if ch is _CURSES_IGNORE:
             continue
         if ch == curses.KEY_RESIZE:
@@ -2663,7 +2784,7 @@ def _curses_filter_list_win(
         wheel = _as_wheel(ch)
         if wheel is not None:
             wkind, my = wheel
-            if not (2 <= my < 2 + list_h):
+            if not (list_top <= my < list_top + list_h):
                 continue
             if wkind == "wheel_down" and top + 1 < len(view):
                 top += 1
@@ -2720,6 +2841,9 @@ def _curses_filter_list_win(
                         current -= 1
                 elif current + 1 < len(filtered):
                     current += 1
+        elif on_sort is not None and ch == ord("S"):
+            on_sort()
+            _view_dirty = True
         elif 32 <= ch <= 126:
             query += chr(ch)
             current = 0
@@ -2729,18 +2853,19 @@ def _curses_filter_list_win(
 _MODEL_NAME_COL_MAX = 35;
 _PROVIDER_NAME_COL_MAX = 25
 _MAIN_PROVIDER_NAME_COL_MAX = 15
-_INDEX_COL_W = 5
+_INTEL_COL_W = 5
 _CODING_COL_W = 6
 _MODE_COL_W = 10
-_ENABLED_SORT_CYCLE = ("model", "provider", "index", "coding")
+_ENABLED_SORT_CYCLE = ("model", "intel", "coding", "provider")
+_CONFIGURE_SORT_CYCLE = ("model", "intel", "coding")
 
 
 def _score_cells(mid: str) -> tuple[str, str, int]:
     s = scores_for_live_id(mid)
     if s is None:
-        return (" " * _INDEX_COL_W, " " * _CODING_COL_W, P.MUTED)
+        return (" " * _INTEL_COL_W, " " * _CODING_COL_W, P.MUTED)
     return (
-        f"{s['index']:{_INDEX_COL_W}.1f}",
+        f"{s['intel']:{_INTEL_COL_W}.1f}",
         f"{s['coding']:{_CODING_COL_W}.1f}",
         P.VALUE,
     )
@@ -2758,10 +2883,10 @@ def _model_list_row(
         (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), name_pair),
     ]
     if with_scores:
-        index_cell, coding_cell, score_pair = _score_cells(mid)
+        intel_cell, coding_cell, score_pair = _score_cells(mid)
         segs.extend([
             ("  ", P.TEXT),
-            (index_cell, score_pair),
+            (intel_cell, score_pair),
             ("  ", P.TEXT),
             (coding_cell, score_pair),
         ])
@@ -2785,6 +2910,7 @@ def _curses_model_search_win(
     changed = False
     name_w = 0
     pname_w = 0
+    sort = ["model"]
 
     def _mname(mid):
         m = models.get(mid) if isinstance(models, dict) else None
@@ -2798,6 +2924,33 @@ def _curses_model_search_win(
         nonlocal name_w, pname_w
         indices, enabled_count, free_disabled_count = _sort_model_indices(ids, models, query)
         ordered = [ids[i] for i in indices]
+        if sort[0] in ("intel", "coding"):
+            field = sort[0]
+            def _group(mid):
+                m = models.get(mid)
+                enabled = bool(m.get("enabled", True)) if isinstance(m, dict) else False
+                if enabled:
+                    return 0
+                if "free" in mid.lower():
+                    return 1
+                return 2
+            groups = []
+            i = 0
+            while i < len(ordered):
+                g = _group(ordered[i])
+                start = i
+                i += 1
+                while i < len(ordered) and _group(ordered[i]) == g:
+                    i += 1
+                chunk = ordered[start:i]
+                chunk.sort(
+                    key=lambda mid: (
+                        -_score_sort_value(mid, field),
+                        (_mname(mid) or mid).lower(),
+                    )
+                )
+                groups.extend(chunk)
+            ordered = groups
         separators = []
         if 0 < enabled_count < len(ordered):
             separators.append((enabled_count, P.ENABLED))
@@ -2810,7 +2963,7 @@ def _curses_model_search_win(
         )
         name_w = max(name_w, len("Model"))
         pname_w = min(len(pname), _PROVIDER_NAME_COL_MAX) + 2
-        pname_w = max(pname_w, len("(Provider)"))
+        pname_w = max(pname_w, len("Provider"))
         return ordered, separators
 
     def render(mid, _is_sel):
@@ -2822,17 +2975,20 @@ def _curses_model_search_win(
         )
 
     def header_bar(title, count, query):
-        return f"  {title}  ({count}) | Type To Filter: {query}"
+        return _filter_search_header(title, count, query)
 
     def header_columns():
-        prov = f"({'Provider'.ljust(max(0, pname_w - 2))})"
-        return (
-            f"{'Model'.ljust(name_w)}  "
-            f"{'Index':>{_INDEX_COL_W}}  "
-            f"{'Coding':>{_CODING_COL_W}}  "
-            f"{prov.ljust(pname_w)}  "
-            f"{'Mode'.ljust(_MODE_COL_W)}"
-        )
+        segs = []
+        segs.extend(_sort_col_seg("Model", name_w, False, sort[0] == "model"))
+        segs.append(("  ", False))
+        segs.extend(_sort_col_seg("Intel", _INTEL_COL_W, True, sort[0] == "intel"))
+        segs.append(("  ", False))
+        segs.extend(_sort_col_seg("Coding", _CODING_COL_W, True, sort[0] == "coding"))
+        segs.append(("  ", False))
+        segs.extend(_sort_col_seg("Provider", pname_w, False, False))
+        segs.append(("  ", False))
+        segs.extend(_sort_col_seg("Mode", _MODE_COL_W, False, False))
+        return segs
 
     def toggle(mid):
         nonlocal changed
@@ -2843,15 +2999,26 @@ def _curses_model_search_win(
         changed = True
         return True  # stay open
 
+    def on_sort():
+        i = _CONFIGURE_SORT_CYCLE.index(sort[0])
+        sort[0] = _CONFIGURE_SORT_CYCLE[(i + 1) % len(_CONFIGURE_SORT_CYCLE)]
+
     _curses_filter_list_win(
         ids, stdscr,
         title="Configure Models",
-        legend=[("↑/↓/←/→", "nav"), ("ESC", "back"), ("Enter", "toggle"), ("Type", "filter")],
+        legend=[
+            ("↑/↓/←/→", "nav"),
+            ("ESC", "back"),
+            ("Enter", "toggle"),
+            ("Shift+S", "sort"),
+            ("Type", "filter"),
+        ],
         compute_view=compute_view,
         render=render,
         on_enter=toggle,
         header_bar=header_bar,
         header_columns=header_columns,
+        on_sort=on_sort,
     )
     return changed
 
@@ -4059,7 +4226,7 @@ def _build_config_models_preview(
 ) -> list:
     """Build the --models-style enabled-models listing as colored segment
     lines, for rendering in the empty space under the TUI main menu.
-    `sort` is model, provider, index, or coding."""
+    `sort` is model, provider, intel, or coding."""
     providers = [
         p for p in providers_doc.get("providers", [])
         if isinstance(p, dict) and p.get("id")
@@ -4084,9 +4251,9 @@ def _build_config_models_preview(
         model_rows.sort(key=lambda r: (r[0].lower(), r[1].lower(), r[2], r[3]))
     elif sort == "provider":
         model_rows.sort(key=lambda r: (r[1].lower(), r[0].lower(), r[2], r[3]))
-    elif sort == "index":
+    elif sort == "intel":
         model_rows.sort(
-            key=lambda r: (-_score_sort_value(r[3], "index"), r[0].lower())
+            key=lambda r: (-_score_sort_value(r[3], "intel"), r[0].lower())
         )
     elif sort == "coding":
         model_rows.sort(
@@ -4103,32 +4270,37 @@ def _build_config_models_preview(
         default=0,
     )
     name_w = max(name_w, len(title))
-    level_w = max((len(r[4]) for r in rows_with_levels), default=0)
+    level_w = max((len(r[4]) + 2 for r in rows_with_levels), default=0)
     level_w = max(level_w, len("Default"))
-    prov_w = max((len(r[1]) for r in rows_with_levels), default=0)
+    prov_w = max((len(r[1]) + 2 for r in rows_with_levels), default=0)
     prov_w = max(prov_w, len("Provider"))
     # Heading marker -> full-width blue bar. Column labels share this bar.
-    lines.append((
-        "heading",
-        f"{title.ljust(name_w)}  "
-        f"{'Index':>{_INDEX_COL_W}}  {'Coding':>{_CODING_COL_W}}  "
-        f"({'Default'.ljust(level_w)})  ({'Provider'.ljust(prov_w)})",
-    ))
+    head = []
+    head.extend(_sort_col_seg(title, name_w, False, sort == "model"))
+    head.append(("  ", False))
+    head.extend(_sort_col_seg("Intel", _INTEL_COL_W, True, sort == "intel"))
+    head.append(("  ", False))
+    head.extend(_sort_col_seg("Coding", _CODING_COL_W, True, sort == "coding"))
+    head.append(("  ", False))
+    head.extend(_sort_col_seg("Default", level_w, False, False))
+    head.append(("  ", False))
+    head.extend(_sort_col_seg("Provider", prov_w, False, sort == "provider"))
+    lines.append(("heading", head))
     lines.append([("", P.TEXT)])  # gap under the models header
     for mname, pname, pid, mid, level in rows_with_levels:
         level_pair = P.FREE if level != "none" else P.MUTED
-        index_cell, coding_cell, score_pair = _score_cells(mid)
+        intel_cell, coding_cell, score_pair = _score_cells(mid)
         lines.append(("model", pid, mid, [
             ("● ", P.ENABLED),
-            (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), P.VALUE),
+            (mname[:_MODEL_NAME_COL_MAX].ljust(name_w), P.ENABLED),
             ("  ", P.TEXT),
-            (index_cell, score_pair),
+            (intel_cell, score_pair),
             ("  ", P.TEXT),
             (coding_cell, score_pair),
             ("  ", P.TEXT),
-            (f"({level.ljust(level_w)})", level_pair),
+            (f"({level})".ljust(level_w), level_pair),
             ("  ", P.TEXT),
-            (f"({pname.ljust(prov_w)})", P.TEXT),
+            (f"({pname})".ljust(prov_w), P.TEXT),
         ]))
     if not total_enabled:
         lines.append([("No enabled models. Enable with --enable or grok-models", P.MUTED)])
