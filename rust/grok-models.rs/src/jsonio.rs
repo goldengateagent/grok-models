@@ -79,11 +79,12 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 7] =
+pub const TOP_LEVEL_KEY_ORDER: [&str; 8] =
     [
         "include_descriptions",
         "write_codex_config_toml",
         "codex_model_provider",
+        "web_search",
         "last_updated",
         "last_synced",
         "providers",
@@ -122,6 +123,8 @@ pub const INCLUDE_DESCRIPTIONS_DEFAULT: bool = false;
 pub const WRITE_CODEX_CONFIG_TOML_DEFAULT: bool = false;
 /// Default for codex_model_provider when providers.json does not carry it.
 pub const CODEX_MODEL_PROVIDER_DEFAULT: &str = "";
+/// Default for web_search when providers.json does not carry it.
+pub const WEB_SEARCH_DEFAULT: &str = "";
 
 /// models.dev `description` for one model entry, or None when absent/empty.
 pub fn catalog_description(minfo: &Value) -> Option<&str> {
@@ -272,6 +275,60 @@ pub fn codex_model_provider_id(doc: &Value) -> String {
         .to_string()
 }
 
+/// Current `web_search` table key (`<provider-id>-<model-id>`), or empty.
+pub fn web_search_id(doc: &Value) -> String {
+    doc.get("web_search")
+        .and_then(Value::as_str)
+        .unwrap_or(WEB_SEARCH_DEFAULT)
+        .to_string()
+}
+
+/// Persist the web_search model pick. Empty / None stores `""`.
+pub fn set_web_search(doc: &mut Value, table_key: Option<&str>) {
+    if let Some(obj) = doc.as_object_mut() {
+        let v = table_key.unwrap_or("").trim();
+        obj.insert("web_search".into(), Value::String(v.to_string()));
+    }
+}
+
+/// Enabled `responses` models on enabled providers, in file order:
+/// `(display name, table key)`. Other backends cannot run web search.
+pub fn enabled_web_search_models(doc: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(arr) = doc.get("providers").and_then(Value::as_array) else {
+        return out;
+    };
+    for p in arr {
+        if !p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+            continue;
+        }
+        let Some(pid) = p.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let Some(models) = p.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        for (mid, m) in models {
+            let enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            if !enabled {
+                continue;
+            }
+            // Web search only works on the responses API.
+            if m.get("api_backend").and_then(Value::as_str) != Some("responses") {
+                continue;
+            }
+            let name = m
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| crate::core::first_letter_cap(mid));
+            out.push((name, crate::core::table_model_id(pid, mid)));
+        }
+    }
+    out
+}
+
 /// Persist the Codex provider pick. None disables writing but leaves
 /// `codex_model_provider` so the next config write can clear the previously
 /// emitted Codex block once.
@@ -334,6 +391,20 @@ pub fn codex_status_token(doc: &Value) -> String {
         }
     }
     pid.to_string()
+}
+
+/// Main-menu state token for web_search: model display name, or "disabled".
+pub fn web_search_status_token(doc: &Value) -> String {
+    let key = web_search_id(doc);
+    if key.is_empty() {
+        return "disabled".to_string();
+    }
+    for (name, table_key) in enabled_web_search_models(doc) {
+        if table_key == key {
+            return name;
+        }
+    }
+    key
 }
 
 /// Single write path for providers.json: this is the only sort. Providers
@@ -639,5 +710,36 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(!out.contains("write_codex_config_toml"), "{out}");
         assert!(!out.contains("codex_model_provider"), "{out}");
+        assert!(!out.contains("web_search"), "{out}");
+    }
+
+    #[test]
+    fn set_web_search_stores_table_key_or_empty() {
+        let mut doc = sample_providers();
+        doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
+        set_web_search(&mut doc, Some("openrouter-openrouter_free"));
+        assert_eq!(doc["web_search"], "openrouter-openrouter_free");
+        set_web_search(&mut doc, None);
+        assert_eq!(doc["web_search"], "");
+        assert_eq!(web_search_status_token(&doc), "disabled");
+        set_web_search(&mut doc, Some("openrouter-openrouter_free"));
+        assert_eq!(web_search_status_token(&doc), "Free");
+    }
+
+    #[test]
+    fn enabled_web_search_models_requires_responses_backend() {
+        let doc = serde_json::json!({
+            "providers": [{
+                "id": "p",
+                "enabled": true,
+                "models": {
+                    "ok": { "name": "Ok", "enabled": true, "api_backend": "responses" },
+                    "chat": { "name": "Chat", "enabled": true, "api_backend": "chat_completions" },
+                    "missing": { "name": "Missing", "enabled": true }
+                }
+            }]
+        });
+        let got = enabled_web_search_models(&doc);
+        assert_eq!(got, vec![("Ok".into(), "p-ok".into())]);
     }
 }

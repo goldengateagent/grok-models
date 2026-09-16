@@ -212,6 +212,76 @@ pub fn write_toml_stdlib(
     Ok(text)
 }
 
+fn is_models_header(line: &str) -> bool {
+    line.trim() == "[models]"
+}
+
+fn is_web_search_assignment(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("web_search") && t["web_search".len()..].trim_start().starts_with('=')
+}
+
+/// Insert, replace, or drop `web_search` at the bottom of `[models]`.
+/// Empty `value` removes the key and does not write it.
+pub fn apply_models_web_search(text: &str, value: &str) -> Res<String> {
+    let value = value.trim();
+    let escaped = if value.is_empty() {
+        None
+    } else {
+        Some(toml_escape(&Value::String(value.to_string()))?)
+    };
+    let lines = split_lines_keepends(text);
+    let mut start = None;
+    let mut end = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        if is_table_header(line) && is_models_header(line) {
+            start = Some(i);
+            end = lines.len();
+            for j in (i + 1)..lines.len() {
+                if is_table_header(lines[j]) {
+                    end = j;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return Ok(match escaped {
+            None => text.to_string(),
+            Some(esc) => {
+                let block = format!("[models]\nweb_search = {esc}\n");
+                if text.trim().is_empty() {
+                    block
+                } else {
+                    format!("{block}\n{text}")
+                }
+            }
+        });
+    };
+    let mut body: Vec<&str> = lines[start + 1..end]
+        .iter()
+        .copied()
+        .filter(|l| !is_web_search_assignment(l))
+        .collect();
+    while body
+        .last()
+        .is_some_and(|l| l.trim().is_empty())
+    {
+        body.pop();
+    }
+    let mut out: Vec<String> = lines[..start + 1].iter().map(|s| s.to_string()).collect();
+    out.extend(body.iter().map(|s| s.to_string()));
+    if let Some(esc) = escaped {
+        out.push(format!("web_search = {esc}\n"));
+    }
+    if end < lines.len() {
+        out.push("\n".into());
+        out.extend(lines[end..].iter().map(|s| s.to_string()));
+    }
+    Ok(out.concat())
+}
+
 /// Drop every `[model.*]` section whose full key is in `removed_keys`
 /// (exact match), plus sections owned by `provider_ids` (prefix match, the
 /// tool's own rebuildable tables).
@@ -261,6 +331,7 @@ pub fn write_config_toml(
     provider_ids: &[String],
     tables: &[(String, serde_json::Map<String, Value>)],
     removed_keys: &std::collections::HashSet<String>,
+    web_search: &str,
 ) -> Res<std::path::PathBuf> {
     if path.exists() {
         let bak = path.with_file_name(format!(
@@ -271,7 +342,8 @@ pub fn write_config_toml(
             crate::SyncError(format!("failed to write {}: {}", bak.display(), e))
         })?;
     }
-    let text = write_toml_stdlib(path, provider_ids, tables, removed_keys)?;
+    let mut text = write_toml_stdlib(path, provider_ids, tables, removed_keys)?;
+    text = apply_models_web_search(&text, web_search)?;
     validate_toml_text(&text)?;
     crate::jsonio::atomic_write(path, &text)?;
     Ok(path.to_path_buf())
@@ -279,3 +351,33 @@ pub fn write_config_toml(
 
 // Re-exported for sync.rs convenience.
 pub use core::table_model_id;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_models_web_search_appends_and_clears() {
+        let src = "[models]\ndefault = \"kilo-x\"\ndefault_reasoning_effort = \"high\"\n\n[model.foo]\nmodel = \"x\"\n";
+        let with = apply_models_web_search(src, "opencode-muse-spark-1_3-contributor-free").unwrap();
+        assert!(
+            with.contains("[models]\ndefault = \"kilo-x\"\ndefault_reasoning_effort = \"high\"\nweb_search = \"opencode-muse-spark-1_3-contributor-free\"\n"),
+            "{with}"
+        );
+        let cleared = apply_models_web_search(&with, "").unwrap();
+        assert!(
+            !cleared.contains("web_search"),
+            "empty value must drop the key: {cleared}"
+        );
+        assert!(cleared.contains("default_reasoning_effort = \"high\""));
+    }
+
+    #[test]
+    fn apply_models_web_search_creates_section_when_missing() {
+        let src = "[model.foo]\nmodel = \"x\"\n";
+        let with = apply_models_web_search(src, "prov-mid").unwrap();
+        assert!(with.starts_with("[models]\nweb_search = \"prov-mid\"\n"));
+        let empty = apply_models_web_search(src, "").unwrap();
+        assert_eq!(empty, src);
+    }
+}

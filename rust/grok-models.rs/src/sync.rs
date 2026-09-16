@@ -1251,11 +1251,13 @@ tables will have an empty base_url",
     }
 
     let managed_ids: Vec<String> = managed.into_iter().collect();
+    let web_search = jsonio::web_search_id(&doc);
     let path = toml_out::write_config_toml(
         &paths::config_toml_path(),
         &managed_ids,
         &tables,
         &removed_keys,
+        &web_search,
     )?;
     if crate::jsonio::reset_codex_if_invalid(&mut doc) {
         jsonio::dump_providers(&paths::providers_path(), &mut doc)?;

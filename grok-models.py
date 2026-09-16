@@ -110,6 +110,7 @@ TOP_LEVEL_KEY_ORDER = (
     "include_descriptions",
     "write_codex_config_toml",
     "codex_model_provider",
+    "web_search",
     "last_updated",
     "last_synced",
     "providers",
@@ -144,6 +145,7 @@ MODEL_KEY_ORDER = (
 INCLUDE_DESCRIPTIONS_DEFAULT = False
 WRITE_CODEX_CONFIG_TOML_DEFAULT = False
 CODEX_MODEL_PROVIDER_DEFAULT = ""
+WEB_SEARCH_DEFAULT = ""
 
 CODE_PANEL_PAD_X = 1  # horizontal padding inside black code panels
 
@@ -325,6 +327,57 @@ def first_enabled_model_id(provider: dict) -> str | None:
 def codex_model_provider_id(doc: dict) -> str:
     raw = doc.get("codex_model_provider", CODEX_MODEL_PROVIDER_DEFAULT)
     return raw if isinstance(raw, str) else ""
+
+
+def web_search_id(doc: dict) -> str:
+    raw = doc.get("web_search", WEB_SEARCH_DEFAULT)
+    return raw if isinstance(raw, str) else ""
+
+
+def set_web_search(doc: dict, table_key: str | None) -> None:
+    """Persist the web_search model pick. None / '' stores ''."""
+    doc["web_search"] = (table_key or "").strip()
+
+
+def enabled_web_search_models(doc: dict) -> list[tuple[str, str]]:
+    """Enabled responses-backend models on enabled providers:
+    (display name, table key). Other backends cannot run web search."""
+    out: list[tuple[str, str]] = []
+    for p in doc.get("providers") or []:
+        if not isinstance(p, dict) or not bool(p.get("enabled", True)):
+            continue
+        pid = p.get("id")
+        if not isinstance(pid, str) or not pid:
+            continue
+        models = p.get("models")
+        if not isinstance(models, dict):
+            continue
+        for mid, m in models.items():
+            if not isinstance(m, dict) or not bool(m.get("enabled", True)):
+                continue
+            # Web search only works on the responses API.
+            if m.get("api_backend") != "responses":
+                continue
+            name = ""
+            if isinstance(m, dict):
+                raw = m.get("name")
+                if isinstance(raw, str) and raw:
+                    name = raw
+            if not name:
+                name = first_letter_cap(mid)
+            out.append((name, table_model_id(pid, mid)))
+    return out
+
+
+def web_search_status_token(doc: dict) -> str:
+    """Main-menu state token for web_search: model name, or 'disabled'."""
+    key = web_search_id(doc)
+    if not key:
+        return "disabled"
+    for name, table_key in enabled_web_search_models(doc):
+        if table_key == key:
+            return name
+    return key
 
 
 def set_codex_selection(doc: dict, pid: str | None) -> None:
@@ -3081,8 +3134,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             ]
             ordered = providers
             # Trailing block after a section rule: Codex Config, Model
-            # Descriptions toggle, Update Model List, Sync Model Config,
-            # then the two add actions.
+            # Descriptions toggle, Web Search picker, Update Model List,
+            # Sync Model Config, then the two add actions.
             descriptions_on = bool(
                 providers_doc.get("include_descriptions", INCLUDE_DESCRIPTIONS_DEFAULT)
             )
@@ -3092,6 +3145,8 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
             labels.append(_pad_state_label(_CODEX_CONFIG_LABEL, f"[{cstat}]", token_col))
             desc = "enabled" if descriptions_on else "disabled"
             labels.append(_pad_state_label(_MODEL_DESC_LABEL, f"[{desc}]", token_col))
+            wstat = web_search_status_token(providers_doc)
+            labels.append(_pad_state_label(_WEB_SEARCH_LABEL, f"[{wstat}]", token_col))
             last_updated = providers_doc.get("last_updated")
             if isinstance(last_updated, str) and last_updated:
                 labels.append(
@@ -3192,6 +3247,30 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                 menu_cursor = pi  # stay on the toggle row, like Configure Models
                 continue
             if pi == len(ordered) + 2:
+                models = enabled_web_search_models(providers_doc)
+                values = [None] + [key for _, key in models]
+                choices = ["disabled"] + [name for name, _ in models]
+                current = web_search_id(providers_doc)
+                initial = (
+                    0
+                    if not current or current not in values
+                    else values.index(current)
+                )
+                picked = _curses_select_win(
+                    stdscr, choices, "Web Search", initial=initial, back_on_left=True
+                )
+                if picked is not None:
+                    set_web_search(providers_doc, values[picked])
+                    dump_providers(PROVIDERS_PATH, providers_doc)
+                    update_config_toml(quiet=True)
+                    fresh = load_providers()
+                    providers_doc.clear()
+                    providers_doc.update(fresh)
+                    status_msg = f"Web Search {web_search_status_token(providers_doc)}"
+                    changed = True
+                menu_cursor = pi
+                continue
+            if pi == len(ordered) + 3:
                 try:
                     stats = update_providers_json(quiet=True)
                     fresh = load_providers()
@@ -3210,7 +3289,7 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: fetch live model list failed"
                 menu_cursor = pi
                 continue
-            if pi == len(ordered) + 3:
+            if pi == len(ordered) + 4:
                 try:
                     update_config_toml(quiet=True)
                     fresh = load_providers()
@@ -3221,14 +3300,14 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                     status_msg = str(exc) if str(exc).startswith("error ") else f"error {exc}: sync model config failed"
                 menu_cursor = pi
                 continue
-            if pi == len(ordered) + 4:
+            if pi == len(ordered) + 5:
                 added_msg = _curses_add_provider_win(providers_doc, providers, stdscr)
                 if added_msg:
                     status_msg = added_msg
                     changed = True
                 menu_cursor = pi
                 continue
-            if pi == len(ordered) + 5:
+            if pi == len(ordered) + 6:
                 enabled_msg = _curses_add_model_win(providers_doc, providers, stdscr)
                 if enabled_msg:
                     status_msg = enabled_msg
@@ -3448,6 +3527,7 @@ _PROVIDER_TOKEN_W = len("[disabled]")
 _PROVIDER_ENV_GAP = 2
 _PROVIDER_ENV_PAD = 1
 _MODEL_DESC_LABEL = "Model Descriptions"
+_WEB_SEARCH_LABEL = "Web Search"
 _CODEX_CONFIG_LABEL = "Codex Config"
 _UPDATE_LIST_LABEL = "Update Model List"
 _SYNC_CONFIG_LABEL = "Sync Model Config"
@@ -3476,6 +3556,7 @@ def _provider_state_token_col(providers: list) -> int:
     return max(
         provider_col,
         len(_MODEL_DESC_LABEL) + 1,
+        len(_WEB_SEARCH_LABEL) + 1,
         len(_CODEX_CONFIG_LABEL) + 1,
         len(_UPDATE_LIST_LABEL) + 1,
         len(_SYNC_CONFIG_LABEL) + 1,
@@ -4176,6 +4257,48 @@ def write_toml_stdlib(
     return text
 
 
+def _is_models_header(line: str) -> bool:
+    return line.strip() == "[models]"
+
+
+def _is_web_search_assignment(line: str) -> bool:
+    t = line.lstrip()
+    return t.startswith("web_search") and t[len("web_search") :].lstrip().startswith("=")
+
+
+def apply_models_web_search(text: str, value: str) -> str:
+    """Insert, replace, or drop web_search at the bottom of [models]."""
+    value = (value or "").strip()
+    escaped = None if not value else toml_escape(value)
+    lines = text.splitlines(keepends=True)
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        if is_table_header(line) and _is_models_header(line):
+            start = i
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if is_table_header(lines[j]):
+                    end = j
+                    break
+            break
+    if start is None:
+        if escaped is None:
+            return text
+        block = f"[models]\nweb_search = {escaped}\n"
+        return block if not text.strip() else f"{block}\n{text}"
+    body = [l for l in lines[start + 1 : end] if not _is_web_search_assignment(l)]
+    while body and not body[-1].strip():
+        body.pop()
+    out = lines[: start + 1] + body
+    if escaped is not None:
+        out.append(f"web_search = {escaped}\n")
+    if end < len(lines):
+        out.append("\n")
+        out.extend(lines[end:])
+    return "".join(out)
+
+
 def validate_toml_text(text: str) -> None:
     try:
         import tomllib
@@ -4191,11 +4314,13 @@ def write_config_toml(
     provider_ids: list[str],
     tables: list[tuple[str, dict]],
     removed_keys: set[str] | None = None,
+    web_search: str = "",
 ) -> Path:
     path = CONFIG_TOML_PATH
     if path.exists():
         shutil.copy2(path, path.with_name(path.name + ".bak"))
     text = write_toml_stdlib(path, provider_ids, tables, removed_keys)
+    text = apply_models_web_search(text, web_search)
     validate_toml_text(text)
     try:
         atomic_write(path, text)
@@ -4689,7 +4814,7 @@ def update_config_toml(*, quiet: bool = False) -> Path:
                 fields["description"] = desc
             tables.append((table_model_id(pid, mid), fields))
 
-    path = write_config_toml(managed, tables, removed_keys)
+    path = write_config_toml(managed, tables, removed_keys, web_search=web_search_id(providers_doc))
     if reset_codex_if_invalid(providers_doc):
         dump_providers(PROVIDERS_PATH, providers_doc)
     flag = bool(

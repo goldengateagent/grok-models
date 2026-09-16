@@ -363,6 +363,7 @@ pub const PROVIDER_ENV_GAP: usize = 2;
 /// Left/right inner padding of the env black box, in columns.
 pub const PROVIDER_ENV_PAD: i32 = 1;
 pub const MODEL_DESC_LABEL: &str = "Model Descriptions";
+pub const WEB_SEARCH_LABEL: &str = "Web Search";
 pub const CODEX_CONFIG_LABEL: &str = "Codex Config";
 pub const UPDATE_LIST_LABEL: &str = "Update Model List";
 pub const SYNC_CONFIG_LABEL: &str = "Sync Model Config";
@@ -406,6 +407,7 @@ pub fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
     };
     provider_col
         .max(MODEL_DESC_LABEL.len() + 1)
+        .max(WEB_SEARCH_LABEL.len() + 1)
         .max(CODEX_CONFIG_LABEL.len() + 1)
         .max(UPDATE_LIST_LABEL.len() + 1)
         .max(SYNC_CONFIG_LABEL.len() + 1)

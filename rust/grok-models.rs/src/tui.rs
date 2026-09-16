@@ -2714,8 +2714,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         let ordered: Vec<Map<String, Value>> = usable(doc);
         // Zero providers is a valid state: Add Provider is reachable first.
         // Trailing block after a section rule: Codex Config, Model
-        // Descriptions toggle, Update Model List, Sync Model Config, then
-        // the two add actions.
+        // Descriptions toggle, Web Search picker, Update Model List,
+        // Sync Model Config, then the two add actions.
         let descriptions_on = doc
             .get("include_descriptions")
             .and_then(Value::as_bool)
@@ -2730,6 +2730,11 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         labels.push(crate::core::pad_state_label(
             crate::core::MODEL_DESC_LABEL,
             &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
+            token_col,
+        ));
+        labels.push(crate::core::pad_state_label(
+            crate::core::WEB_SEARCH_LABEL,
+            &format!("[{}]", crate::jsonio::web_search_status_token(doc)),
             token_col,
         ));
         match doc.get("last_updated").and_then(Value::as_str) {
@@ -2755,7 +2760,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         labels.push("Add Provider".to_string());
         labels.push("Add Model".to_string());
         let preview = build_config_models_preview(doc, sort_by_name);
-        // Trailing-block rows (Codex Config, Model Descriptions, …) are
+        // Trailing-block rows (Codex Config, Model Descriptions, Web Search, …) are
         // selectable; Enter lands on them as SelectOutcome::Picked.
         let pi = match select_win(stdscr,
             &labels,
@@ -2899,6 +2904,58 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 2 {
+            let models = crate::jsonio::enabled_web_search_models(doc);
+            let mut values: Vec<Option<String>> = vec![None];
+            let mut choices: Vec<String> = vec!["disabled".to_string()];
+            for (name, key) in &models {
+                values.push(Some(key.clone()));
+                choices.push(name.clone());
+            }
+            let current = crate::jsonio::web_search_id(doc);
+            let initial = if current.is_empty() {
+                0
+            } else if let Some(pos) =
+                values.iter().position(|v| v.as_deref() == Some(current.as_str()))
+            {
+                pos
+            } else {
+                0
+            };
+            match select_win(
+                stdscr,
+                &choices,
+                "Web Search",
+                false,
+                &[],
+                true,
+                None,
+                None,
+                None,
+                None,
+                initial,
+                None,
+                None,
+                None,
+            ) {
+                Some(SelectOutcome::Picked(i)) => {
+                    crate::jsonio::set_web_search(doc, values[i].as_deref());
+                    let _ = jsonio::dump_providers(&paths::providers_path(), doc);
+                    let _ = crate::sync::update_config_toml_with(true);
+                    if let Ok(fresh) = jsonio::load_providers() {
+                        *doc = fresh;
+                    }
+                    status_msg = Some(format!(
+                        "Web Search {}",
+                        crate::jsonio::web_search_status_token(doc)
+                    ));
+                    changed = true;
+                }
+                _ => {}
+            }
+            menu_cursor = pi;
+            continue;
+        }
+        if pi == ordered.len() + 3 {
             match crate::sync::update_providers_json_with(true) {
                 Ok(stats) => {
                     if let Ok(fresh) = jsonio::load_providers() {
@@ -2931,7 +2988,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 3 {
+        if pi == ordered.len() + 4 {
             match crate::sync::update_config_toml_with(true) {
                 Ok(_) => {
                     if let Ok(fresh) = jsonio::load_providers() {
@@ -2950,7 +3007,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 4 {
+        if pi == ordered.len() + 5 {
             // "Add Provider" — modal over the models.dev catalog.
             if let Some(msg) = add_provider_win(stdscr, doc) {
                 status_msg = Some(msg);
@@ -2959,7 +3016,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             menu_cursor = pi;
             continue;
         }
-        if pi == ordered.len() + 5 {
+        if pi == ordered.len() + 6 {
             // "Add Model" — cross-provider modal; auto-adds a missing
             // provider and enables just that model.
             if let Some(msg) = add_model_win(stdscr, doc) {
@@ -5469,9 +5526,9 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        // provider → Codex Config → Descriptions → Update Model List →
+        // provider → Codex Config → Descriptions → Web Search → Update Model List →
         // Sync Model Config → Add Provider → Add Model → first Enabled Models row.
-        for _ in 0..7 {
+        for _ in 0..8 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // open reasoning picker
@@ -5513,7 +5570,7 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        for _ in 0..7 {
+        for _ in 0..8 {
             f.script(Key::Down);
         }
         f.script(Key::Enter); // (none) — no picker
@@ -5548,9 +5605,9 @@ use serde_json::json;
             }]
         });
         let mut f = FakeStdscr::new(30, 80);
-        // provider → Codex Config → Descriptions → Update Model List →
+        // provider → Codex Config → Descriptions → Web Search → Update Model List →
         // Sync Model Config → Add Provider → Add Model → first Enabled Models row.
-        for _ in 0..7 {
+        for _ in 0..8 {
             f.script(Key::Down);
         }
         f.script(Key::Char('q'));
@@ -5570,7 +5627,7 @@ use serde_json::json;
             bg_color(P::Selected),
             "current enabled-model row must be highlighted"
         );
-        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions", "Sync Model Config", "Update Model List"] {
+        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions", "Web Search", "Sync Model Config", "Update Model List"] {
             let row = last_matching(needle);
             assert_ne!(
                 row.3.bg,
@@ -5629,6 +5686,78 @@ use serde_json::json;
         assert_eq!(
             doc["codex_model_provider"], "",
             "picker disable syncs immediately, clearing the remembered provider"
+        );
+    }
+
+    #[test]
+    fn config_flow_web_search_picker_selects_enabled_model_or_disabled() {
+        isolate_grok_home();
+        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let mut doc = serde_json::json!({
+            "providers": [
+                {
+                    "id": "opencode",
+                    "name": "OpenCode",
+                    "enabled": true,
+                    "models": {
+                        "muse-spark-1_3-contributor-free": {
+                            "name": "Muse Spark",
+                            "enabled": true,
+                            "api_backend": "responses"
+                        },
+                        "chat-only": {
+                            "name": "Chat Only",
+                            "enabled": true,
+                            "api_backend": "chat_completions"
+                        }
+                    }
+                },
+                {
+                    "id": "kilo",
+                    "name": "Kilo",
+                    "enabled": false,
+                    "models": {
+                        "north-mini": { "name": "North Mini", "enabled": true }
+                    }
+                }
+            ]
+        });
+        let mut f = FakeStdscr::new(30, 80);
+        // opencode, kilo, Codex Config, Model Descriptions, Web Search
+        for _ in 0..4 {
+            f.script(Key::Down);
+        }
+        f.script(Key::Enter); // picker: disabled, Muse Spark
+        f.script(Key::Down);
+        f.script(Key::Enter);
+        f.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f, &mut doc);
+        assert!(res.is_ok(), "web_search picker errored: {:?}", res.err());
+        assert_eq!(
+            doc["web_search"],
+            "opencode-muse-spark-1_3-contributor-free"
+        );
+        let toml = std::fs::read_to_string(crate::paths::config_toml_path()).unwrap_or_default();
+        assert!(
+            toml.contains("web_search = \"opencode-muse-spark-1_3-contributor-free\""),
+            "toml must emit web_search: {toml}"
+        );
+
+        let mut f2 = FakeStdscr::new(30, 80);
+        for _ in 0..4 {
+            f2.script(Key::Down);
+        }
+        f2.script(Key::Enter); // starts on Muse Spark
+        f2.script(Key::Up); // disabled
+        f2.script(Key::Enter);
+        f2.script(Key::Char('q'));
+        let res = run_config_flow_with_backend(&mut f2, &mut doc);
+        assert!(res.is_ok(), "web_search disable picker errored: {:?}", res.err());
+        assert_eq!(doc["web_search"], "");
+        let toml = std::fs::read_to_string(crate::paths::config_toml_path()).unwrap_or_default();
+        assert!(
+            !toml.contains("web_search"),
+            "empty web_search must not be written: {toml}"
         );
     }
 }
