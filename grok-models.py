@@ -411,7 +411,7 @@ CODE_PANEL_PAD_X = 1  # horizontal padding inside black code panels
 # Provider ids highlighted in the Add Provider screen's "Suggested" section.
 # Anything already configured lands in the "Added" section above it; the rest
 # are listed unhighlighted below. Single source of truth for both sections.
-SUGGESTED_PROVIDER_IDS = ("opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud")
+SUGGESTED_PROVIDER_IDS = ("opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud", "kilo")
 
 
 def catalog_description(minfo: object) -> str | None:
@@ -537,6 +537,7 @@ def dump_providers(path: Path, doc: dict) -> None:
     in-memory `doc` is updated to match the file so later reads of `doc` are
     file order. Provider dict identities are kept so TUI `selected` stays live."""
     reset_codex_if_invalid(doc)
+    reset_web_search_if_invalid(doc)
     providers = doc.get("providers")
     if not isinstance(providers, list):
         providers = []
@@ -637,6 +638,19 @@ def web_search_status_token(doc: dict) -> str:
         if table_key == key:
             return name
     return key
+
+
+def reset_web_search_if_invalid(doc: dict) -> bool:
+    """If the configured web_search model is missing or disabled, clear it.
+    Does not invent keys when already unset. Returns True when changed."""
+    key = web_search_id(doc)
+    if not key:
+        return False
+    valid = {table_key for _, table_key in enabled_web_search_models(doc)}
+    if key in valid:
+        return False
+    set_web_search(doc, None)
+    return True
 
 
 def set_codex_selection(doc: dict, pid: str | None) -> None:
@@ -3797,28 +3811,11 @@ def _curses_config_flow(providers_doc: dict, providers: list) -> bool | object:
                         dump_providers(PROVIDERS_PATH, providers_doc)
                         changed = True
                 elif ai == 1:
-                    selected["enabled"] = not enabled
-                    dump_providers(PROVIDERS_PATH, providers_doc)
+                    _set_provider_enabled(providers_doc, selected["id"], not enabled)
                     changed = True
                 elif ai == 3:
                     if _curses_confirm_win(stdscr, f"Delete Provider {_provider_display(selected)}?"):
-                        # Grab the enabled model ids from providers.json
-                        # before the entry is removed.
-                        enabled = enabled_model_ids(selected)
-                        providers_doc["providers"] = [
-                            p
-                            for p in providers_doc["providers"]
-                            if p.get("id") != selected["id"]
-                        ]
-                        _record_removed_provider(providers_doc, selected["id"], enabled)
-                        providers[:] = [
-                            p for p in providers if p.get("id") != selected["id"]
-                        ]
-                        dump_providers(PROVIDERS_PATH, providers_doc)
-                        # Flush the deletion into config.toml now so a re-add
-                        # of the same provider this session can't collide
-                        # with a pending deletion record.
-                        update_config_toml(quiet=True)
+                        _delete_provider_and_flush(providers_doc, selected["id"], quiet=True)
                         changed = True
                     menu_cursor = 0
                     break
@@ -4376,17 +4373,55 @@ def resolve_targets(
 
 
 def _record_removed_provider(
-    providers_doc: dict, pid: str, models: list[str] | None = None
+    providers_doc: dict, provider_id: str, models: list[str] | None = None
 ) -> None:
     """Record a deleted provider with its enabled model ids so sync can
     remove its config.toml tables by exact key."""
     removed = providers_doc.setdefault("removed_providers", [])
     already = any(
-        (e.get("provider") == pid if isinstance(e, dict) else e == pid)
+        (e.get("provider") == provider_id if isinstance(e, dict) else e == provider_id)
         for e in removed
     )
     if not already:
-        removed.append({"provider": pid, "models": models or []})
+        removed.append({"provider": provider_id, "models": models or []})
+
+
+def _set_provider_enabled(providers_doc: dict, provider_id: str, enabled: bool) -> None:
+    """Set one provider's enabled flag and persist providers.json immediately.
+    No config.toml write; that waits for TUI exit / Sync Model Config."""
+    for p in providers_doc.get("providers", []):
+        if isinstance(p, dict) and p.get("id") == provider_id:
+            p["enabled"] = enabled
+            break
+    dump_providers(PROVIDERS_PATH, providers_doc)
+
+
+def _delete_provider_and_flush(providers_doc: dict, provider_id: str, quiet: bool = False) -> None:
+    """Delete one provider and flush to disk now (providers.json +
+    config.toml), then refresh `providers_doc` so TUI labels such as
+    last_synced match the file."""
+    selected = next(
+        (
+            p
+            for p in providers_doc.get("providers", [])
+            if isinstance(p, dict) and p.get("id") == provider_id
+        ),
+        None,
+    )
+    enabled = enabled_model_ids(selected) if isinstance(selected, dict) else []
+    providers_doc["providers"] = [
+        p
+        for p in providers_doc.get("providers", [])
+        if not (isinstance(p, dict) and p.get("id") == provider_id)
+    ]
+    _record_removed_provider(providers_doc, provider_id, enabled)
+    dump_providers(PROVIDERS_PATH, providers_doc)
+    # Flush the deletion into config.toml now so a re-add of the same
+    # provider this session can't collide with a pending deletion record.
+    update_config_toml(quiet=quiet)
+    fresh = load_providers()
+    providers_doc.clear()
+    providers_doc.update(fresh)
 
 
 def enabled_model_ids(provider: dict) -> list[str]:
@@ -5321,8 +5356,10 @@ def add_provider_entry(
         if isinstance(api_base, str) and api_base:
             provider["base_url"] = api_base
     if provider_id.startswith("opencode"):
-        provider["extra_headers"] = {"x-opencode-session": "opencode-default-session-id"}
-        provider["env_http_headers"] = {"x-opencode-session": "TERM_SESSION_ID"}
+        provider["extra_headers"] = {
+            "x-opencode-session": "ses_ff3a91c2e7b49KmQ2xR7tVuwtb",
+            "User-Agent": "opencode/1.18.20",
+        }
     items, fetch_err_url = authority_items_for_provider(
         provider_models_dev, provider=provider, quiet=quiet
     )
@@ -5519,29 +5556,15 @@ def _numbered_config_flow(providers_doc: dict, providers: list) -> bool:
                 if _config_models(selected, providers_doc):
                     changed = True
             elif ai == 1:
-                selected["enabled"] = not enabled
-                dump_providers(PROVIDERS_PATH, providers_doc)
+                _set_provider_enabled(providers_doc, selected["id"], not enabled)
                 verb = "Disabled" if enabled else "Enabled"
                 print(f"{verb} provider {selected['id']!r}.")
                 changed = True
             elif ai == 2:
                 if _confirm_delete(_provider_display(selected)):
-                    # Grab the enabled model ids from providers.json before
-                    # the entry is removed, then flush the deletion
-                    # immediately.
-                    enabled = enabled_model_ids(selected)
-                    providers_doc["providers"] = [
-                        p
-                        for p in providers_doc["providers"]
-                        if p.get("id") != selected["id"]
-                    ]
-                    _record_removed_provider(providers_doc, selected["id"], enabled)
-                    providers[:] = [
-                        p for p in providers if p.get("id") != selected["id"]
-                    ]
-                    dump_providers(PROVIDERS_PATH, providers_doc)
-                    update_config_toml()
-                    print(f"Deleted Provider {_provider_display(selected)}.")
+                    display = _provider_display(selected)
+                    _delete_provider_and_flush(providers_doc, selected["id"])
+                    print(f"Deleted Provider {display}.")
                     changed = True
                 break
     return changed

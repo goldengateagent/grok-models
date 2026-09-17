@@ -108,7 +108,7 @@ pub struct SortedIndices {
 fn model_enabled(models: &Map<String, Value>, mid: &str) -> bool {
     // Non-dict entries count as disabled, exactly like Python's isinstance gate.
     match models.get(mid) {
-        Some(v) if v.is_object() => crate::get_bool_val(v, "enabled", true),
+        Some(v) if v.is_object() => crate::get_bool(v, "enabled", true),
         _ => false,
     }
 }
@@ -267,7 +267,7 @@ pub fn build_fields(
             Some(efforts) => {
                 let default_idx = efforts
                     .iter()
-                    .position(|row| crate::get_bool_val(&Value::Object(row.clone()), "default", false))
+                    .position(|row| crate::get_bool_map(row, "default", false))
                     .unwrap_or(0);
                 let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
                 fields.insert("supports_reasoning_effort".into(), Value::Bool(true));
@@ -294,11 +294,10 @@ pub fn build_fields(
 pub fn enabled_model_ids(provider: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(models) = provider.get("models").and_then(Value::as_object) {
-        for (mid, m) in models {
-            let enabled =
-                crate::get_bool_val(&Value::Object(m.as_object().cloned().unwrap_or_default()), "enabled", true);
+        for (model_id, model) in models {
+            let enabled = crate::get_bool(model, "enabled", true);
             if enabled {
-                out.push(mid.clone());
+                out.push(model_id.clone());
             }
         }
     }
@@ -306,26 +305,26 @@ pub fn enabled_model_ids(provider: &Value) -> Vec<String> {
 }
 
 /// `_provider_label`
-pub fn provider_label(p: &Value) -> String {
-    let state = if p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+pub fn provider_label(provider: &serde_json::Map<String, Value>) -> String {
+    let state = if crate::get_bool_map(provider, "enabled", true) {
         "enabled"
     } else {
         "disabled"
     };
-    let pid = p["id"].as_str().unwrap_or_default();
-    let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
-    format!("({name}) - {pid} [{state}]")
+    let provider_id = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+    let name = provider.get("name").and_then(Value::as_str).unwrap_or(provider_id);
+    format!("({name}) - {provider_id} [{state}]")
 }
 
 /// Main-list identity: `(name) - id`.
-pub fn provider_display(p: &Value) -> String {
-    let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = p
+pub fn provider_display(provider: &serde_json::Map<String, Value>) -> String {
+    let provider_id = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+    let name = provider
         .get("name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .unwrap_or(pid);
-    format!("({name}) - {pid}")
+        .unwrap_or(provider_id);
+    format!("({name}) - {provider_id}")
 }
 
 pub const PROVIDER_NAME_COL_MAX: usize = 25;
@@ -442,7 +441,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
     let token_col = provider_state_token_col(providers);
     let env_w = providers
         .iter()
-        .map(|p| provider_env_key_from_json(&Value::Object(p.clone())).len())
+        .map(|p| crate::provider_env_key_from_json(p).len())
         .max()
         .unwrap_or(0);
     names
@@ -458,7 +457,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
             let token = format!("[{state}]");
             let head = format!("{:<name_w$} - {:<id_w$}", name, pid);
             let mut left = format!("{:<token_col$}{:<tw$}", head, token, tw = PROVIDER_TOKEN_W);
-            let envk = provider_env_key_from_json(&Value::Object(p.clone()));
+            let envk = crate::provider_env_key_from_json(p);
             if !envk.is_empty() {
                 left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
                 left.push_str(&format!("{envk:<env_w$} = "));
@@ -591,12 +590,12 @@ mod tests {
     fn provider_label_swaps_name_and_id() {
         let p = json!({"id": "opencode-go", "name": "OpenCode Go", "enabled": true});
         assert_eq!(
-            provider_label(&p),
+            provider_label(p.as_object().unwrap()),
             "(OpenCode Go) - opencode-go [enabled]"
         );
         let p = json!({"id": "x", "name": "X", "enabled": false});
-        assert_eq!(provider_label(&p), "(X) - x [disabled]");
-        assert_eq!(provider_display(&p), "(X) - x");
+        assert_eq!(provider_label(p.as_object().unwrap()), "(X) - x [disabled]");
+        assert_eq!(provider_display(p.as_object().unwrap()), "(X) - x");
         let rows = format_provider_id_rows(&[
             ("A".into(), "a".into(), true),
             ("Beta Name".into(), "long-id".into(), false),

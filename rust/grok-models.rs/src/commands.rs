@@ -63,7 +63,7 @@ pub fn render_list_text(
     if providers_only && provider_filter.is_none() {
         let mut enabled_providers = 0usize;
         for provider in &shown_providers {
-            let penabled = crate::get_bool_obj(provider, "enabled", true);
+            let penabled = crate::get_bool_map(provider, "enabled", true);
             if penabled {
                 enabled_providers += 1;
             }
@@ -95,7 +95,7 @@ pub fn render_list_text(
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or(pid);
-        let penabled = crate::get_bool_obj(provider, "enabled", true);
+        let penabled = crate::get_bool_map(provider, "enabled", true);
         if penabled {
             enabled_providers += 1;
         }
@@ -108,7 +108,7 @@ pub fn render_list_text(
             .filter(|mid| {
                 models_map
                     .get(*mid)
-                    .map(|m| crate::get_bool_val(m, "enabled", true))
+                    .map(|m| crate::get_bool(m, "enabled", true))
                     .unwrap_or(false)
             })
             .count();
@@ -133,7 +133,7 @@ pub fn render_list_text(
         }
         for mid in &ids {
             let m = models_map.get(mid);
-            let menabled = m.map(|v| crate::get_bool_val(v, "enabled", true)).unwrap_or(false);
+            let menabled = m.map(|v| crate::get_bool(v, "enabled", true)).unwrap_or(false);
             let free_tag = if mid.to_lowercase().contains("free") {
                 "  [free]"
             } else {
@@ -157,7 +157,7 @@ pub fn render_list_text(
 
 /// `_provider_state_line`
 fn provider_state_line(p: &Map<String, Value>) -> String {
-    let penabled = crate::get_bool_obj(p, "enabled", true);
+    let penabled = crate::get_bool_map(p, "enabled", true);
     let marker = if penabled { '●' } else { '○' };
     let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
     let name = p.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(pid);
@@ -182,7 +182,7 @@ pub fn render_models_text() -> Res<i32> {
 
     for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-        let penabled = crate::get_bool_obj(provider, "enabled", true);
+        let penabled = crate::get_bool_map(provider, "enabled", true);
         let empty = Map::new();
         let mm = provider.get("models").and_then(Value::as_object).unwrap_or(&empty);
         let pname = provider
@@ -191,7 +191,7 @@ pub fn render_models_text() -> Res<i32> {
             .filter(|s| !s.is_empty())
             .unwrap_or(pid);
         for (mid, m) in mm {
-            if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
+            if !m.is_object() || !crate::get_bool(m, "enabled", true) {
                 continue;
             }
             if !penabled {
@@ -214,7 +214,7 @@ pub fn render_models_text() -> Res<i32> {
     println!();
     let mut env_rows: Vec<(String, String, String)> = Vec::new();
     for provider in &providers {
-        if !crate::get_bool_obj(provider, "enabled", true) {
+        if !crate::get_bool_map(provider, "enabled", true) {
             continue;
         }
         let env = crate::provider_env_key_from_json(provider);
@@ -404,7 +404,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         if mid.is_some() && want {
             let prov = find_by_id(&doc, pid);
             if let Some(prov) = prov {
-                if !crate::get_bool(&Value::Object(prov.clone()), "enabled", true) {
+                if !crate::get_bool_map(&prov, "enabled", true) {
                     disabled_provider_ids.insert(pid.clone());
                 }
             }
@@ -426,7 +426,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         };
         match mid {
             None => {
-                let penabled = crate::get_bool(&Value::Object(cur.clone()), "enabled", true);
+                let penabled = crate::get_bool_map(&cur, "enabled", true);
                 if penabled == want {
                     println!(
                         "already {}: {}",
@@ -525,7 +525,7 @@ pub fn cmd_disable_all() -> Res<i32> {
             };
             let mobj = models.as_object_mut().unwrap();
             for (_, m) in mobj.iter_mut() {
-                if m.is_object() && crate::get_bool_val(m, "enabled", true) {
+                if m.is_object() && crate::get_bool(m, "enabled", true) {
                     m.as_object_mut()
                         .unwrap()
                         .insert("enabled".into(), Value::Bool(false));
@@ -606,15 +606,13 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         let mut extra = Map::new();
         extra.insert(
             "x-opencode-session".into(),
-            Value::String("opencode-default-session-id".into()),
+            Value::String("ses_ff3a91c2e7b49KmQ2xR7tVuwtb".into()),
+        );
+        extra.insert(
+            "User-Agent".into(),
+            Value::String("opencode/1.18.20".into()),
         );
         provider.insert("extra_headers".into(), Value::Object(extra));
-        let mut env_headers = Map::new();
-        env_headers.insert(
-            "x-opencode-session".into(),
-            Value::String("TERM_SESSION_ID".into()),
-        );
-        provider.insert("env_http_headers".into(), Value::Object(env_headers));
     }
     let (mut items, fetch_err_url) = crate::sync::authority_items_for_provider(
         &provider_models_dev,

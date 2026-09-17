@@ -128,6 +128,11 @@ pub const WEB_SEARCH_DEFAULT: &str = "";
 
 /// models.dev `description` for one model entry, or None when absent/empty.
 pub fn catalog_description(minfo: &Value) -> Option<&str> {
+    minfo.as_object().and_then(catalog_description_map)
+}
+
+/// models.dev `description` for a model entry map, or None when absent/empty.
+pub fn catalog_description_map(minfo: &serde_json::Map<String, Value>) -> Option<&str> {
     minfo
         .get("description")
         .and_then(Value::as_str)
@@ -407,11 +412,29 @@ pub fn web_search_status_token(doc: &Value) -> String {
     key
 }
 
+/// If the configured web_search model is missing or disabled, clear it.
+/// Does not invent keys when already unset.
+pub fn reset_web_search_if_invalid(doc: &mut Value) -> bool {
+    let key = web_search_id(doc);
+    if key.is_empty() {
+        return false;
+    }
+    if enabled_web_search_models(doc)
+        .iter()
+        .any(|(_, table_key)| table_key == &key)
+    {
+        return false;
+    }
+    set_web_search(doc, None);
+    true
+}
+
 /// Single write path for providers.json: this is the only sort. Providers
 /// A–Z by display name, models A–Z by display name. `doc` is replaced with
 /// the canonical form so memory matches the file.
 pub fn dump_providers(path: &Path, doc: &mut Value) -> Res<()> {
     reset_codex_if_invalid(doc);
+    reset_web_search_if_invalid(doc);
     let empty = serde_json::Map::new();
     let obj = doc.as_object().unwrap_or(&empty);
     let mut ordered = Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER));
@@ -741,5 +764,49 @@ mod tests {
         });
         let got = enabled_web_search_models(&doc);
         assert_eq!(got, vec![("Ok".into(), "p-ok".into())]);
+    }
+
+    #[test]
+    fn dump_clears_web_search_when_model_disabled() {
+        let mut doc = sample_providers();
+        doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
+        set_web_search(&mut doc, Some("openrouter-openrouter_free"));
+        doc["providers"][0]["models"]["openrouter/free"]["enabled"] = Value::Bool(false);
+        let path = std::env::temp_dir().join(format!("gm-websearch-model-dis-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(doc["web_search"], "");
+    }
+
+    #[test]
+    fn dump_clears_web_search_when_provider_deleted_or_disabled() {
+        for disable in [false, true] {
+            let mut doc = sample_providers();
+            doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
+            set_web_search(&mut doc, Some("openrouter-openrouter_free"));
+            if disable {
+                doc["providers"][0]["enabled"] = Value::Bool(false);
+            } else {
+                doc["providers"].as_array_mut().unwrap().remove(0);
+            }
+            let path = std::env::temp_dir().join(format!(
+                "gm-websearch-prov-{disable}-{}.json",
+                std::process::id()
+            ));
+            dump_providers(&path, &mut doc).expect("dump");
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(doc["web_search"], "", "disable={disable}");
+        }
+    }
+
+    #[test]
+    fn dump_keeps_web_search_when_model_still_enabled() {
+        let mut doc = sample_providers();
+        doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
+        set_web_search(&mut doc, Some("openrouter-openrouter_free"));
+        let path = std::env::temp_dir().join(format!("gm-websearch-keep-{}.json", std::process::id()));
+        dump_providers(&path, &mut doc).expect("dump");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(doc["web_search"], "openrouter-openrouter_free");
     }
 }

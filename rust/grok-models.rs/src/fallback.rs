@@ -118,7 +118,7 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                 let mid = &ids[i];
                 let enabled = models
                     .get(mid)
-                    .map(|m| crate::get_bool_val(m, "enabled", true))
+                    .map(|m| crate::get_bool(m, "enabled", true))
                     .unwrap_or(false);
                 if n == start + enabled_count && enabled_count < total {
                     println!("  {}", "─".repeat(40));
@@ -176,7 +176,7 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                         *entry = Value::Object(Map::new());
                     }
                     let obj = entry.as_object_mut().unwrap();
-                    let cur = crate::get_bool_val(&Value::Object(obj.clone()), "enabled", true);
+                    let cur = crate::get_bool_map(obj, "enabled", true);
                     obj.insert("enabled".into(), Value::Bool(!cur));
                     changed = true;
                     continue;
@@ -191,7 +191,7 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
 }
 
 /// `_config_models`: numbered model configuration for one provider entry.
-pub fn config_models(selected_id: &str, doc: &mut Value, selected: &mut Map<String, Value>) -> Res<bool> {
+pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<String, Value>) -> Res<bool> {
     let empty = Map::new();
     let models_is_map = selected.get("models").is_some_and(Value::is_object);
     let models_len = selected
@@ -202,7 +202,7 @@ pub fn config_models(selected_id: &str, doc: &mut Value, selected: &mut Map<Stri
     if !models_is_map || models_len == 0 {
         println!(
             "No models for {}. Run a sync or re-add the provider.",
-            core::py_repr(selected_id)
+            core::py_repr(provider_id)
         );
         return Ok(false);
     }
@@ -218,7 +218,7 @@ pub fn config_models(selected_id: &str, doc: &mut Value, selected: &mut Map<Stri
         config_models_numbered(&ids, &mut models)?
     };
     // `selected` is an owned clone; write it back before persisting.
-    if let Some(slot) = find_by_id_mut(doc, selected_id) {
+    if let Some(slot) = find_by_id_mut(doc, provider_id) {
         *slot = selected.clone();
     }
     if changed {
@@ -230,13 +230,13 @@ pub fn config_models(selected_id: &str, doc: &mut Value, selected: &mut Map<Stri
         .filter(|mid| {
             models_ref
                 .get(*mid)
-                .map(|m| crate::get_bool_val(m, "enabled", true))
+                .map(|m| crate::get_bool(m, "enabled", true))
                 .unwrap_or(false)
         })
         .count();
     println!(
         "Updated models for {}: {} enabled of {}.",
-        core::py_repr(selected_id),
+        core::py_repr(provider_id),
         enabled,
         ids.len()
     );
@@ -256,31 +256,6 @@ pub fn confirm_delete(label: &str) -> Res<bool> {
             None => println!("Enter yes or no."),
             Some(b) => return Ok(b),
         }
-    }
-}
-
-/// `_record_removed_provider`
-///
-/// Records a deletion as `{ "provider": ..., "models": [...] }` so the next
-/// write phase can target the provider's config.toml tables directly — no
-/// models.dev lookup. `models` holds the enabled model ids at delete time.
-pub fn record_removed_provider(doc: &mut Value, pid: &str, models: Vec<String>) {
-    let obj = doc.as_object_mut().unwrap();
-    let removed = obj
-        .entry("removed_providers".to_string())
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if !removed.is_array() {
-        *removed = Value::Array(Vec::new());
-    }
-    let arr = removed.as_array_mut().unwrap();
-    if !arr.iter().any(|v| {
-        v.as_object().and_then(|o| o.get("provider")).and_then(Value::as_str) == Some(pid)
-            || v.as_str() == Some(pid)
-    }) {
-        arr.push(serde_json::json!({
-            "provider": pid,
-            "models": models,
-        }));
     }
 }
 
@@ -322,11 +297,11 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             None => return Ok(changed),
             Some(i) => i,
         };
-        let selected_id = entries[pi].0.clone();
+        let provider_id = entries[pi].0.clone();
 
         loop {
             let (selected_name, was_enabled, env_key, doc_url) = {
-                let sel = find_by_id(doc, &selected_id);
+                let sel = find_by_id(doc, &provider_id);
                 let sel = match sel {
                     Some(s) => s,
                     None => return Ok(changed),
@@ -335,9 +310,9 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     .get("name")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
-                    .unwrap_or(&selected_id)
+                    .unwrap_or(&provider_id)
                     .to_string();
-                let enabled = crate::get_bool(&Value::Object(sel.clone()), "enabled", true);
+                let enabled = crate::get_bool_map(&sel, "enabled", true);
                 let env = crate::provider_env_key_from_json(&sel);
                 let doc = sel
                     .get("doc")
@@ -390,35 +365,24 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             }
             match ai {
                 0 => {
-                    let mut sel = find_by_id(doc, &selected_id).unwrap();
-                    if config_models(&selected_id, doc, &mut sel)? {
+                    let mut sel = find_by_id(doc, &provider_id).unwrap();
+                    if config_models(&provider_id, doc, &mut sel)? {
                         changed = true;
                     }
                 }
                 1 => {
-                    let sel = find_by_id_mut(doc, &selected_id).unwrap();
-                    let now_enabled = !was_enabled;
-                    sel.insert("enabled".into(), Value::Bool(now_enabled));
-                    jsonio::dump_providers(&paths::providers_path(), doc)?;
+                    let enabled = !was_enabled;
+                    crate::sync::set_provider_enabled(doc, &provider_id, enabled)?;
                     let verb = if was_enabled { "Disabled" } else { "Enabled" };
-                    println!("{verb} provider {}.", core::py_repr(&selected_id));
+                    println!("{verb} provider {}.", core::py_repr(&provider_id));
                     changed = true;
                 }
                 2 => {
-                    let display = find_by_id(doc, &selected_id)
-                        .map(|p| crate::core::provider_display(&Value::Object(p)))
-                        .unwrap_or_else(|| format!("({selected_id}) - {selected_id}"));
+                    let display = find_by_id(doc, &provider_id)
+                        .map(|p| crate::core::provider_display(&p))
+                        .unwrap_or_else(|| format!("({provider_id}) - {provider_id}"));
                     if confirm_delete(&display)? {
-                        // Grab the enabled model ids from providers.json
-                        // before the entry is removed, then flush the
-                        // deletion immediately.
-                        let enabled = find_by_id(doc, &selected_id)
-                            .map(|p| crate::core::enabled_model_ids(&Value::Object(p)))
-                            .unwrap_or_default();
-                        remove_provider(doc, &selected_id);
-                        record_removed_provider(doc, &selected_id, enabled);
-                        jsonio::dump_providers(&paths::providers_path(), doc)?;
-                        crate::sync::update_config_toml()?;
+                        crate::sync::delete_provider_and_flush(doc, &provider_id, false)?;
                         println!("Deleted Provider {display}.");
                         changed = true;
                     }
@@ -430,27 +394,18 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
     }
 }
 
-fn find_by_id<'a>(doc: &'a Value, pid: &str) -> Option<Map<String, Value>> {
+fn find_by_id<'a>(doc: &'a Value, provider_id: &str) -> Option<Map<String, Value>> {
     doc.get("providers")?
         .as_array()?
         .iter()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
         .and_then(|p| p.as_object().cloned())
 }
 
-fn find_by_id_mut<'a>(doc: &'a mut Value, pid: &str) -> Option<&'a mut Map<String, Value>> {
+fn find_by_id_mut<'a>(doc: &'a mut Value, provider_id: &str) -> Option<&'a mut Map<String, Value>> {
     doc.get_mut("providers")?
         .as_array_mut()?
         .iter_mut()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
         .and_then(Value::as_object_mut)
-}
-
-fn remove_provider(doc: &mut Value, pid: &str) {
-    if let Some(arr) = doc
-        .get_mut("providers")
-        .and_then(Value::as_array_mut)
-    {
-        arr.retain(|p| p.get("id").and_then(Value::as_str) != Some(pid));
-    }
 }

@@ -12,7 +12,6 @@
 //! - Footer "box" when terminal is tall enough, single-line pill otherwise.
 
 use crate::core;
-use crate::fallback;
 use crate::jsonio;
 use crate::paths;
 use crate::theme::{self, P, Rgb};
@@ -104,8 +103,8 @@ pub enum Key {
 /// Provider ids highlighted in the Add Provider screen's "Suggested" section.
 /// Anything already configured lands in the "Added" section above it; the rest
 /// are listed unhighlighted below. Mirrors `SUGGESTED_PROVIDER_IDS` in Python.
-pub const SUGGESTED_PROVIDER_IDS: [&str; 5] =
-    ["opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud"];
+pub const SUGGESTED_PROVIDER_IDS: [&str; 6] =
+    ["opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud", "kilo"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Paint {
@@ -1827,7 +1826,7 @@ struct ModelPicker<'a> {
 fn configure_model_group(models: &Map<String, Value>, mid: &str) -> u8 {
     let enabled = models
         .get(mid)
-        .is_some_and(|v| v.is_object() && crate::get_bool_val(v, "enabled", true));
+        .is_some_and(|v| v.is_object() && crate::get_bool(v, "enabled", true));
     if enabled {
         0
     } else if mid.to_lowercase().contains("free") {
@@ -1919,7 +1918,7 @@ impl<'a> FilterList for ModelPicker<'a> {
 
     fn render(&mut self, mid: &String, _is_sel: bool) -> Vec<(String, P)> {
         let m = self.models.get(mid);
-        let enabled = m.map(|v| crate::get_bool_val(v, "enabled", true)).unwrap_or(false);
+        let enabled = m.map(|v| crate::get_bool(v, "enabled", true)).unwrap_or(false);
         let is_free = mid.to_lowercase().contains("free");
         let mname = m.map(|v| crate::name_or(v, mid)).unwrap_or_else(|| mid.clone());
         model_list_row(
@@ -1973,7 +1972,7 @@ impl<'a> FilterList for ModelPicker<'a> {
         if !entry.is_object() {
             *entry = Value::Object(Map::new());
         }
-        let cur = crate::get_bool_val(entry, "enabled", true);
+        let cur = crate::get_bool(entry, "enabled", true);
         entry.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(!cur));
         self.changed = true;
         true // stay open
@@ -1990,7 +1989,7 @@ pub fn model_search_win<S: Stdscr>(
     ids: &[String],
     models: &mut Map<String, Value>,
     title: &str,
-    _pid: &str,
+    _provider_id: &str,
     pname: &str,
 ) -> bool {
     let mut picker = ModelPicker {
@@ -2153,7 +2152,7 @@ impl<'a> AddProviderPicker<'a> {
                         .unwrap_or(cat_name);
                     let enabled = p
                         .as_ref()
-                        .map(|pr| crate::get_bool_obj(pr, "enabled", true))
+                        .map(|pr| crate::get_bool_map(pr, "enabled", true))
                         .unwrap_or(false);
                     rows.push((name.to_string(), pid.clone(), enabled));
                 } else {
@@ -2441,7 +2440,7 @@ fn combo_enabled(doc: &Value, pid: &str, mid: &str) -> bool {
         };
         return mm
             .get(mid)
-            .is_some_and(|m| m.is_object() && crate::get_bool_val(m, "enabled", true));
+            .is_some_and(|m| m.is_object() && crate::get_bool(m, "enabled", true));
     }
     false
 }
@@ -2488,7 +2487,7 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
                 if seen.contains(&(pid.to_string(), mid.clone())) {
                     continue;
                 }
-                if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
+                if !m.is_object() || !crate::get_bool(m, "enabled", true) {
                     continue;
                 }
                 let mname = m
@@ -2532,7 +2531,7 @@ impl<'a> AddModelPicker<'a> {
                 };
                 if let Some(mm) = p.get("models").and_then(Value::as_object) {
                     for (mid, m) in mm {
-                        if m.is_object() && crate::get_bool_val(m, "enabled", true) {
+                        if m.is_object() && crate::get_bool(m, "enabled", true) {
                             set.insert((pid.to_string(), mid.to_string()));
                         }
                     }
@@ -2783,14 +2782,14 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
     let mut model_rows: Vec<(String, String, String, String)> = Vec::new();
     for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-        let penabled = crate::get_bool_obj(provider, "enabled", true);
+        let penabled = crate::get_bool_map(provider, "enabled", true);
         let mm = provider.get("models").and_then(Value::as_object);
         let Some(mm) = mm else {
             continue;
         };
         let pname = crate::name_or(&Value::Object((*provider).clone()), pid);
         for (mid, m) in mm {
-            if !m.is_object() || !crate::get_bool_val(m, "enabled", true) {
+            if !m.is_object() || !crate::get_bool(m, "enabled", true) {
                 continue;
             }
             if !penabled {
@@ -3419,12 +3418,20 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         }
         status_msg = None;
         let mut action_cursor = 0usize;
-        let mut target = ordered[pi].clone();
+        let provider_id = ordered[pi]
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         menu_cursor = pi;
         loop {
-            let enabled = crate::get_bool_val(&Value::Object(target.clone()), "enabled", true);
+            // Single source: re-read the provider from `doc` every render.
+            // One clone per render; everything below borrows from it.
+            let view: Map<String, Value> =
+                find_by_id(doc, &provider_id).unwrap_or_default();
+            let enabled = crate::get_bool_map(&view, "enabled", true);
             let current_base =
-                target.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
+                view.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
             let actions = vec![
                 "Configure Models".to_string(),
                 format!("Provider [{}]", if enabled { "enabled" } else { "disabled" }),
@@ -3432,14 +3439,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 "Delete Provider".to_string(),
                 "Back".to_string(),
             ];
-            let env_key = crate::provider_env_key_from_json(&target);
+            let env_key = crate::provider_env_key_from_json(&view);
             let key_hint = if env_key.is_empty() {
                 None
             } else {
                 Some(format!(
                     "# config {} api keys\npbpaste > key-file\necho 'export {env_key}=\"$(cat ~/key-file)\"' >> ~/.zshrc",
-                    target.get("id").and_then(Value::as_str)
-                        .or_else(|| target.get("name").and_then(Value::as_str))
+                    view.get("id").and_then(Value::as_str)
+                        .or_else(|| view.get("name").and_then(Value::as_str))
                         .unwrap_or_default()
                 ))
             };
@@ -3448,13 +3455,13 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             } else {
                 Some(core::env_requirement_line(&env_key))
             };
-            let doc_url = target
+            let doc_url = view
                 .get("doc")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
             let ai = match select_win(stdscr,
                 &actions,
-                &format!("Provider: {}", target.get("name").and_then(Value::as_str).unwrap_or(target["id"].as_str().unwrap_or_default())),
+                &format!("Provider: {}", view.get("name").and_then(Value::as_str).unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default())),
                 false,
                 &[],
                 true,
@@ -3476,10 +3483,9 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             if actions[ai] == "Back" {
                 break;
             }
-            let id_str = target["id"].as_str().unwrap_or_default().to_string();
             match ai {
                 0 => {
-                    let ids: Vec<String> = match target.get("models") {
+                    let ids: Vec<String> = match view.get("models") {
                         Some(Value::Object(m)) => m.keys().cloned().collect(),
                         _ => Vec::new(),
                     };
@@ -3488,29 +3494,24 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                             stdscr,
                             &format!(
                                 "No models for {}. Run a sync or re-add the provider.",
-                                core::py_repr(&id_str)
+                                core::py_repr(&provider_id)
                             ),
                         );
                     } else {
-                        let mut models = target
+                        let mut models = view
                             .get("models")
                             .and_then(Value::as_object)
                             .cloned()
                             .unwrap_or_default();
-                        let pname = target
+                        let pname = view
                             .get("name")
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
-                            .unwrap_or(target["id"].as_str().unwrap_or_default());
+                            .unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default());
                         let provider_title = "Configure Models".to_string();
-                        model_search_win(stdscr, &ids, &mut models, &provider_title, &id_str, pname);
-                        // Sync BOTH the live `target` copy and the doc: the
-                        // action menu renders from `target`, so re-entering
-                        // Configure Models must reflect the toggles even
-                        // without going back to the main menu first.
+                        model_search_win(stdscr, &ids, &mut models, &provider_title, &provider_id, pname);
                         let updated = Value::Object(models);
-                        target.insert("models".to_string(), updated.clone());
-                        if let Some(slot) = find_by_id_mut(doc, &id_str) {
+                        if let Some(slot) = find_by_id_mut(doc, &provider_id) {
                             slot.insert("models".to_string(), updated);
                         }
                         jsonio::dump_providers(&paths::providers_path(), doc)?;
@@ -3518,14 +3519,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     }
                 }
                 1 => {
-                    let want = !enabled;
-                    if let Some(slot) = find_by_id_mut(doc, &id_str) {
-                        slot.insert("enabled".into(), Value::Bool(want));
-                    }
-                    // Keep `target` in sync so the action-menu label flips on
-                    // the next render (it is read from `target`, not `doc`).
-                    target.insert("enabled".into(), Value::Bool(want));
-                    jsonio::dump_providers(&paths::providers_path(), doc)?;
+                    let enabled = !enabled;
+                    crate::sync::set_provider_enabled(doc, &provider_id, enabled)?;
                     changed = true;
                 }
                 2 => {
@@ -3533,8 +3528,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     // becomes the text field; Enter saves, ESC cancels.
                     let title_fmt = format!(
                         "Provider: {}",
-                        target.get("name").and_then(Value::as_str).unwrap_or(
-                            target["id"].as_str().unwrap_or_default()
+                        view.get("name").and_then(Value::as_str).unwrap_or(
+                            view.get("id").and_then(Value::as_str).unwrap_or_default()
                         )
                     );
                     if let Some(value) = edit_inline_row(
@@ -3549,33 +3544,22 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         if trimmed.is_empty() {
                             // Empty input clears the override (falls back to
                             // the models.dev catalog value on next sync).
-                            if let Some(slot) = find_by_id_mut(doc, &id_str) {
+                            if let Some(slot) = find_by_id_mut(doc, &provider_id) {
                                 slot.remove("base_url");
                             }
-                            target.remove("base_url");
                         } else {
                             let val = Value::String(trimmed);
-                            if let Some(slot) = find_by_id_mut(doc, &id_str) {
+                            if let Some(slot) = find_by_id_mut(doc, &provider_id) {
                                 slot.insert("base_url".into(), val.clone());
                             }
-                            target.insert("base_url".into(), val);
                         }
                         jsonio::dump_providers(&paths::providers_path(), doc)?;
                         changed = true;
                     }
                 }
                 3 => {
-                    if confirm_win(stdscr, &format!("Delete Provider {}?", core::provider_display(&Value::Object(target.clone())))) {
-                        // Grab the enabled model ids from providers.json
-                        // before the entry is removed.
-                        let enabled = core::enabled_model_ids(&Value::Object(target.clone()));
-                        remove_provider(doc, &id_str);
-                        fallback::record_removed_provider(doc, &id_str, enabled);
-                        jsonio::dump_providers(&paths::providers_path(), doc)?;
-                        // Flush the deletion into config.toml now so a re-add
-                        // of the same provider this session can't collide
-                        // with a pending deletion record.
-                        crate::sync::update_config_toml_with(true)?;
+                    if confirm_win(stdscr, &format!("Delete Provider {}?", core::provider_display(&view))) {
+                        crate::sync::delete_provider_and_flush(doc, &provider_id, true)?;
                         changed = true;
                     }
                     menu_cursor = 0;
@@ -3600,18 +3584,20 @@ fn usable(doc: &Value) -> Vec<Map<String, Value>> {
         .unwrap_or_default()
 }
 
-fn find_by_id_mut<'a>(doc: &'a mut Value, pid: &str) -> Option<&'a mut Map<String, Value>> {
+fn find_by_id(doc: &Value, provider_id: &str) -> Option<Map<String, Value>> {
+    doc.get("providers")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+        .and_then(|p| p.as_object().cloned())
+}
+
+fn find_by_id_mut<'a>(doc: &'a mut Value, provider_id: &str) -> Option<&'a mut Map<String, Value>> {
     doc.get_mut("providers")?
         .as_array_mut()?
         .iter_mut()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
         .and_then(Value::as_object_mut)
-}
-
-fn remove_provider(doc: &mut Value, pid: &str) {
-    if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
-        arr.retain(|p| p.get("id").and_then(Value::as_str) != Some(pid));
-    }
 }
 
 // ---------------------------------------------------------------------------

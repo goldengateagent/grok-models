@@ -102,14 +102,12 @@ pub fn get_bool(v: &Value, key: &str, default: bool) -> bool {
     }
 }
 
-/// `get_bool` for a `&Map` argument (auto-wraps).
-pub fn get_bool_obj(o: &serde_json::Map<String, Value>, key: &str, default: bool) -> bool {
-    get_bool(&Value::Object(o.clone()), key, default)
-}
-
-/// `get_bool` for an existing `&Value` argument (alias, same logic).
-pub fn get_bool_val(v: &Value, key: &str, default: bool) -> bool {
-    get_bool(v, key, default)
+/// `get_bool` for a `&Map` argument (no clone).
+pub fn get_bool_map(o: &serde_json::Map<String, Value>, key: &str, default: bool) -> bool {
+    match o.get(key) {
+        Some(Value::Bool(b)) => *b,
+        _ => default,
+    }
 }
 
 /// `env_key` on a stored provider map, or `""`.
@@ -121,7 +119,7 @@ pub fn provider_env_key_from_json(o: &serde_json::Map<String, Value>) -> String 
 }
 
 pub fn provider_label_from(o: &serde_json::Map<String, Value>) -> String {
-    core::provider_label(&Value::Object(o.clone()))
+    core::provider_label(o)
 }
 
 /// Python `m.get("env_key")` where only strings count; empty string otherwise.

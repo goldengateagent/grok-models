@@ -310,7 +310,7 @@ fn enrich_model_entry(
                 // so the config.toml writer never needs the catalog to pick.
                 let default_idx = efforts
                     .iter()
-                    .position(|row| crate::get_bool_val(&Value::Object(row.clone()), "default", false))
+                    .position(|row| crate::get_bool_map(row, "default", false))
                     .unwrap_or(0);
                 let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
                 for (key, value) in [
@@ -952,7 +952,7 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
     );
     fields.insert(
         "env_key".into(),
-        Value::String(core::provider_env_key_from_json(&Value::Object(provider.clone()))),
+        Value::String(crate::provider_env_key_from_json(provider)),
     );
     for header_key in ["extra_headers", "env_http_headers"] {
         if let Some(obj) = provider.get(header_key).and_then(Value::as_object) {
@@ -1058,6 +1058,87 @@ pub fn codex_config_toml(
     Ok(path)
 }
 
+/// Set one provider's enabled flag and persist providers.json immediately.
+/// No config.toml write; that waits for TUI exit / Sync Model Config.
+pub fn set_provider_enabled(doc: &mut Value, provider_id: &str, enabled: bool) -> Res<()> {
+    if let Some(arr) = doc
+        .get_mut("providers")
+        .and_then(Value::as_array_mut)
+    {
+        if let Some(p) = arr
+            .iter_mut()
+            .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+        {
+            if let Some(obj) = p.as_object_mut() {
+                obj.insert("enabled".into(), Value::Bool(enabled));
+            }
+        }
+    }
+    jsonio::dump_providers(&paths::providers_path(), doc)?;
+    Ok(())
+}
+
+/// Delete one provider and flush the deletion to disk now (providers.json +
+/// config.toml), then refresh `doc` so TUI labels such as last_synced match
+/// the file. `quiet` suppresses stdout reports for the curses TUI.
+pub fn delete_provider_and_flush(doc: &mut Value, provider_id: &str, quiet: bool) -> Res<()> {
+    // Grab the enabled model ids before the entry is removed.
+    let enabled = doc
+        .get("providers")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+        })
+        .map(crate::core::enabled_model_ids)
+        .unwrap_or_default();
+    remove_provider(doc, provider_id);
+    record_removed_provider(doc, provider_id, enabled);
+    jsonio::dump_providers(&paths::providers_path(), doc)?;
+    // Flush the deletion into config.toml now so a re-add of the same
+    // provider this session can't collide with a pending deletion record.
+    update_config_toml_with(quiet)?;
+    if let Ok(fresh) = jsonio::load_providers() {
+        *doc = fresh;
+    }
+    Ok(())
+}
+
+fn remove_provider(doc: &mut Value, provider_id: &str) {
+    if let Some(arr) = doc
+        .get_mut("providers")
+        .and_then(Value::as_array_mut)
+    {
+        arr.retain(|p| p.get("id").and_then(Value::as_str) != Some(provider_id));
+    }
+}
+
+/// Records a deletion as `{ "provider": ..., "models": [...] }` so the next
+/// write phase can target the provider's config.toml tables directly — no
+/// models.dev lookup. `models` holds the enabled model ids at delete time.
+fn record_removed_provider(doc: &mut Value, provider_id: &str, models: Vec<String>) {
+    let obj = doc.as_object_mut().unwrap();
+    let removed = obj
+        .entry("removed_providers".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !removed.is_array() {
+        *removed = Value::Array(Vec::new());
+    }
+    let arr = removed.as_array_mut().unwrap();
+    if !arr.iter().any(|v| {
+        v.as_object()
+            .and_then(|o| o.get("provider"))
+            .and_then(Value::as_str)
+            == Some(provider_id)
+            || v.as_str() == Some(provider_id)
+    }) {
+        arr.push(serde_json::json!({
+            "provider": provider_id,
+            "models": models,
+        }));
+    }
+}
+
 /// Write phase (2 of 2): load providers.json from disk and render
 /// config.toml from it alone — enabled providers, table fields, table
 /// ownership, and pending deletions are all derived from the file.
@@ -1121,7 +1202,7 @@ tables will have an empty base_url",
                 Value::Object(o) => o,
                 _ => unreachable!(),
             });
-            let menabled = crate::get_bool_val(&Value::Object(entry.clone()), "enabled", true);
+            let menabled = crate::get_bool_map(entry, "enabled", true);
             if !menabled {
                 continue;
             }
@@ -1176,7 +1257,7 @@ tables will have an empty base_url",
             }
             if include_descriptions {
                 if let Some(desc) =
-                    crate::jsonio::catalog_description(&Value::Object(entry.clone()))
+                    crate::jsonio::catalog_description_map(entry)
                 {
                     fields.insert("description".into(), Value::String(desc.to_string()));
                 }
@@ -1645,7 +1726,7 @@ mod tests {
         if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
             arr.retain(|p| p.get("id").and_then(Value::as_str) != Some("prov"));
         }
-        crate::fallback::record_removed_provider(&mut doc, "prov", enabled);
+        crate::sync::record_removed_provider(&mut doc, "prov", enabled);
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump post-delete");
 
         // Flush phase 2 alone (what the TUI does on confirm).
