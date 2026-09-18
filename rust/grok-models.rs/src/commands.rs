@@ -606,11 +606,11 @@ pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet
         let mut extra = Map::new();
         extra.insert(
             "x-opencode-session".into(),
-            Value::String("ses_ff3a91c2e7b49KmQ2xR7tVuwtb".into()),
+            Value::String(core::new_session_id()),
         );
         extra.insert(
             "User-Agent".into(),
-            Value::String("opencode/1.18.20".into()),
+            Value::String("opencode/1.18.31".into()),
         );
         provider.insert("extra_headers".into(), Value::Object(extra));
     }
@@ -988,6 +988,47 @@ mod tests {
             prov["base_url"],
             crate::sync::OLLAMA_CLOUD_LOCAL_BASE_URL
         );
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+    }
+
+    #[test]
+    fn add_provider_entry_generates_fresh_opencode_session_header() {
+        let _guard = crate::test_support::grok_home_lock();
+        let pid = std::process::id();
+        let grok = std::env::temp_dir().join(format!("gm-add-opencode-grok-{pid}"));
+        let codex = std::env::temp_dir().join(format!("gm-add-opencode-codex-{pid}"));
+        let _ = std::fs::remove_dir_all(&grok);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&grok).unwrap();
+        std::fs::create_dir_all(&codex).unwrap();
+        std::env::set_var("GROK_HOME", &grok);
+        std::env::set_var("CODEX_HOME", &codex);
+
+        let api = serde_json::json!({
+            "opencode-go": {
+                "name": "OpenCode Go",
+                "api": "https://opencode.ai/v1",
+                "env": ["OPENCODE_API_KEY"],
+                "models": { "m": { "name": "M" } }
+            }
+        });
+
+        let mut session_ids = Vec::new();
+        for _ in 0..2 {
+            let mut doc = serde_json::json!({ "providers": [] });
+            add_provider_entry(&mut doc, &api, "opencode-go", true).expect("add provider");
+            let session = doc["providers"][0]["extra_headers"]["x-opencode-session"]
+                .as_str()
+                .expect("session header")
+                .to_string();
+            assert!(session.starts_with("ses_"), "{session}");
+            assert!(session.ends_with("uwtb"), "{session}");
+            assert_eq!(session.len(), 30, "{session}");
+            session_ids.push(session);
+        }
+        assert_ne!(session_ids[0], session_ids[1], "each add must mint a new session");
+
         let _ = std::fs::remove_dir_all(&grok);
         let _ = std::fs::remove_dir_all(&codex);
     }

@@ -28,6 +28,7 @@ phf = { version = "0.14", features = ["macros"] }
 toml = "1"
 home = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+getrandom = "0.2"
 ratatui = "0.30"
 crossterm = "0.29"
 

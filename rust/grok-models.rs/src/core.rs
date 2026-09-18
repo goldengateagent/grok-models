@@ -2,6 +2,8 @@
 
 use crate::{fail, Res};
 use serde_json::{Map, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `first_letter_cap`
 pub fn first_letter_cap(text: &str) -> String {
@@ -581,6 +583,46 @@ pub fn require_id(p: &Value) -> Res<&str> {
     }
 }
 
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// OpenCode picks the chars after the timestamp prefix from this alphabet.
+const SESSION_ID_ALPHABET: &[u8] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const SESSION_ID_RANDOM_LEN: usize = 10;
+const SESSION_ID_SUFFIX: &str = "uwtb";
+
+/// Fresh OpenCode session id: `ses_` + 12 hex + 10 base62 + `uwtb`.
+///
+/// `current` is ms-since-epoch shifted left 12 bits with the counter in the
+/// low bits. Complementing it and keeping the low 6 bytes as big-endian hex
+/// makes the time field order newest-first under plain string comparison.
+pub fn new_session_id() -> String {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+    let current = ms.wrapping_shl(12).wrapping_add(counter);
+    let stamp = format!("{:012x}", !current & 0xFFFF_FFFF_FFFF);
+
+    // Discard bytes 248-255 so all 62 alphabet chars are equally likely.
+    const LIMIT: u8 = 248; // 62 * 4
+    let mut random_part = String::with_capacity(SESSION_ID_RANDOM_LEN);
+    let mut buf = [0u8; 16];
+    while random_part.len() < SESSION_ID_RANDOM_LEN {
+        getrandom::getrandom(&mut buf).expect("OS random source unavailable");
+        for b in buf {
+            if b < LIMIT {
+                random_part.push(SESSION_ID_ALPHABET[(b % 62) as usize] as char);
+                if random_part.len() == SESSION_ID_RANDOM_LEN {
+                    break;
+                }
+            }
+        }
+    }
+    format!("ses_{stamp}{random_part}{SESSION_ID_SUFFIX}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +751,20 @@ mod tests {
         let by_id = sort_model_indices(&ids, &models, Some("a-free"));
         assert_eq!(by_id.filtered.len(), 1);
         assert_eq!(ids[by_id.filtered[0]], "a-free");
+    }
+
+    #[test]
+    fn new_session_id_shape_and_uniqueness() {
+        let a = new_session_id();
+        let b = new_session_id();
+        for id in [&a, &b] {
+            assert!(id.starts_with("ses_"), "{id}");
+            assert!(id.ends_with("uwtb"), "{id}");
+            assert_eq!(id.len(), 30, "{id}"); // "ses_" + 12 + 10 + 4
+            assert!(id[4..16].chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+            assert!(id[16..26].chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+        }
+        assert_ne!(a, b);
     }
 
     #[test]

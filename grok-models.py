@@ -15,9 +15,13 @@ import os
 import copy
 import curses
 import json
+import itertools
+import secrets
 import shutil
+import string
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -343,6 +347,29 @@ def last_updated_stamp() -> str:
     hour = now.hour % 12 or 12
     ampm = "AM" if now.hour < 12 else "PM"
     return f"{now.month:02d}-{now.day:02d}-{now.year} {hour:02d}:{now.minute:02d} {ampm}"
+
+
+_SESSION_COUNTER = itertools.count(1)  # per-process; next() is atomic
+
+# OpenCode picks the chars after the timestamp prefix from this alphabet.
+SESSION_ID_ALPHABET = string.digits + string.ascii_uppercase + string.ascii_lowercase
+SESSION_ID_RANDOM_LEN = 10
+SESSION_ID_SUFFIX = "uwtb"
+
+
+def new_session_id() -> str:
+    """Fresh OpenCode session id: `ses_` + 12 hex + 10 base62 + `uwtb`.
+
+    `current` is ms-since-epoch shifted left 12 bits with the counter in the
+    low bits. Complementing it and keeping the low 6 bytes as big-endian hex
+    makes the time field order newest-first under plain string comparison.
+    """
+    current = (time.time_ns() // 1_000_000) * 4096 + next(_SESSION_COUNTER)
+    stamp = (~current & 0xFFFFFFFFFFFF).to_bytes(6, "big").hex()
+    random_part = "".join(
+        secrets.choice(SESSION_ID_ALPHABET) for _ in range(SESSION_ID_RANDOM_LEN)
+    )
+    return f"ses_{stamp}{random_part}{SESSION_ID_SUFFIX}"
 
 
 def fail(message: str) -> None:
@@ -1532,7 +1559,6 @@ def _query_terminal_bg() -> tuple | None:
         result = b""
         deadline = os.fstat(fd).st_mtime  # placeholder
         # read response with short timeout
-        import time
         end = time.time() + 0.25
         while time.time() < end:
             r, _, _ = sel.select([fd], [], [], 0.05)
@@ -5357,8 +5383,8 @@ def add_provider_entry(
             provider["base_url"] = api_base
     if provider_id.startswith("opencode"):
         provider["extra_headers"] = {
-            "x-opencode-session": "ses_ff3a91c2e7b49KmQ2xR7tVuwtb",
-            "User-Agent": "opencode/1.18.20",
+            "x-opencode-session": new_session_id(),
+            "User-Agent": "opencode/1.18.31",
         }
     items, fetch_err_url = authority_items_for_provider(
         provider_models_dev, provider=provider, quiet=quiet
