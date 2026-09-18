@@ -339,7 +339,7 @@ pub fn write_config_toml(
             path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
         ));
         std::fs::copy(path, &bak).map_err(|e| {
-            crate::SyncError(format!("failed to write {}: {}", bak.display(), e))
+            crate::Error::new(format!("failed to write {}: {}", bak.display(), e))
         })?;
     }
     let mut text = write_toml_stdlib(path, provider_ids, tables, removed_keys)?;

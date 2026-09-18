@@ -10,25 +10,13 @@ use crate::{fail, Res};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-fn usable(doc: &Value) -> Vec<Map<String, Value>> {
-    doc.get("providers")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter(|p| p.is_object() && p.get("id").is_some_and(|v| !v.is_null()))
-                .filter_map(|p| p.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// `render_list_text` — plain-text listing (`--providers`, `--provider ID`).
 pub fn render_list_text(
     doc: &Value,
     provider_filter: Option<&str>,
     providers_only: bool,
 ) -> Res<()> {
-    let providers = usable(doc);
+    let providers = core::usable(doc);
     if let Some(filter) = provider_filter {
         if !providers.iter().any(|p| p["id"].as_str() == Some(filter)) {
             let ids: Vec<String> = providers
@@ -42,8 +30,8 @@ pub fn render_list_text(
                 format!(" (did you mean: {}?)", hints.join(", "))
             };
             return fail(format!(
-                "unknown provider {}{}",
-                core::py_repr(filter),
+                "unknown provider '{}'{}",
+                filter,
                 hint
             ));
         }
@@ -173,7 +161,7 @@ fn provider_state_line(p: &Map<String, Value>) -> String {
 /// `render_models_text` (`--models`). Returns process exit code.
 pub fn render_models_text() -> Res<i32> {
     let doc = jsonio::load_providers()?;
-    let providers = usable(&doc);
+    let providers = core::usable(&doc);
 
     println!("Enabled models");
 
@@ -250,7 +238,7 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
         s.replace('.', "_").replace('/', "_").replace(':', "_")
     }
 
-    let providers = usable(doc);
+    let providers = core::usable(doc);
     let provider_ids: Vec<String> = providers
         .iter()
         .map(|p| p["id"].as_str().unwrap_or_default().to_string())
@@ -275,8 +263,8 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
                 format!(" (did you mean: {}?)", hints.join(", "))
             };
             errors.push(format!(
-                "unknown provider {}{}",
-                core::py_repr(pid_raw),
+                "unknown provider '{}'{}",
+                pid_raw,
                 hint
             ));
             continue;
@@ -309,9 +297,9 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
                 format!(" (did you mean: {}?)", hints.join(", "))
             };
             errors.push(format!(
-                "unknown model {} for provider {}{}",
-                core::py_repr(mid_raw),
-                core::py_repr(pid_raw),
+                "unknown model '{}' for provider '{}'{}",
+                mid_raw,
+                pid_raw,
                 hint
             ));
             continue;
@@ -354,7 +342,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     // (all models disabled, catalog-seeded), then the resolution below flips
     // just that model. Disable targets and bare provider ids keep the old
     // behavior.
-    let existing_ids: Vec<String> = usable(&doc)
+    let existing_ids: Vec<String> = core::usable(&doc)
         .iter()
         .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
         .collect();
@@ -362,7 +350,8 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     if !missing.is_empty() {
         let api = sync::fetch_models_dev()?;
         for pid in &missing {
-            add_provider_entry(&mut doc, &api, pid, false)?;
+            let r = sync::add_provider_entry(&mut doc, &api, pid)?;
+            report_add(pid, &r);
         }
     }
 
@@ -402,7 +391,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         let (pid, mid) = key;
         let want = applied[key];
         if mid.is_some() && want {
-            let prov = find_by_id(&doc, pid);
+            let prov = core::find_provider_by_id(&doc, pid);
             if let Some(prov) = prov {
                 if !crate::get_bool_map(&prov, "enabled", true) {
                     disabled_provider_ids.insert(pid.clone());
@@ -419,7 +408,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
             None => pid.clone(),
             Some(m) => format!("{pid}/{m}"),
         };
-        let cur = find_by_id(&doc, pid);
+        let cur = core::find_provider_by_id(&doc, pid);
         let cur = match cur {
             Some(c) => c,
             None => continue,
@@ -435,13 +424,13 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
                     );
                     continue;
                 }
-                find_by_id_mut(&mut doc, pid)
+                core::find_provider_by_id_mut(&mut doc, pid)
                     .unwrap()
                     .insert("enabled".into(), Value::Bool(want));
                 println!("{}: {}", if want { "enabled" } else { "disabled" }, label);
             }
             Some(mid_s) => {
-                let slot = find_by_id_mut(&mut doc, pid).unwrap();
+                let slot = core::find_provider_by_id_mut(&mut doc, pid).unwrap();
                 let models = slot
                     .entry("models".to_string())
                     .or_insert_with(|| Value::Object(Map::new()));
@@ -479,34 +468,18 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     jsonio::dump_providers(&providers_path, &mut doc)?;
     for pid in disabled_provider_ids {
         println!(
-            "warning: provider {} is disabled; enable it too or its \
+            "warning: provider '{}' is disabled; enable it too or its \
 models won't be written to config.toml",
-            core::py_repr(&pid)
+            &pid
         );
     }
-    let (path, _stats) = sync::run_sync()?;
-    if let Some(path) = path {
-        sync::print_sync_report(&path, &doc);
-        sync::print_relaunch();
-    }
+    let (written, response) = sync::run_sync()?;
+    sync::print_sync_warnings(&response, &written);
+    sync::print_sync_report(&written.path, &doc);
+    sync::print_relaunch();
     Ok(0)
 }
 
-fn find_by_id(doc: &Value, pid: &str) -> Option<Map<String, Value>> {
-    doc.get("providers")?
-        .as_array()?
-        .iter()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
-        .and_then(|p| p.as_object().cloned())
-}
-
-fn find_by_id_mut<'a>(doc: &'a mut Value, pid: &str) -> Option<&'a mut Map<String, Value>> {
-    doc.get_mut("providers")?
-        .as_array_mut()?
-        .iter_mut()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(pid))
-        .and_then(Value::as_object_mut)
-}
 
 /// `cmd_disable_all`. Returns exit code.
 pub fn cmd_disable_all() -> Res<i32> {
@@ -539,125 +512,11 @@ pub fn cmd_disable_all() -> Res<i32> {
         return Ok(0);
     }
     jsonio::dump_providers(&providers_path, &mut doc)?;
-    let (path, _stats) = sync::run_sync()?;
-    if let Some(path) = path {
-        sync::print_sync_report(&path, &doc);
-        sync::print_relaunch();
-    }
+    let (written, response) = sync::run_sync()?;
+    sync::print_sync_warnings(&response, &written);
+    sync::print_sync_report(&written.path, &doc);
+    sync::print_relaunch();
     Ok(0)
-}
-
-/// `add_provider_entry`: add provider with all models disabled and persist.
-pub fn add_provider_entry(doc: &mut Value, api: &Value, provider_id: &str, quiet: bool) -> Res<Option<String>> {
-    let existing: Vec<String> = usable(doc)
-        .iter()
-        .map(|p| p.get("id").map(id_to_string).unwrap_or_default())
-        .collect();
-    if existing.iter().any(|e| e == provider_id) {
-        if !quiet {
-            println!("Provider {} already exists.", core::py_repr(provider_id));
-        }
-        return Ok(None);
-    }
-    let provider_models_dev = match api.get(provider_id) {
-        Some(p) if p.is_object() => p.clone(),
-        _ => return fail(format!("provider {} not found in models.dev", core::py_repr(provider_id))),
-    };
-    let catalog = provider_models_dev
-        .get("models")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut provider = Map::new();
-    provider.insert("id".into(), Value::String(provider_id.to_string()));
-    let name_val = provider_models_dev.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
-    let name_val = if crate::truthy(Some(&name_val)) {
-        name_val
-    } else {
-        Value::String(provider_id.to_string())
-    };
-    provider.insert("name".into(), name_val);
-    let env = core::provider_env_key_from_api(&provider_models_dev);
-    if !env.is_empty() {
-        provider.insert("env_key".into(), Value::String(env.clone()));
-    }
-    if let Some(doc_url) = jsonio::catalog_doc(&provider_models_dev) {
-        provider.insert("doc".into(), Value::String(doc_url.to_string()));
-    }
-    if let Some(provider_npm) = jsonio::catalog_npm(&provider_models_dev) {
-        provider.insert("npm".into(), Value::String(provider_npm.to_string()));
-    }
-    // Seed the provider-level base_url override from the catalog so the
-    // config menu shows the configured endpoint even before any edit.
-    // ollama-cloud talks to the local daemon, not the models.dev `api`.
-    let api_url = if provider_id == crate::sync::OLLAMA_CLOUD_PROVIDER_ID {
-        crate::sync::OLLAMA_CLOUD_LOCAL_BASE_URL.to_string()
-    } else {
-        provider_models_dev
-            .get("api")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    if !api_url.is_empty() {
-        provider.insert("base_url".into(), Value::String(api_url.clone()));
-    }
-    if provider_id.starts_with("opencode") {
-        let mut extra = Map::new();
-        extra.insert(
-            "x-opencode-session".into(),
-            Value::String(core::new_session_id()),
-        );
-        extra.insert(
-            "User-Agent".into(),
-            Value::String("opencode/1.18.31".into()),
-        );
-        provider.insert("extra_headers".into(), Value::Object(extra));
-    }
-    let (mut items, fetch_err_url) = crate::sync::authority_items_for_provider(
-        &provider_models_dev,
-        &mut provider,
-        quiet,
-    );
-    if provider_id == crate::sync::OLLAMA_CLOUD_PROVIDER_ID {
-        items = crate::sync::expand_ollama_cloud_items(items, &mut provider);
-    }
-    if items.is_empty() {
-        return fail(format!(
-            "provider {} has no models in models.dev",
-            core::py_repr(provider_id)
-        ));
-    }
-    let models_map = crate::sync::seed_models_from_items(
-        &items,
-        &catalog,
-        provider_id,
-        jsonio::catalog_npm(&provider_models_dev),
-    );
-    let n_models = models_map.len();
-    provider.insert("enabled".into(), Value::Bool(true));
-    provider.insert("models".into(), Value::Object(models_map));
-
-    doc.get_mut("providers")
-        .and_then(Value::as_array_mut)
-        .unwrap()
-        .push(Value::Object(provider));
-    jsonio::dump_providers(&paths::providers_path(), doc)?;
-    if !quiet {
-        println!(
-            "Added provider {} with {} models (all disabled).",
-            core::py_repr(provider_id),
-            n_models
-        );
-    }
-    Ok(fetch_err_url)
-}
-
-fn id_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 /// `search_providers`: search models.dev providers by term; pick via numbered menu.
@@ -713,8 +572,26 @@ pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
 pub fn cmd_add_provider(provider_id: &str) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
     let api = sync::fetch_models_dev()?;
-    add_provider_entry(&mut doc, &api, provider_id, false)?;
+    let r = sync::add_provider_entry(&mut doc, &api, provider_id)?;
+    report_add(provider_id, &r);
     Ok(0)
+}
+
+/// Renders the stdout report for one add, matching the Python tool's wording
+/// and order: the live-fetch warning first, then the add line.
+fn report_add(provider_id: &str, r: &sync::AddProviderResponse) {
+    if let Some(url) = &r.fetch_warning_url {
+        println!("{}", sync::live_fetch_error_status(url));
+    }
+    if r.already_present {
+        println!("Provider '{}' already exists.", provider_id);
+    } else {
+        println!(
+            "Added provider '{}' with {} models (all disabled).",
+            provider_id,
+            r.model_count
+        );
+    }
 }
 
 /// `cmd_codex`: persist the Codex provider pick (or 'disable').
@@ -728,9 +605,9 @@ pub fn cmd_codex(raw: &str) -> Res<i32> {
         return Ok(0);
     }
     if !jsonio::enabled_provider_ids(&doc).iter().any(|e| e == pid) {
-        return Err(crate::SyncError(format!(
-            "--codex requires 'disabled' or an enabled provider id (got {})",
-            core::py_repr(pid)
+        return Err(crate::Error::new(format!(
+            "--codex requires 'disabled' or an enabled provider id (got '{}')",
+            pid
         )));
     }
     jsonio::set_codex_selection(&mut doc, Some(pid));
@@ -838,7 +715,8 @@ pub fn cmd_search(term: &str) -> Res<i32> {
         None => Ok(0),
         Some(pid) => {
             let mut doc = jsonio::load_providers()?;
-            add_provider_entry(&mut doc, &api, &pid, false)?;
+            let r = sync::add_provider_entry(&mut doc, &api, &pid)?;
+            report_add(&pid, &r);
             Ok(0)
         }
     }
@@ -847,24 +725,11 @@ pub fn cmd_search(term: &str) -> Res<i32> {
 /// `cmd_sync` (default run)
 pub fn cmd_sync() -> Res<i32> {
     let doc = jsonio::load_providers()?;
-    let (path, _stats) = sync::run_sync()?;
-    match path {
-        None => Ok(0),
-        Some(path) => {
-            sync::print_sync_report(&path, &doc);
-            sync::print_relaunch();
-            Ok(0)
-        }
-    }
-}
-
-/// `resolve_targets` exposed for the harness binary (no network).
-pub fn resolve_targets_local(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarget>> {
-    resolve_targets(doc, targets)
-}
-
-impl ResolvedTarget {
-    pub fn _none() {}
+    let (written, response) = sync::run_sync()?;
+    sync::print_sync_warnings(&response, &written);
+    sync::print_sync_report(&written.path, &doc);
+    sync::print_relaunch();
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -893,144 +758,6 @@ mod tests {
         let existing = vec!["a".to_string()];
         let targets: Vec<String> = vec!["a/x".into(), "a/y".into(), "a".into()];
         assert!(missing_combo_providers(&targets, &existing).is_empty());
-    }
-
-    #[test]
-    fn add_provider_entry_copies_catalog_npm() {
-        let _guard = crate::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-npm-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-npm-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
-
-        let api = serde_json::json!({
-            "prov": {
-                "name": "Prov",
-                "npm": "@ai-sdk/openai-compatible",
-                "models": {
-                    "m": {
-                        "name": "M",
-                        "provider": { "npm": "@ai-sdk/openai" }
-                    }
-                }
-            },
-            "empty": {
-                "name": "Empty",
-                "npm": "",
-                "models": { "m": { "name": "M" } }
-            }
-        });
-        let mut doc = serde_json::json!({ "providers": [] });
-        add_provider_entry(&mut doc, &api, "prov", true).expect("add provider");
-        let prov = doc["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == "prov")
-            .expect("provider present");
-        assert_eq!(prov["npm"], "@ai-sdk/openai-compatible");
-        assert_eq!(prov["models"]["m"]["npm"], "@ai-sdk/openai");
-
-        add_provider_entry(&mut doc, &api, "empty", true).expect("add empty-npm provider");
-        let empty = doc["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == "empty")
-            .expect("empty provider present");
-        assert!(
-            empty.get("npm").is_none(),
-            "empty catalog npm must not be stored"
-        );
-
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-    }
-
-    #[test]
-    fn add_provider_entry_uses_local_base_url_for_ollama_cloud() {
-        let _guard = crate::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-ollama-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-ollama-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
-
-        let api = serde_json::json!({
-            "ollama-cloud": {
-                "name": "Ollama Cloud",
-                "api": "https://ollama.com/v1",
-                "env": ["OLLAMA_API_KEY"],
-                "models": {
-                    "gemma4:31b": { "name": "Gemma 4" },
-                    "local-cloud": { "name": "Should Filter" }
-                }
-            }
-        });
-        let mut doc = serde_json::json!({ "providers": [] });
-        add_provider_entry(&mut doc, &api, "ollama-cloud", true).expect("add provider");
-        let prov = doc["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["id"] == "ollama-cloud")
-            .expect("provider present");
-        assert_eq!(
-            prov["base_url"],
-            crate::sync::OLLAMA_CLOUD_LOCAL_BASE_URL
-        );
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-    }
-
-    #[test]
-    fn add_provider_entry_generates_fresh_opencode_session_header() {
-        let _guard = crate::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-opencode-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-opencode-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
-
-        let api = serde_json::json!({
-            "opencode-go": {
-                "name": "OpenCode Go",
-                "api": "https://opencode.ai/v1",
-                "env": ["OPENCODE_API_KEY"],
-                "models": { "m": { "name": "M" } }
-            }
-        });
-
-        let mut session_ids = Vec::new();
-        for _ in 0..2 {
-            let mut doc = serde_json::json!({ "providers": [] });
-            add_provider_entry(&mut doc, &api, "opencode-go", true).expect("add provider");
-            let session = doc["providers"][0]["extra_headers"]["x-opencode-session"]
-                .as_str()
-                .expect("session header")
-                .to_string();
-            assert!(session.starts_with("ses_"), "{session}");
-            assert!(session.ends_with("uwtb"), "{session}");
-            assert_eq!(session.len(), 30, "{session}");
-            session_ids.push(session);
-        }
-        assert_ne!(session_ids[0], session_ids[1], "each add must mint a new session");
-
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
     }
 
     #[test]
@@ -1071,7 +798,7 @@ mod tests {
         // Sync is the only path that writes the Codex sibling files.
         std::env::set_var("GROK_HOME", &grok);
         std::env::set_var("CODEX_HOME", &codex);
-        crate::sync::update_config_toml_with(false).unwrap();
+        crate::sync::update_config_toml().unwrap();
         assert!(
             codex.join("openrouter-models.json").exists(),
             "catalog json must be written by sync"
@@ -1094,7 +821,7 @@ mod tests {
         // Next sync one-shot clears the remembered provider and deletes the catalog.
         std::env::set_var("GROK_HOME", &grok);
         std::env::set_var("CODEX_HOME", &codex);
-        crate::sync::update_config_toml_with(false).unwrap();
+        crate::sync::update_config_toml().unwrap();
         let cleared = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
         assert_eq!(
             cleared["codex_model_provider"], "",

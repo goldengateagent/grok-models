@@ -1,11 +1,11 @@
 //! TUI main-menu orchestration: TUI on a TTY, numbered fallback otherwise.
 
-use crate::{fallback, jsonio, paths, sync, tui};
+use crate::{core, fallback, jsonio, paths, sync, tui};
 use crate::Res;
 
 pub fn cmd_config() -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
-    let providers = usable(&doc);
+    let providers = core::usable(&doc);
 
     use std::io::IsTerminal;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -37,8 +37,9 @@ pub fn cmd_config() -> Res<i32> {
     let _ = providers; // silence unused
 
     if changed {
-        let path = sync::update_config_toml()?;
-        sync::print_sync_report(&path, &doc);
+        let written = sync::update_config_toml()?;
+        sync::print_config_warnings(&written);
+        sync::print_sync_report(&written.path, &doc);
         sync::print_relaunch();
     }
     Ok(0)
@@ -47,16 +48,4 @@ pub fn cmd_config() -> Res<i32> {
 fn run_tui_safely(doc: &mut serde_json::Value) -> Res<bool> {
     let _ = paths::providers_path(); // touch path on this layout
     tui::run_config_flow(doc)
-}
-
-fn usable(doc: &serde_json::Value) -> Vec<serde_json::Map<String, serde_json::Value>> {
-    doc.get("providers")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter(|p| p.is_object() && p.get("id").is_some_and(|v| !v.is_null()))
-                .filter_map(|p| p.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default()
 }

@@ -894,7 +894,7 @@ def env_api_key(env_key: str) -> str:
     return env_var_value(env_key)
 
 
-HTTP_TIMEOUT_SEC = 15
+HTTP_TIMEOUT_SEC = 10
 
 
 def http_get_json(url: str, api_key: str | None = None) -> object:

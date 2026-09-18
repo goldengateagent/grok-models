@@ -13,12 +13,6 @@ path = "src/lib.rs"
 name = "grok-models"
 path = "src/main.rs"
 
-# Test-only driver used by dev/parity.py to run scenarios against the same
-# code paths as the real binary without network access.
-[[bin]]
-name = "gm-harness"
-path = "src/harness.rs"
-
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "3", default-features = true }

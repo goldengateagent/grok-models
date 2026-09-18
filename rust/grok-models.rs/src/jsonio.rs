@@ -33,11 +33,11 @@ pub fn atomic_write(path: &Path, text: &str) -> Res<()> {
     Ok(())
 }
 
-// Local shim so jsonio doesn't re-export SyncError plumbing everywhere.
+// Local shim so jsonio doesn't re-export Error plumbing everywhere.
 struct SyncErrIo(String);
-impl From<SyncErrIo> for crate::SyncError {
+impl From<SyncErrIo> for crate::Error {
     fn from(e: SyncErrIo) -> Self {
-        crate::SyncError(e.0)
+        crate::Error::new(e.0)
     }
 }
 
@@ -58,7 +58,7 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
         dump_json(path, default)?;
         return Ok(default.clone());
     }
-    let text = std::fs::read_to_string(path).map_err(|e| crate::SyncError(format!(
+    let text = std::fs::read_to_string(path).map_err(|e| crate::Error::new(format!(
         "invalid JSON in {}: {}", path.display(), e
     )))?;
     match serde_json::from_str::<Value>(&text) {

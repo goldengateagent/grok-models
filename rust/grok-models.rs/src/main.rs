@@ -1,4 +1,5 @@
-use grok_models::{cli, commands, flow, sync, Res};
+use grok_models::cli::commands;
+use grok_models::{cli, flow, Res};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -14,6 +15,11 @@ fn main() -> ExitCode {
     match dispatch(args) {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
+            // Diagnostics the operation produced before it failed go to stdout,
+            // the failure itself to stderr — the split the Python tool uses.
+            for line in &e.warnings {
+                println!("{line}");
+            }
             eprintln!("{e}");
             ExitCode::from(1)
         }
@@ -57,10 +63,4 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     }
     // Default (no args): straight into the TUI.
     flow::cmd_config()
-}
-
-#[allow(dead_code)]
-fn _sync_alias() {
-    // Anchor to keep `sync` module symbol referenced from the binary entry.
-    let _ = sync::MODELS_DEV_URL;
 }

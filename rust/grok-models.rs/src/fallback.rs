@@ -40,9 +40,9 @@ fn read_line_stripped() -> Res<String> {
 }
 
 struct SyncErrRead;
-impl From<SyncErrRead> for crate::SyncError {
+impl From<SyncErrRead> for crate::Error {
     fn from(_: SyncErrRead) -> Self {
-        crate::SyncError("unexpected end of input".into())
+        crate::Error::new("unexpected end of input")
     }
 }
 
@@ -201,8 +201,8 @@ pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<Stri
         .unwrap_or(0);
     if !models_is_map || models_len == 0 {
         println!(
-            "No models for {}. Run a sync or re-add the provider.",
-            core::py_repr(provider_id)
+            "No models for '{}'. Run a sync or re-add the provider.",
+            provider_id
         );
         return Ok(false);
     }
@@ -218,7 +218,7 @@ pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<Stri
         config_models_numbered(&ids, &mut models)?
     };
     // `selected` is an owned clone; write it back before persisting.
-    if let Some(slot) = find_by_id_mut(doc, provider_id) {
+    if let Some(slot) = core::find_provider_by_id_mut(doc, provider_id) {
         *slot = selected.clone();
     }
     if changed {
@@ -235,8 +235,8 @@ pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<Stri
         })
         .count();
     println!(
-        "Updated models for {}: {} enabled of {}.",
-        core::py_repr(provider_id),
+        "Updated models for '{}': {} enabled of {}.",
+        provider_id,
         enabled,
         ids.len()
     );
@@ -301,7 +301,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
 
         loop {
             let (selected_name, was_enabled, env_key, doc_url) = {
-                let sel = find_by_id(doc, &provider_id);
+                let sel = core::find_provider_by_id(doc, &provider_id);
                 let sel = match sel {
                     Some(s) => s,
                     None => return Ok(changed),
@@ -365,7 +365,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             }
             match ai {
                 0 => {
-                    let mut sel = find_by_id(doc, &provider_id).unwrap();
+                    let mut sel = core::find_provider_by_id(doc, &provider_id).unwrap();
                     if config_models(&provider_id, doc, &mut sel)? {
                         changed = true;
                     }
@@ -374,15 +374,16 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     let enabled = !was_enabled;
                     crate::sync::set_provider_enabled(doc, &provider_id, enabled)?;
                     let verb = if was_enabled { "Disabled" } else { "Enabled" };
-                    println!("{verb} provider {}.", core::py_repr(&provider_id));
+                    println!("{verb} provider '{provider_id}'.");
                     changed = true;
                 }
                 2 => {
-                    let display = find_by_id(doc, &provider_id)
+                    let display = core::find_provider_by_id(doc, &provider_id)
                         .map(|p| crate::core::provider_display(&p))
                         .unwrap_or_else(|| format!("({provider_id}) - {provider_id}"));
                     if confirm_delete(&display)? {
-                        crate::sync::delete_provider_and_flush(doc, &provider_id, false)?;
+                        let written = crate::sync::delete_provider_and_flush(doc, &provider_id)?;
+                        crate::sync::print_config_warnings(&written);
                         println!("Deleted Provider {display}.");
                         changed = true;
                     }
@@ -394,18 +395,3 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
     }
 }
 
-fn find_by_id<'a>(doc: &'a Value, provider_id: &str) -> Option<Map<String, Value>> {
-    doc.get("providers")?
-        .as_array()?
-        .iter()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
-        .and_then(|p| p.as_object().cloned())
-}
-
-fn find_by_id_mut<'a>(doc: &'a mut Value, provider_id: &str) -> Option<&'a mut Map<String, Value>> {
-    doc.get_mut("providers")?
-        .as_array_mut()?
-        .iter_mut()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
-        .and_then(Value::as_object_mut)
-}

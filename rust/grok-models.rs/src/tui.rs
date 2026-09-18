@@ -2078,8 +2078,8 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
 
 /// Filter-list model for the add-provider modal: live-filter the FULL
 /// models.dev catalog (already-added providers stay listed, rendered inert),
-/// Enter adds quietly and keeps the modal open so several providers can be
-/// added in one visit.
+/// Enter adds without closing the modal, so several providers can be added in
+/// one visit.
 struct AddProviderPicker<'a> {
     doc: &'a mut Value,
     api: Value,
@@ -2102,7 +2102,7 @@ impl<'a> AddProviderPicker<'a> {
     /// Provider ids already configured — the Added section's membership,
     /// regardless of each provider-level `enabled` bool.
     fn added_ids(&self) -> std::collections::HashSet<String> {
-        usable(self.doc)
+        core::usable(self.doc)
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .filter(|id| !id.is_empty())
@@ -2142,7 +2142,7 @@ impl<'a> AddProviderPicker<'a> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(pid);
                 if added.contains(pid) {
-                    let p = usable(self.doc)
+                    let p = core::usable(self.doc)
                         .into_iter()
                         .find(|pr| pr.get("id").and_then(Value::as_str) == Some(pid));
                     let name = p
@@ -2256,29 +2256,24 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         if self.added_ids().contains(pid) {
             return true; // already configured; inert row (delete via its menu)
         }
-        let fetch_err_url = match crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
+        let r = match crate::sync::add_provider_entry(self.doc, &self.api, pid) {
             Err(e) => {
                 // Add errors surface inline so the surrounding session survives.
-                inline_error_win(stdscr, &format!("Add failed: {}", e.0));
+                inline_error_win(stdscr, &format!("Add failed: {}", e.message));
                 return true; // stay open
             }
-            Ok(url) => url,
+            Ok(r) => r,
         };
         // dump_providers already wrote name-sorted order back into doc.
-        let mut model_count = 0usize;
-        if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
-            if let Some(new_entry) = arr.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(pid)) {
-                model_count = new_entry
-                    .get("models")
-                    .and_then(Value::as_object)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-            }
-        }
-        self.added = Some(format!(
-            "Added provider '{pid}' with {model_count} models (all disabled)."
-        ));
-        *self.status.borrow_mut() = match fetch_err_url {
+        self.added = Some(if r.already_present {
+            format!("Provider '{pid}' already exists.")
+        } else {
+            format!(
+                "Added provider '{pid}' with {} models (all disabled).",
+                r.model_count
+            )
+        });
+        *self.status.borrow_mut() = match r.fetch_warning_url {
             Some(url) => Some(crate::sync::live_fetch_error_status(&url)),
             None => self.added.clone(),
         };
@@ -2293,7 +2288,7 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
     let api = match crate::sync::fetch_models_dev() {
         Ok(a) => a,
         Err(e) => {
-            inline_error_win(stdscr, &format!("Fetch failed: {}", e.0));
+            inline_error_win(stdscr, &format!("Fetch failed: {}", e.message));
             return None;
         }
     };
@@ -2635,7 +2630,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             // Already enabled: disable it. The model stays in the catalog
             // (from models.dev) so it visibly moves into the disabled or
             // free-disabled section.
-            let Some(slot) = find_by_id_mut(self.doc, pid) else {
+            let Some(slot) = core::find_provider_by_id_mut(self.doc, pid) else {
                 inline_error_win(
                     stdscr,
                     &format!("Disable failed: provider {pid:?} missing"),
@@ -2657,30 +2652,26 @@ impl<'a> FilterList for AddModelPicker<'a> {
             }
             return true; // stay open
         }
-        let existing: Vec<String> = usable(self.doc)
+        let existing: Vec<String> = core::usable(self.doc)
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .collect();
         let mut added = false;
-        let mut fetch_err_url = None;
+        let mut fetch_warning_url = None;
         if !existing.iter().any(|e| e == pid) {
-            match crate::commands::add_provider_entry(self.doc, &self.api, pid, true) {
+            match crate::sync::add_provider_entry(self.doc, &self.api, pid) {
                 Err(e) => {
-                    inline_error_win(stdscr, &format!("Add failed: {}", e.0));
+                    inline_error_win(stdscr, &format!("Add failed: {}", e.message));
                     return true; // stay open
                 }
-                Ok(url) => {
-                    fetch_err_url = url;
-                    if let Some(arr) = self.doc.get("providers").and_then(Value::as_array) {
-                        if arr.len() > existing.len() {
-                            added = true;
-                        }
-                    }
+                Ok(r) => {
+                    added = !r.already_present;
+                    fetch_warning_url = r.fetch_warning_url;
                 }
             }
         }
         // Enable just this model on the target provider.
-        let Some(slot) = find_by_id_mut(self.doc, pid) else {
+        let Some(slot) = core::find_provider_by_id_mut(self.doc, pid) else {
             inline_error_win(stdscr, &format!("Enable failed: provider {pid:?} missing"));
             return true; // stay open
         };
@@ -2707,7 +2698,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
         } else {
             String::new()
         };
-        self.status = Some(match fetch_err_url {
+        self.status = Some(match fetch_warning_url {
             Some(url) => crate::sync::live_fetch_error_status(&url),
             None => format!("{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."),
         });
@@ -2727,7 +2718,7 @@ pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<Strin
     let api = match crate::sync::fetch_models_dev() {
         Ok(a) => a,
         Err(e) => {
-            inline_error_win(stdscr, &format!("Fetch failed: {}", e.0));
+            inline_error_win(stdscr, &format!("Fetch failed: {}", e.message));
             return None;
         }
     };
@@ -3061,7 +3052,7 @@ fn set_reasoning_win<S: Stdscr>(
         return None;
     }
     let chosen = values[pick].clone();
-    let slot = find_by_id_mut(doc, pid)?;
+    let slot = core::find_provider_by_id_mut(doc, pid)?;
     let m = slot
         .get_mut("models")?
         .as_object_mut()?
@@ -3101,7 +3092,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     let mut model_focus: Option<(String, String, usize)> = None;
     loop {
         // Order is providers.json (sorted only on dump).
-        let ordered: Vec<Map<String, Value>> = usable(doc);
+        let ordered: Vec<Map<String, Value>> = core::usable(doc);
         // Zero providers is a valid state: Add Provider is reachable first.
         // Trailing block after a section rule: Codex Config, Model
         // Descriptions toggle, Web Search picker, Update Model List,
@@ -3255,14 +3246,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         // the new pick and sync again.
                         crate::jsonio::set_codex_selection(doc, None);
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml_with(true);
+                        let _ = crate::sync::update_config_toml();
                         crate::jsonio::set_codex_selection(doc, sel.as_deref());
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml_with(true);
+                        let _ = crate::sync::update_config_toml();
                     } else {
                         crate::jsonio::set_codex_selection(doc, sel.as_deref());
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml_with(true);
+                        let _ = crate::sync::update_config_toml();
                     }
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
@@ -3330,7 +3321,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 Some(SelectOutcome::Picked(i)) => {
                     crate::jsonio::set_web_search(doc, values[i].as_deref());
                     let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                    let _ = crate::sync::update_config_toml_with(true);
+                    let _ = crate::sync::update_config_toml();
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
                     }
@@ -3346,32 +3337,42 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 3 {
-            match crate::sync::update_providers_json_with(true) {
-                Ok(stats) => {
+            match crate::sync::update_providers_json() {
+                Ok(response) => {
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
                     }
-                    status_msg = Some(if stats.live_fetch_errors.len() == 1 {
-                        stats.live_fetch_errors[0].clone()
-                    } else if stats.live_fetch_errors.len() > 1 {
+                    let fetch_messages: Vec<&str> = response
+                        .warnings
+                        .iter()
+                        .filter_map(|w| match w {
+                            crate::sync::SyncWarning::LiveFetchFailed { message } => {
+                                Some(message.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    status_msg = Some(if fetch_messages.len() == 1 {
+                        fetch_messages[0].to_string()
+                    } else if fetch_messages.len() > 1 {
                         format!(
                             "{} (+{} more)",
-                            stats.live_fetch_errors[0],
-                            stats.live_fetch_errors.len() - 1
+                            fetch_messages[0],
+                            fetch_messages.len() - 1
                         )
                     } else {
                         format!(
                             "Updated model list · {} providers synced",
-                            stats.providers_synced
+                            response.providers_synced
                         )
                     });
                     changed = true;
                 }
                 Err(e) => {
-                    status_msg = Some(if e.0.starts_with("error ") {
-                        e.0
+                    status_msg = Some(if e.message.starts_with("error ") {
+                        e.message
                     } else {
-                        format!("error {}: fetch live model list failed", e.0)
+                        format!("error {}: fetch live model list failed", e.message)
                     });
                 }
             }
@@ -3379,7 +3380,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 4 {
-            match crate::sync::update_config_toml_with(true) {
+            match crate::sync::update_config_toml() {
                 Ok(_) => {
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
@@ -3387,10 +3388,10 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     status_msg = Some("Synced model config".to_string());
                 }
                 Err(e) => {
-                    status_msg = Some(if e.0.starts_with("error ") {
-                        e.0
+                    status_msg = Some(if e.message.starts_with("error ") {
+                        e.message
                     } else {
-                        format!("error {}: sync model config failed", e.0)
+                        format!("error {}: sync model config failed", e.message)
                     });
                 }
             }
@@ -3428,7 +3429,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             // Single source: re-read the provider from `doc` every render.
             // One clone per render; everything below borrows from it.
             let view: Map<String, Value> =
-                find_by_id(doc, &provider_id).unwrap_or_default();
+                core::find_provider_by_id(doc, &provider_id).unwrap_or_default();
             let enabled = crate::get_bool_map(&view, "enabled", true);
             let current_base =
                 view.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -3493,8 +3494,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         inline_error_win(
                             stdscr,
                             &format!(
-                                "No models for {}. Run a sync or re-add the provider.",
-                                core::py_repr(&provider_id)
+                                "No models for '{}'. Run a sync or re-add the provider.",
+                                &provider_id
                             ),
                         );
                     } else {
@@ -3511,7 +3512,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         let provider_title = "Configure Models".to_string();
                         model_search_win(stdscr, &ids, &mut models, &provider_title, &provider_id, pname);
                         let updated = Value::Object(models);
-                        if let Some(slot) = find_by_id_mut(doc, &provider_id) {
+                        if let Some(slot) = core::find_provider_by_id_mut(doc, &provider_id) {
                             slot.insert("models".to_string(), updated);
                         }
                         jsonio::dump_providers(&paths::providers_path(), doc)?;
@@ -3544,12 +3545,12 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         if trimmed.is_empty() {
                             // Empty input clears the override (falls back to
                             // the models.dev catalog value on next sync).
-                            if let Some(slot) = find_by_id_mut(doc, &provider_id) {
+                            if let Some(slot) = core::find_provider_by_id_mut(doc, &provider_id) {
                                 slot.remove("base_url");
                             }
                         } else {
                             let val = Value::String(trimmed);
-                            if let Some(slot) = find_by_id_mut(doc, &provider_id) {
+                            if let Some(slot) = core::find_provider_by_id_mut(doc, &provider_id) {
                                 slot.insert("base_url".into(), val.clone());
                             }
                         }
@@ -3559,7 +3560,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 }
                 3 => {
                     if confirm_win(stdscr, &format!("Delete Provider {}?", core::provider_display(&view))) {
-                        crate::sync::delete_provider_and_flush(doc, &provider_id, true)?;
+                        crate::sync::delete_provider_and_flush(doc, &provider_id)?;
                         changed = true;
                     }
                     menu_cursor = 0;
@@ -3572,33 +3573,6 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
 }
 
 
-fn usable(doc: &Value) -> Vec<Map<String, Value>> {
-    doc.get("providers")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter(|p| p.is_object() && p.get("id").is_some_and(|v| !v.is_null()))
-                .filter_map(|p| p.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn find_by_id(doc: &Value, provider_id: &str) -> Option<Map<String, Value>> {
-    doc.get("providers")?
-        .as_array()?
-        .iter()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
-        .and_then(|p| p.as_object().cloned())
-}
-
-fn find_by_id_mut<'a>(doc: &'a mut Value, provider_id: &str) -> Option<&'a mut Map<String, Value>> {
-    doc.get_mut("providers")?
-        .as_array_mut()?
-        .iter_mut()
-        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
-        .and_then(Value::as_object_mut)
-}
 
 // ---------------------------------------------------------------------------
 // Real terminal backend (skip under tests)
@@ -4009,23 +3983,25 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
 mod tests {
     use super::*;
     use crate::theme;
-    use std::sync::Once;
-
-    /// Force `GROK_HOME` into a per-process temp dir before any flow test
-    /// runs, so `dump_json(&paths::providers_path(), ..)` can never reach
-    /// the real `~/.grok/providers.json`.
-    fn isolate_grok_home() {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let home = std::env::temp_dir()
-                .join(format!("gm-unit-home-{}", std::process::id()));
-            std::fs::create_dir_all(&home).expect("create test GROK_HOME");
-            std::env::set_var("GROK_HOME", &home);
-            let codex = std::env::temp_dir()
-                .join(format!("gm-unit-codex-{}", std::process::id()));
-            std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
-            std::env::set_var("CODEX_HOME", &codex);
-        });
+    /// Point `GROK_HOME` and `CODEX_HOME` at this process's unit-test dirs.
+    ///
+    /// The environment is process-global, so the lock is taken *before* it is
+    /// written and returned to the caller, which must hold it for the whole
+    /// test. Writing it first would let a flow test repoint the paths out from
+    /// under a `sync` test that already holds the lock.
+    fn isolate_grok_home() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::test_support::grok_home_lock();
+        let home = std::env::temp_dir()
+            .join(format!("gm-unit-home-{}", std::process::id()));
+        let codex = std::env::temp_dir()
+            .join(format!("gm-unit-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&codex);
+        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
+        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
+        std::env::set_var("GROK_HOME", &home);
+        std::env::set_var("CODEX_HOME", &codex);
+        guard
     }
 
     /// Records every `addstr` call so tests can assert exact rendering
@@ -4618,8 +4594,7 @@ mod tests {
 
     #[test]
     fn add_provider_picker_stays_open_and_records_status_after_add() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         use crate::paths;
         std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
         let mut doc = serde_json::json!({"providers": []});
@@ -5753,8 +5728,7 @@ mod tests {
 
     #[test]
     fn config_flow_renders_fullscreen_layout() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5811,8 +5785,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_action_menu_enable_toggles_display() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5856,8 +5829,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_restores_terminal_on_exit() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5958,8 +5930,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_d_key_does_not_toggle_descriptions() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -5983,8 +5954,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_enter_on_descriptions_row_toggles_flag() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         // One provider: the trailing block starts right after it, so two
         // Downs (Codex Config, then Model Descriptions) land on the toggle.
         let mut doc = serde_json::json!({
@@ -6012,8 +5982,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_d_key_is_ignored_on_action_menu() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6040,8 +6009,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_delete_leaves_clean_main_menu() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "opencode",
@@ -6083,8 +6051,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_enter_on_enabled_model_writes_reasoning() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6135,8 +6102,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_model_cursor_stays_when_no_reasoning_levels() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6170,8 +6136,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_only_current_row_highlighted_in_enabled_models() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6218,8 +6183,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_codex_picker_selects_enabled_provider_or_disabled() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [
                 {
@@ -6269,8 +6233,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_web_search_picker_selects_enabled_model_or_disabled() {
-        isolate_grok_home();
-        let _grok_home_guard = crate::test_support::grok_home_lock();
+        let _grok_home_guard = isolate_grok_home();
         let mut doc = serde_json::json!({
             "providers": [
                 {

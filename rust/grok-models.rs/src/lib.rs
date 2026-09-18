@@ -3,11 +3,14 @@
 //! Module map:
 //! - `difflib`:   Python difflib port (`get_close_matches`) for hint messages
 //! - `jsonio`:    ordered JSON load/dump + atomic writes
+//! - `paths`:     GROK_HOME / CODEX_HOME locations
 //! - `core`:      model id/table-key helpers, sorting, TOML field building
+//! - `benchmarks`: model benchmark score tables
 //! - `toml_out`:  `[model.*]` table emission and owned-section stripping
-//! - `sync`:      models.dev reconciliation and config.toml writing
-//! - `commands`:  CLI command implementations (renderers, toggle, ...)
-//! - `cli`:       argparse-equivalent parser
+//! - `sync`:      provider entry writes, models.dev reconciliation,
+//!                config.toml writing
+//! - `cli`:       CLI surface — `cli::args` argparse-equivalent parser and
+//!                help text, `cli::commands` command implementations
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
 //! - `tui`:       Ratatui/Crossterm screens (curses equivalent)
@@ -15,7 +18,6 @@
 
 pub mod benchmarks;
 pub mod cli;
-pub mod commands;
 pub mod core;
 pub mod difflib;
 pub mod fallback;
@@ -29,22 +31,45 @@ pub mod tui;
 
 use serde_json::Value;
 
-/// Fatal error mapped to exit code 1, mirroring `SyncError`.
+/// Fatal error mapped to exit code 1, mirroring the Python `SyncError`.
+///
+/// `warnings` holds diagnostics the operation produced before it failed, so a
+/// caller that only receives the error still has them to print. Rendered lines
+/// rather than structured values: this type sits at the crate root and must not
+/// depend on `sync`'s warning enum.
 #[derive(Debug)]
-pub struct SyncError(pub String);
+pub struct Error {
+    pub message: String,
+    pub warnings: Vec<String>,
+}
 
-impl std::fmt::Display for SyncError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+impl Error {
+    pub fn new(message: impl Into<String>) -> Self {
+        Error {
+            message: message.into(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Attaches diagnostics produced before the failure.
+    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings = warnings;
+        self
     }
 }
 
-impl std::error::Error for SyncError {}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
 
-pub type Res<T> = Result<T, SyncError>;
+impl std::error::Error for Error {}
+
+pub type Res<T> = Result<T, Error>;
 
 pub fn fail<T>(message: impl Into<String>) -> Res<T> {
-    Err(SyncError(message.into()))
+    Err(Error::new(message))
 }
 
 // ---------------------------------------------------------------------------

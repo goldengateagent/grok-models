@@ -64,42 +64,6 @@ pub fn parse_bool(raw: &str) -> Option<bool> {
     }
 }
 
-/// Python repr() of a string, used in messages like `{id!r}`.
-pub fn py_repr(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push(quote);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                let cp = c as u32;
-                if cp <= 0xff {
-                    out.push_str(&format!("\\x{cp:02x}"));
-                } else if cp <= 0xffff {
-                    out.push_str(&format!("\\u{cp:04x}"));
-                } else {
-                    out.push_str(&format!("\\U{cp:08x}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
-}
-
 /// Result of `_sort_model_indices`.
 pub struct SortedIndices {
     pub filtered: Vec<usize>,
@@ -290,6 +254,40 @@ pub fn build_fields(
         }
     }
     Ok(fields)
+}
+
+/// Provider entries from providers.json that are objects with a non-null id.
+pub fn usable(doc: &Value) -> Vec<Map<String, Value>> {
+    doc.get("providers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|p| p.is_object() && p.get("id").is_some_and(|v| !v.is_null()))
+                .filter_map(|p| p.as_object().cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A provider entry from providers.json by id, cloned.
+pub fn find_provider_by_id(doc: &Value, provider_id: &str) -> Option<Map<String, Value>> {
+    doc.get("providers")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+        .and_then(|p| p.as_object().cloned())
+}
+
+/// A provider entry from providers.json by id, borrowed mutably.
+pub fn find_provider_by_id_mut<'a>(
+    doc: &'a mut Value,
+    provider_id: &str,
+) -> Option<&'a mut Map<String, Value>> {
+    doc.get_mut("providers")?
+        .as_array_mut()?
+        .iter_mut()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
+        .and_then(Value::as_object_mut)
 }
 
 /// The enabled model ids of a provider entry from providers.json.
