@@ -5,7 +5,7 @@ use crate::Res;
 
 pub fn cmd_config() -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
-    let providers = core::usable(&doc);
+    let providers = core::provider_entries(&doc);
 
     use std::io::IsTerminal;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();

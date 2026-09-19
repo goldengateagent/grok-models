@@ -135,14 +135,6 @@ pub fn get_bool_map(o: &serde_json::Map<String, Value>, key: &str, default: bool
     }
 }
 
-/// `env_key` on a stored provider map, or `""`.
-pub fn provider_env_key_from_json(o: &serde_json::Map<String, Value>) -> String {
-    match o.get("env_key") {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
-    }
-}
-
 pub fn provider_label_from(o: &serde_json::Map<String, Value>) -> String {
     core::provider_label(o)
 }

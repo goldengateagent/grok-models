@@ -37,12 +37,9 @@ pub fn get_json_str(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
-/// `env_key` on a providers.json provider object, or `""`.
-pub fn provider_env_key_from_json(provider: &Value) -> String {
-    match provider.get("env_key") {
-        Some(Value::String(s)) => s.clone(),
-        _ => String::new(),
-    }
+/// `env_key` on a providers.json provider entry, or `""`.
+pub fn provider_env_key_from_json(p: &Map<String, Value>) -> String {
+    get_json_str(p, "env_key")
 }
 
 /// Dots, slashes, and colons nest/break TOML bare keys; Grok table keys use '_'.
@@ -257,7 +254,7 @@ pub fn build_fields(
 }
 
 /// Provider entries from providers.json that are objects with a non-null id.
-pub fn usable(doc: &Value) -> Vec<Map<String, Value>> {
+pub fn provider_entries(doc: &Value) -> Vec<Map<String, Value>> {
     doc.get("providers")
         .and_then(Value::as_array)
         .map(|arr| {
@@ -441,7 +438,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
     let token_col = provider_state_token_col(providers);
     let env_w = providers
         .iter()
-        .map(|p| crate::provider_env_key_from_json(p).len())
+        .map(|p| provider_env_key_from_json(p).len())
         .max()
         .unwrap_or(0);
     names
@@ -457,7 +454,7 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
             let token = format!("[{state}]");
             let head = format!("{:<name_w$} - {:<id_w$}", name, pid);
             let mut left = format!("{:<token_col$}{:<tw$}", head, token, tw = PROVIDER_TOKEN_W);
-            let envk = crate::provider_env_key_from_json(p);
+            let envk = provider_env_key_from_json(p);
             if !envk.is_empty() {
                 left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
                 left.push_str(&format!("{envk:<env_w$} = "));
@@ -549,23 +546,11 @@ pub fn env_requirement_line(env_var: &str) -> String {
 /// Required API-key env vars for all enabled providers, doc order, deduped.
 pub fn enabled_provider_env_vars(providers_doc: &Value) -> Vec<String> {
     let mut env_vars: Vec<String> = Vec::new();
-    let empty = Vec::new();
-    let providers = providers_doc
-        .get("providers")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    for p in providers {
-        if !p.is_object() {
-            continue;
-        }
-        let pid_ok = p.get("id").is_some_and(|v| !v.is_null());
-        if !pid_ok {
-            continue;
-        }
+    for p in provider_entries(providers_doc) {
         if !p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
             continue;
         }
-        let env = provider_env_key_from_json(p);
+        let env = provider_env_key_from_json(&p);
         if !env.is_empty() && !env_vars.contains(&env) {
             env_vars.push(env);
         }

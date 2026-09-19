@@ -19,7 +19,8 @@ pub const TOML_SCALAR_FIELDS: [&str; 9] = [
     "description",
 ];
 
-fn toml_escape(value: &Value) -> Res<String> {
+/// Python `tomllib`-compatible escaping of a scalar JSON value into TOML text.
+pub fn toml_escape(value: &Value) -> Res<String> {
     match value {
         Value::Bool(b) => Ok(if *b { "true".into() } else { "false".into() }),
         Value::Number(n) => Ok(number_to_string(n)),
@@ -28,7 +29,8 @@ fn toml_escape(value: &Value) -> Res<String> {
     }
 }
 
-fn toml_subkey(ident: &str) -> String {
+/// Bare TOML key when it is alphanumeric/_/-, else a quoted string.
+pub fn toml_subkey(ident: &str) -> String {
     if !ident.is_empty()
         && ident
             .chars()
@@ -36,7 +38,7 @@ fn toml_subkey(ident: &str) -> String {
     {
         ident.to_string()
     } else {
-        format!("\"{}\"", ident.replace('\\', "\\\\").replace('"', "\\\""))
+        toml_escape(&Value::String(ident.to_string())).unwrap_or_default()
     }
 }
 

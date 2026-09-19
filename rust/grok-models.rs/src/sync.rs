@@ -650,18 +650,11 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
 }
 
 fn toml_quoted(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    toml_out::toml_escape(&Value::String(s.to_string())).unwrap_or_default()
 }
 
 fn toml_key(ident: &str) -> String {
-    if ident
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        ident.to_string()
-    } else {
-        toml_quoted(ident)
-    }
+    toml_out::toml_subkey(ident)
 }
 
 fn is_codex_managed_key(stripped: &str) -> bool {
@@ -943,7 +936,7 @@ fn codex_provider_fields(provider: &Map<String, Value>, pid: &str) -> Map<String
     );
     fields.insert(
         "env_key".into(),
-        Value::String(crate::provider_env_key_from_json(provider)),
+        Value::String(core::provider_env_key_from_json(provider)),
     );
     for header_key in ["extra_headers", "env_http_headers"] {
         if let Some(obj) = provider.get(header_key).and_then(Value::as_object) {
@@ -1117,7 +1110,7 @@ pub fn add_provider_entry(
     api: &Value,
     provider_id: &str,
 ) -> Result<AddProviderResponse, Error> {
-    let existing: Vec<String> = core::usable(doc)
+    let existing: Vec<String> = core::provider_entries(doc)
         .iter()
         .map(|p| p.get("id").map(id_to_string).unwrap_or_default())
         .collect();
@@ -1307,7 +1300,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
         if base_url.is_empty() {
             providers_without_base_url.push(pid.clone());
         }
-        let env_key = core::provider_env_key_from_json(&provider);
+        let env_key = crate::get_str(&provider, "env_key");
         let pname = provider
             .get("name")
             .and_then(Value::as_str)

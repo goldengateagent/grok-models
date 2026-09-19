@@ -154,9 +154,9 @@ fn color_of(p: P) -> (Rgb, Rgb) {
     match p {
         P::Text => (theme::tn(4), theme::tn(0)),
         P::Muted => (theme::tn(6), theme::tn(0)),
-        P::Value => (accent_color(0), theme::tn(0)),
-        P::Free => (accent_color(1), theme::tn(0)),
-        P::Enabled => (accent_color(2), theme::tn(0)),
+        P::Value => (theme::accent(0), theme::tn(0)),
+        P::Free => (theme::accent(1), theme::tn(0)),
+        P::Enabled => (theme::accent(2), theme::tn(0)),
         P::Disabled => (theme::tn(5), theme::tn(0)),
         P::Selected => (theme::tn(4), theme::tn(3)),
         P::Chevron => (theme::tn(7), theme::tn(0)),
@@ -176,12 +176,6 @@ fn color_of(p: P) -> (Rgb, Rgb) {
         P::CodeSymbol => (theme::CODE_SYMBOL_GOLD, theme::CODE_BG),
         P::CodeVar => (theme::CODE_TEXT, theme::CODE_BG),
     }
-}
-
-fn accent_color(i: usize) -> Rgb {
-    use crate::theme::ACCENT;
-    let c = ACCENT[i.min(ACCENT.len() - 1)];
-    Rgb { r: c.0, g: c.1, b: c.2 }
 }
 
 fn tn_color(p: P) -> Rgb {
@@ -2102,7 +2096,7 @@ impl<'a> AddProviderPicker<'a> {
     /// Provider ids already configured — the Added section's membership,
     /// regardless of each provider-level `enabled` bool.
     fn added_ids(&self) -> std::collections::HashSet<String> {
-        core::usable(self.doc)
+        core::provider_entries(self.doc)
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .filter(|id| !id.is_empty())
@@ -2142,7 +2136,7 @@ impl<'a> AddProviderPicker<'a> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(pid);
                 if added.contains(pid) {
-                    let p = core::usable(self.doc)
+                    let p = core::provider_entries(self.doc)
                         .into_iter()
                         .find(|pr| pr.get("id").and_then(Value::as_str) == Some(pid));
                     let name = p
@@ -2652,7 +2646,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             }
             return true; // stay open
         }
-        let existing: Vec<String> = core::usable(self.doc)
+        let existing: Vec<String> = core::provider_entries(self.doc)
             .iter()
             .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
             .collect();
@@ -3092,7 +3086,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
     let mut model_focus: Option<(String, String, usize)> = None;
     loop {
         // Order is providers.json (sorted only on dump).
-        let ordered: Vec<Map<String, Value>> = core::usable(doc);
+        let ordered: Vec<Map<String, Value>> = core::provider_entries(doc);
         // Zero providers is a valid state: Add Provider is reachable first.
         // Trailing block after a section rule: Codex Config, Model
         // Descriptions toggle, Web Search picker, Update Model List,
@@ -3440,7 +3434,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 "Delete Provider".to_string(),
                 "Back".to_string(),
             ];
-            let env_key = crate::provider_env_key_from_json(&view);
+            let env_key = crate::core::provider_env_key_from_json(&view);
             let key_hint = if env_key.is_empty() {
                 None
             } else {

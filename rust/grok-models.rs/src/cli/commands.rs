@@ -16,7 +16,7 @@ pub fn render_list_text(
     provider_filter: Option<&str>,
     providers_only: bool,
 ) -> Res<()> {
-    let providers = core::usable(doc);
+    let providers = core::provider_entries(doc);
     if let Some(filter) = provider_filter {
         if !providers.iter().any(|p| p["id"].as_str() == Some(filter)) {
             let ids: Vec<String> = providers
@@ -56,7 +56,7 @@ pub fn render_list_text(
                 enabled_providers += 1;
             }
             println!("{}", provider_state_line(provider));
-            let env = crate::provider_env_key_from_json(provider);
+            let env = core::provider_env_key_from_json(provider);
             if !env.is_empty() {
                 println!("    {}", core::env_requirement_line(&env));
             }
@@ -161,7 +161,7 @@ fn provider_state_line(p: &Map<String, Value>) -> String {
 /// `render_models_text` (`--models`). Returns process exit code.
 pub fn render_models_text() -> Res<i32> {
     let doc = jsonio::load_providers()?;
-    let providers = core::usable(&doc);
+    let providers = core::provider_entries(&doc);
 
     println!("Enabled models");
 
@@ -205,7 +205,7 @@ pub fn render_models_text() -> Res<i32> {
         if !crate::get_bool_map(provider, "enabled", true) {
             continue;
         }
-        let env = crate::provider_env_key_from_json(provider);
+        let env = core::provider_env_key_from_json(provider);
         if !env.is_empty() {
             let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
             let pname = provider
@@ -238,7 +238,7 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
         s.replace('.', "_").replace('/', "_").replace(':', "_")
     }
 
-    let providers = core::usable(doc);
+    let providers = core::provider_entries(doc);
     let provider_ids: Vec<String> = providers
         .iter()
         .map(|p| p["id"].as_str().unwrap_or_default().to_string())
@@ -342,7 +342,7 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     // (all models disabled, catalog-seeded), then the resolution below flips
     // just that model. Disable targets and bare provider ids keep the old
     // behavior.
-    let existing_ids: Vec<String> = core::usable(&doc)
+    let existing_ids: Vec<String> = core::provider_entries(&doc)
         .iter()
         .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
         .collect();

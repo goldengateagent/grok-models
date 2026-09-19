@@ -262,24 +262,12 @@ pub fn confirm_delete(label: &str) -> Res<bool> {
 fn provider_label_list(doc: &Value) -> Vec<(String, String)> {
     // Returns (id, label) pairs in loader order (name-sorted by load_providers).
     let mut entries: Vec<(String, String)> = Vec::new();
-    for p in usable_provider_maps(doc) {
+    for p in crate::core::provider_entries(doc) {
         let id = p.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-        let label = crate::provider_label_from(&p);
+        let label = crate::core::provider_label(&p);
         entries.push((id, label));
     }
     entries
-}
-
-fn usable_provider_maps(doc: &Value) -> Vec<Map<String, Value>> {
-    doc.get("providers")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter(|p| p.is_object() && p.get("id").is_some_and(|v| !v.is_null()))
-                .filter_map(|p| p.as_object().cloned())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// `_numbered_config_flow`: whole TUI flow over stdin/stdout.
@@ -313,7 +301,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     .unwrap_or(&provider_id)
                     .to_string();
                 let enabled = crate::get_bool_map(&sel, "enabled", true);
-                let env = crate::provider_env_key_from_json(&sel);
+                let env = crate::core::provider_env_key_from_json(&sel);
                 let doc = sel
                     .get("doc")
                     .and_then(Value::as_str)
