@@ -71,7 +71,7 @@ pub struct SortedIndices {
 fn model_enabled(models: &Map<String, Value>, mid: &str) -> bool {
     // Non-dict entries count as disabled, exactly like Python's isinstance gate.
     match models.get(mid) {
-        Some(v) if v.is_object() => crate::get_bool(v, "enabled", true),
+        Some(v) if v.is_object() => crate::json_utils::get_bool_value(v, "enabled"),
         _ => false,
     }
 }
@@ -82,7 +82,7 @@ fn is_free(mid: &str) -> bool {
 
 fn model_display_name(models: &Map<String, Value>, mid: &str) -> String {
     match models.get(mid) {
-        Some(v) => crate::name_or(v, mid),
+        Some(v) => crate::json_utils::get_name_or(v, mid),
         None => mid.to_string(),
     }
 }
@@ -225,12 +225,12 @@ pub fn build_fields(
         fields.insert("context_window".into(), ctx);
     }
 
-    if crate::truthy(minfo.get("reasoning")) {
+    if crate::json_utils::is_truthy(minfo.get("reasoning")) {
         match efforts_from_models_dev(minfo) {
             Some(efforts) => {
                 let default_idx = efforts
                     .iter()
-                    .position(|row| crate::get_bool_map(row, "default", false))
+                    .position(|row| crate::json_utils::get_bool_map(row, "default"))
                     .unwrap_or(0);
                 let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
                 fields.insert("supports_reasoning_effort".into(), Value::Bool(true));
@@ -292,7 +292,7 @@ pub fn enabled_model_ids(provider: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(models) = provider.get("models").and_then(Value::as_object) {
         for (model_id, model) in models {
-            let enabled = crate::get_bool(model, "enabled", true);
+            let enabled = crate::json_utils::get_bool_value(model, "enabled");
             if enabled {
                 out.push(model_id.clone());
             }
@@ -303,7 +303,7 @@ pub fn enabled_model_ids(provider: &Value) -> Vec<String> {
 
 /// `_provider_label`
 pub fn provider_label(provider: &serde_json::Map<String, Value>) -> String {
-    let state = if crate::get_bool_map(provider, "enabled", true) {
+    let state = if crate::json_utils::get_bool_map(provider, "enabled") {
         "enabled"
     } else {
         "disabled"
@@ -458,89 +458,11 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
             if !envk.is_empty() {
                 left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
                 left.push_str(&format!("{envk:<env_w$} = "));
-                left.push_str(&quoted_truncated_env_value(&envk));
+                left.push_str(&crate::env::vars::env_key_masked(&envk));
             }
             left
         })
         .collect()
-}
-
-/// WSL if /proc kernel strings contain microsoft.
-pub fn is_wsl() -> bool {
-    static IS_WSL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IS_WSL.get_or_init(|| {
-        #[cfg(not(target_os = "linux"))]
-        {
-            false
-        }
-        #[cfg(target_os = "linux")]
-        {
-            fn has_microsoft(path: &str) -> bool {
-                std::fs::read_to_string(path)
-                    .map(|s| s.to_ascii_lowercase().contains("microsoft"))
-                    .unwrap_or(false)
-            }
-            has_microsoft("/proc/version") || has_microsoft("/proc/sys/kernel/osrelease")
-        }
-    })
-}
-
-/// Windows process env via powershell.exe. Cached per name for the process.
-fn get_windows_env_var(name: &str) -> String {
-    let mut bytes = name.bytes();
-    let valid = match bytes.next() {
-        Some(b'A'..=b'Z' | b'a'..=b'z' | b'_') => bytes
-            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')),
-        _ => false,
-    };
-    if !valid {
-        return String::new();
-    }
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Some(v) = cache.lock().unwrap().get(name).cloned() {
-        return v;
-    }
-    let cmd = format!("[Environment]::GetEnvironmentVariable('{name}')");
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-        .stdin(std::process::Stdio::null())
-        .output();
-    let value = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => String::new(),
-    };
-    cache.lock().unwrap().insert(name.to_string(), value.clone());
-    value
-}
-
-/// Process value of a named env var; unset → `""`. On WSL, the Windows env.
-pub fn env_var_value(name: &str) -> String {
-    if is_wsl() {
-        get_windows_env_var(name)
-    } else {
-        std::env::var(name).unwrap_or_default()
-    }
-}
-
-/// First 10 chars of the env value, quoted, with ellipsis; `""` if empty.
-pub fn quoted_truncated_env_value(env_var: &str) -> String {
-    let val = env_var_value(env_var);
-    if val.is_empty() {
-        "\"\"".to_string()
-    } else {
-        format!("\"{}...\"", truncate_chars(&val, 10))
-    }
-}
-
-fn truncate_chars(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
-/// `ENV_VAR = "prefix..."`. Callers pass a non-empty name.
-pub fn env_requirement_line(env_var: &str) -> String {
-    format!("{env_var} = {}", quoted_truncated_env_value(env_var))
 }
 
 /// Required API-key env vars for all enabled providers, doc order, deduped.
@@ -748,19 +670,5 @@ mod tests {
             assert!(id[16..26].chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
         }
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn env_var_value_reads_set_var() {
-        let _guard = crate::test_support::grok_home_lock();
-        const VAR: &str = "GROK_MODELS_TEST_FETCH_KEY";
-        std::env::remove_var(VAR);
-        assert_eq!(env_var_value(""), "");
-        assert_eq!(env_var_value(VAR), "");
-        std::env::set_var(VAR, "secret-token");
-        assert_eq!(env_var_value(VAR), "secret-token");
-        std::env::set_var(VAR, "");
-        assert_eq!(env_var_value(VAR), "");
-        std::env::remove_var(VAR);
     }
 }

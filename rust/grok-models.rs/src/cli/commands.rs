@@ -1,14 +1,34 @@
-//! Non-interactive command implementations, ported verbatim.
+//! Non-interactive command implementations.
 
 use crate::core;
 use crate::difflib;
+use crate::env::paths;
 use crate::fallback::prompt_line;
 use crate::jsonio;
-use crate::paths;
-use crate::sync::{self};
+use crate::sync;
 use crate::{fail, Res};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Appends ` (did you mean: ...?)` when `candidates` yields close matches.
+fn did_you_mean_hint(input: &str, candidates: &[String]) -> String {
+    let hints = difflib::get_close_matches(input, candidates);
+    if hints.is_empty() {
+        String::new()
+    } else {
+        format!(" (did you mean: {}?)", hints.join(", "))
+    }
+}
+
+/// Display name for a provider entry: `name` when set, else `id`.
+fn provider_display_name<'a>(provider: &'a Map<String, Value>) -> &'a str {
+    let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+    provider
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(pid)
+}
 
 /// `render_list_text` — plain-text listing (`--providers`, `--provider ID`).
 pub fn render_list_text(
@@ -23,17 +43,8 @@ pub fn render_list_text(
                 .iter()
                 .map(|p| p["id"].as_str().unwrap_or_default().to_string())
                 .collect();
-            let hints = difflib::get_close_matches(filter, &ids);
-            let hint = if hints.is_empty() {
-                String::new()
-            } else {
-                format!(" (did you mean: {}?)", hints.join(", "))
-            };
-            return fail(format!(
-                "unknown provider '{}'{}",
-                filter,
-                hint
-            ));
+            let hint = did_you_mean_hint(filter, &ids);
+            return fail(format!("unknown provider '{filter}'{hint}"));
         }
     }
     println!("Configured providers");
@@ -51,14 +62,14 @@ pub fn render_list_text(
     if providers_only && provider_filter.is_none() {
         let mut enabled_providers = 0usize;
         for provider in &shown_providers {
-            let penabled = crate::get_bool_map(provider, "enabled", true);
+            let penabled = crate::json_utils::get_bool_map(provider, "enabled");
             if penabled {
                 enabled_providers += 1;
             }
             println!("{}", provider_state_line(provider));
             let env = core::provider_env_key_from_json(provider);
             if !env.is_empty() {
-                println!("    {}", core::env_requirement_line(&env));
+                println!("    {}", crate::env::vars::env_key_masked_display(&env));
             }
         }
         println!();
@@ -78,12 +89,8 @@ pub fn render_list_text(
             println!();
         }
         let pid = provider["id"].as_str().unwrap_or_default();
-        let pname = provider
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(pid);
-        let penabled = crate::get_bool_map(provider, "enabled", true);
+        let pname = provider_display_name(provider);
+        let penabled = crate::json_utils::get_bool_map(provider, "enabled");
         if penabled {
             enabled_providers += 1;
         }
@@ -96,7 +103,7 @@ pub fn render_list_text(
             .filter(|mid| {
                 models_map
                     .get(*mid)
-                    .map(|m| crate::get_bool(m, "enabled", true))
+                    .map(|m| crate::json_utils::get_bool_value(m, "enabled"))
                     .unwrap_or(false)
             })
             .count();
@@ -121,7 +128,7 @@ pub fn render_list_text(
         }
         for mid in &ids {
             let m = models_map.get(mid);
-            let menabled = m.map(|v| crate::get_bool(v, "enabled", true)).unwrap_or(false);
+            let menabled = m.map(|v| crate::json_utils::get_bool_value(v, "enabled")).unwrap_or(false);
             let free_tag = if mid.to_lowercase().contains("free") {
                 "  [free]"
             } else {
@@ -143,12 +150,12 @@ pub fn render_list_text(
     Ok(())
 }
 
-/// `_provider_state_line`
+/// One-line provider state for `--providers`.
 fn provider_state_line(p: &Map<String, Value>) -> String {
-    let penabled = crate::get_bool_map(p, "enabled", true);
+    let penabled = crate::json_utils::get_bool_map(p, "enabled");
     let marker = if penabled { '●' } else { '○' };
     let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = p.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(pid);
+    let name = provider_display_name(p);
     format!(
         "{} ({}) - {}  [{}]",
         marker,
@@ -170,22 +177,18 @@ pub fn render_models_text() -> Res<i32> {
 
     for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-        let penabled = crate::get_bool_map(provider, "enabled", true);
+        let penabled = crate::json_utils::get_bool_map(provider, "enabled");
         let empty = Map::new();
         let mm = provider.get("models").and_then(Value::as_object).unwrap_or(&empty);
-        let pname = provider
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(pid);
+        let pname = provider_display_name(provider);
         for (mid, m) in mm {
-            if !m.is_object() || !crate::get_bool(m, "enabled", true) {
+            if !m.is_object() || !crate::json_utils::get_bool_value(m, "enabled") {
                 continue;
             }
             if !penabled {
                 continue;
             }
-            let mname = crate::name_or(m, mid);
+            let mname = crate::json_utils::get_name_or(m, mid);
             lines_out.push(format!("● {} ({}) - {}/{}", mname, pname, pid, mid));
             total_enabled += 1;
         }
@@ -202,18 +205,13 @@ pub fn render_models_text() -> Res<i32> {
     println!();
     let mut env_rows: Vec<(String, String, String)> = Vec::new();
     for provider in &providers {
-        if !crate::get_bool_map(provider, "enabled", true) {
+        if !crate::json_utils::get_bool_map(provider, "enabled") {
             continue;
         }
         let env = core::provider_env_key_from_json(provider);
         if !env.is_empty() {
-            let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-            let pname = provider
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(pid);
-            env_rows.push((env.clone(), core::quoted_truncated_env_value(&env), pname.to_string()));
+            let pname = provider_display_name(provider);
+            env_rows.push((env.clone(), crate::env::vars::env_key_masked(&env), pname.to_string()));
         }
     }
     if !env_rows.is_empty() {
@@ -232,7 +230,7 @@ pub enum ResolvedTarget {
     Model(String, String),
 }
 
-/// `resolve_targets`
+/// Resolve CLI targets to provider ids and provider/model pairs.
 pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarget>> {
     fn norm(s: &str) -> String {
         s.replace('.', "_").replace('/', "_").replace(':', "_")
@@ -256,17 +254,8 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
             .filter(|p| norm(p["id"].as_str().unwrap_or_default()) == norm(pid_raw))
             .collect();
         if matches.len() != 1 {
-            let hints = difflib::get_close_matches(pid_raw, &provider_ids);
-            let hint = if hints.is_empty() {
-                String::new()
-            } else {
-                format!(" (did you mean: {}?)", hints.join(", "))
-            };
-            errors.push(format!(
-                "unknown provider '{}'{}",
-                pid_raw,
-                hint
-            ));
+            let hint = did_you_mean_hint(pid_raw, &provider_ids);
+            errors.push(format!("unknown provider '{pid_raw}'{hint}"));
             continue;
         }
         let provider = matches[0];
@@ -290,17 +279,9 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
             .cloned()
             .collect();
         if model_hits.len() != 1 {
-            let hints = difflib::get_close_matches(mid_raw, &raw_ids);
-            let hint = if hints.is_empty() {
-                String::new()
-            } else {
-                format!(" (did you mean: {}?)", hints.join(", "))
-            };
+            let hint = did_you_mean_hint(mid_raw, &raw_ids);
             errors.push(format!(
-                "unknown model '{}' for provider '{}'{}",
-                mid_raw,
-                pid_raw,
-                hint
+                "unknown model '{mid_raw}' for provider '{pid_raw}'{hint}"
             ));
             continue;
         }
@@ -386,14 +367,14 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     }
 
     // Providers getting a model enabled while the provider itself is disabled.
-    let mut disabled_provider_ids: std::collections::BTreeSet<String> = Default::default();
+    let mut disabled_provider_ids: BTreeSet<String> = BTreeSet::new();
     for key in &applied_keys {
         let (pid, mid) = key;
         let want = applied[key];
         if mid.is_some() && want {
             let prov = core::find_provider_by_id(&doc, pid);
             if let Some(prov) = prov {
-                if !crate::get_bool_map(&prov, "enabled", true) {
+                if !crate::json_utils::get_bool_map(&prov, "enabled") {
                     disabled_provider_ids.insert(pid.clone());
                 }
             }
@@ -408,14 +389,13 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
             None => pid.clone(),
             Some(m) => format!("{pid}/{m}"),
         };
-        let cur = core::find_provider_by_id(&doc, pid);
-        let cur = match cur {
+        let cur = match core::find_provider_by_id(&doc, pid) {
             Some(c) => c,
             None => continue,
         };
         match mid {
             None => {
-                let penabled = crate::get_bool_map(&cur, "enabled", true);
+                let penabled = crate::json_utils::get_bool_map(&cur, "enabled");
                 if penabled == want {
                     println!(
                         "already {}: {}",
@@ -498,7 +478,7 @@ pub fn cmd_disable_all() -> Res<i32> {
             };
             let mobj = models.as_object_mut().unwrap();
             for (_, m) in mobj.iter_mut() {
-                if m.is_object() && crate::get_bool(m, "enabled", true) {
+                if m.is_object() && crate::json_utils::get_bool_value(m, "enabled") {
                     m.as_object_mut()
                         .unwrap()
                         .insert("enabled".into(), Value::Bool(false));
@@ -519,7 +499,7 @@ pub fn cmd_disable_all() -> Res<i32> {
     Ok(0)
 }
 
-/// `search_providers`: search models.dev providers by term; pick via numbered menu.
+/// Search models.dev providers by term; pick via numbered menu.
 pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
     let term_l = term.to_lowercase();
     let mut matches: Vec<(String, String)> = Vec::new();
@@ -568,7 +548,7 @@ pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
     }
 }
 
-/// `cmd_add_provider`
+/// Add a provider entry seeded from the models.dev catalog.
 pub fn cmd_add_provider(provider_id: &str) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
     let api = sync::fetch_models_dev()?;
@@ -594,7 +574,7 @@ fn report_add(provider_id: &str, r: &sync::AddProviderResponse) {
     }
 }
 
-/// `cmd_codex`: persist the Codex provider pick (or 'disable').
+/// Persist the Codex provider pick (or 'disable').
 pub fn cmd_codex(raw: &str) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
     let pid = raw.trim();
@@ -616,9 +596,8 @@ pub fn cmd_codex(raw: &str) -> Res<i32> {
     Ok(0)
 }
 
-/// `cmd_import`: seed `providers.json` from the `[model.*]` tables already in
-/// `config.toml`, then enable those models. Reuses `--add-provider` and
-/// `--enable`, so no custom reconcile code is needed (mirrors Python).
+/// Seed `providers.json` from existing `[model.*]` tables, then enable them.
+/// Reuses `--add-provider` and `--enable`, so no custom reconcile code is needed.
 pub fn cmd_import() -> Res<i32> {
     let cfg_path = paths::config_toml_path();
     if !cfg_path.exists() {
@@ -642,7 +621,7 @@ pub fn cmd_import() -> Res<i32> {
         }
     };
 
-    let mut provider_models: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut provider_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (table_key, table) in model_tables {
         let model_id = match table.get("model").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_string(),
@@ -702,12 +681,11 @@ pub fn cmd_import() -> Res<i32> {
                 .map(move |mid| format!("{provider_id}/{mid}"))
         })
         .collect();
-    let disable_models: Vec<String> = Vec::new();
-    cmd_toggle(&enable_models, &disable_models)?;
+    cmd_toggle(&enable_models, &[])?;
     Ok(0)
 }
 
-/// `cmd_search`
+/// Search models.dev for a term, add the picked provider.
 pub fn cmd_search(term: &str) -> Res<i32> {
     let api = sync::fetch_models_dev()?;
     let provider_id = search_providers(&api, term)?;
@@ -722,7 +700,7 @@ pub fn cmd_search(term: &str) -> Res<i32> {
     }
 }
 
-/// `cmd_sync` (default run)
+/// Default run: reconcile providers.json into config.toml.
 pub fn cmd_sync() -> Res<i32> {
     let doc = jsonio::load_providers()?;
     let (written, response) = sync::run_sync()?;
@@ -735,6 +713,12 @@ pub fn cmd_sync() -> Res<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn set_homes(grok: &Path, codex: &Path) {
+        std::env::set_var("GROK_HOME", grok);
+        std::env::set_var("CODEX_HOME", codex);
+    }
 
     #[test]
     fn missing_combo_providers_dedupes_and_ignores_bare_and_known() {
@@ -762,7 +746,7 @@ mod tests {
 
     #[test]
     fn cmd_codex_sets_provider_or_disabled() {
-        let _guard = crate::test_support::grok_home_lock();
+        let _guard = crate::env::test_support::grok_home_lock();
         let pid = std::process::id();
         let grok = std::env::temp_dir().join(format!("gm-cmd-codex-grok-{pid}"));
         let codex = std::env::temp_dir().join(format!("gm-cmd-codex-codex-{pid}"));
@@ -770,8 +754,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&codex);
         std::fs::create_dir_all(&grok).unwrap();
         std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
 
         let mut doc = serde_json::json!({
             "providers": [{
@@ -784,8 +767,7 @@ mod tests {
         jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
 
         assert!(cmd_codex("true").is_err());
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
         cmd_codex("openrouter").expect("enable provider");
         let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
         assert_eq!(loaded["write_codex_config_toml"], Value::Bool(true));
@@ -796,16 +778,14 @@ mod tests {
         );
 
         // Sync is the only path that writes the Codex sibling files.
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
         crate::sync::update_config_toml().unwrap();
         assert!(
             codex.join("openrouter-models.json").exists(),
             "catalog json must be written by sync"
         );
 
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
         cmd_codex("disabled").expect("disable");
         let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
         assert_eq!(loaded["write_codex_config_toml"], Value::Bool(false));
@@ -819,8 +799,7 @@ mod tests {
         );
 
         // Next sync one-shot clears the remembered provider and deletes the catalog.
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
         crate::sync::update_config_toml().unwrap();
         let cleared = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
         assert_eq!(
@@ -832,8 +811,7 @@ mod tests {
             "catalog json must be deleted on sync after disable"
         );
 
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        set_homes(&grok, &codex);
         assert!(cmd_codex("missing").is_err());
     }
 }

@@ -71,7 +71,7 @@ pub fn emit_model_table(table_key: &str, fields: &serde_json::Map<String, Value>
         if key == "api_backend" {
             // Python: fields.get(key) or 'chat_completions'
             let v = fields.get(key).cloned().unwrap_or(Value::Null);
-            let chosen = if crate::truthy(Some(&v)) {
+            let chosen = if crate::json_utils::is_truthy(Some(&v)) {
                 v
             } else {
                 Value::String("chat_completions".into())

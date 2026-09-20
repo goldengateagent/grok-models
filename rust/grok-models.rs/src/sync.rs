@@ -1,8 +1,8 @@
 //! `run_sync()` and its report strings, ported verbatim.
 
 use crate::core;
+use crate::env::paths;
 use crate::jsonio;
-use crate::paths;
 use crate::toml_out;
 use crate::{fail, Res, Error};
 use serde_json::{Map, Value};
@@ -174,7 +174,7 @@ fn try_fetch_models_url(
     provider: &mut Map<String, Value>,
 ) -> (Option<Vec<(String, Option<String>)>>, Option<String>) {
     let use_auth = provider_auth_models_list(provider);
-    let val = core::env_var_value(env_key);
+    let val = crate::env::vars::env_var_value(env_key);
     let key = if use_auth && !val.is_empty() {
         Some(val.as_str())
     } else {
@@ -312,14 +312,14 @@ fn enrich_model_entry(
             entry.insert("context_window".to_string(), ctx);
         }
     }
-    if crate::truthy(minfo.get("reasoning")) {
+    if crate::json_utils::is_truthy(minfo.get("reasoning")) {
         match core::efforts_from_models_dev(minfo) {
             Some(efforts) => {
                 // Precompute the default effort (first row not named "none")
                 // so the config.toml writer never needs the catalog to pick.
                 let default_idx = efforts
                     .iter()
-                    .position(|row| crate::get_bool_map(row, "default", false))
+                    .position(|row| crate::json_utils::get_bool_map(row, "default"))
                     .unwrap_or(0);
                 let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
                 for (key, value) in [
@@ -870,7 +870,7 @@ fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
             "supported_in_api": true,
             "priority": i,
             "base_instructions": "",
-            "supports_reasoning_summaries": crate::truthy(entry.get("supports_reasoning_effort")),
+            "supports_reasoning_summaries": crate::json_utils::is_truthy(entry.get("supports_reasoning_effort")),
             "default_reasoning_summary": "none",
             "support_verbosity": false,
             "truncation_policy": { "mode": "tokens", "limit": 10000 },
@@ -1133,7 +1133,7 @@ pub fn add_provider_entry(
     let mut provider = Map::new();
     provider.insert("id".into(), Value::String(provider_id.to_string()));
     let name_val = provider_models_dev.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
-    let name_val = if crate::truthy(Some(&name_val)) {
+    let name_val = if crate::json_utils::is_truthy(Some(&name_val)) {
         name_val
     } else {
         Value::String(provider_id.to_string())
@@ -1300,7 +1300,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
         if base_url.is_empty() {
             providers_without_base_url.push(pid.clone());
         }
-        let env_key = crate::get_str(&provider, "env_key");
+        let env_key = crate::json_utils::get_string(&provider, "env_key");
         let pname = provider
             .get("name")
             .and_then(Value::as_str)
@@ -1314,7 +1314,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
                 Value::Object(o) => o,
                 _ => unreachable!(),
             });
-            let menabled = crate::get_bool_map(entry, "enabled", true);
+            let menabled = crate::json_utils::get_bool_map(entry, "enabled");
             if !menabled {
                 continue;
             }
@@ -1353,7 +1353,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
                     }
                 }
             }
-            if crate::truthy(entry.get("supports_reasoning_effort")) {
+            if crate::json_utils::is_truthy(entry.get("supports_reasoning_effort")) {
                 fields.insert(
                     "supports_reasoning_effort".into(),
                     Value::Bool(true),
@@ -1489,7 +1489,7 @@ pub fn print_env_requirements(providers_doc: &Value) {
     println!();
     println!("Required environment variables:");
     for env_var in &env_vars {
-        println!("  {}", core::env_requirement_line(env_var));
+        println!("  {}", crate::env::vars::env_key_masked_display(env_var));
     }
     println!();
 }
@@ -1558,7 +1558,7 @@ pub fn print_config_warnings(written: &UpdateConfigResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::grok_home_lock;
+    use crate::env::test_support::grok_home_lock;
 
     #[test]
     fn last_updated_stamp_is_local_12h_mm_dd_yyyy() {
@@ -2606,7 +2606,7 @@ tables will have an empty base_url"
 
     #[test]
     fn add_provider_entry_copies_catalog_npm() {
-        let _guard = crate::test_support::grok_home_lock();
+        let _guard = crate::env::test_support::grok_home_lock();
         let pid = std::process::id();
         let grok = std::env::temp_dir().join(format!("gm-add-npm-grok-{pid}"));
         let codex = std::env::temp_dir().join(format!("gm-add-npm-codex-{pid}"));
@@ -2663,7 +2663,7 @@ tables will have an empty base_url"
 
     #[test]
     fn add_provider_entry_uses_local_base_url_for_ollama_cloud() {
-        let _guard = crate::test_support::grok_home_lock();
+        let _guard = crate::env::test_support::grok_home_lock();
         let pid = std::process::id();
         let grok = std::env::temp_dir().join(format!("gm-add-ollama-grok-{pid}"));
         let codex = std::env::temp_dir().join(format!("gm-add-ollama-codex-{pid}"));
@@ -2700,7 +2700,7 @@ tables will have an empty base_url"
 
     #[test]
     fn add_provider_entry_generates_fresh_opencode_session_header() {
-        let _guard = crate::test_support::grok_home_lock();
+        let _guard = crate::env::test_support::grok_home_lock();
         let pid = std::process::id();
         let grok = std::env::temp_dir().join(format!("gm-add-opencode-grok-{pid}"));
         let codex = std::env::temp_dir().join(format!("gm-add-opencode-codex-{pid}"));

@@ -3,8 +3,8 @@
 //! `_config_models`, `_confirm_delete`, and `_numbered_config_flow`.
 
 use crate::core;
+use crate::env::paths;
 use crate::jsonio;
-use crate::paths;
 use crate::{fail, Res};
 use serde_json::{Map, Value};
 use std::io::{BufRead, Write};
@@ -118,7 +118,7 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                 let mid = &ids[i];
                 let enabled = models
                     .get(mid)
-                    .map(|m| crate::get_bool(m, "enabled", true))
+                    .map(|m| crate::json_utils::get_bool_value(m, "enabled"))
                     .unwrap_or(false);
                 if n == start + enabled_count && enabled_count < total {
                     println!("  {}", "─".repeat(40));
@@ -176,7 +176,7 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                         *entry = Value::Object(Map::new());
                     }
                     let obj = entry.as_object_mut().unwrap();
-                    let cur = crate::get_bool_map(obj, "enabled", true);
+                    let cur = crate::json_utils::get_bool_map(obj, "enabled");
                     obj.insert("enabled".into(), Value::Bool(!cur));
                     changed = true;
                     continue;
@@ -230,7 +230,7 @@ pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<Stri
         .filter(|mid| {
             models_ref
                 .get(*mid)
-                .map(|m| crate::get_bool(m, "enabled", true))
+                .map(|m| crate::json_utils::get_bool_value(m, "enabled"))
                 .unwrap_or(false)
         })
         .count();
@@ -300,7 +300,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&provider_id)
                     .to_string();
-                let enabled = crate::get_bool_map(&sel, "enabled", true);
+                let enabled = crate::json_utils::get_bool_map(&sel, "enabled");
                 let env = crate::core::provider_env_key_from_json(&sel);
                 let doc = sel
                     .get("doc")
@@ -330,7 +330,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             if !env_key.is_empty() {
                 footer_parts.push(format!(
                     "Required env var: {}",
-                    core::env_requirement_line(&env_key)
+                    crate::env::vars::env_key_masked_display(&env_key)
                 ));
             }
             let footer = if footer_parts.is_empty() {

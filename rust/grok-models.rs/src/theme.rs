@@ -81,19 +81,11 @@ pub fn accent(i: usize) -> Rgb {
     Rgb { r: c.0, g: c.1, b: c.2 }
 }
 
-/// Truecolor + config.
-pub fn use_truecolor() -> bool {
-    matches!(
-        std::env::var("COLORTERM").as_deref(),
-        Ok("truecolor") | Ok("24bit")
-    )
-}
-
 /// Compute the SGR bg to emit (compensated for translucent macOS Terminal
 /// profiles) or the uncompensated bg otherwise.
 pub fn bg_to_emit() -> Rgb {
     let target = tn(0); // bg
-    if !use_truecolor() {
+    if !crate::env::term::use_truecolor() {
         return target;
     }
     *COMPENSATED.get_or_init(|| compute_compensated(target, target))

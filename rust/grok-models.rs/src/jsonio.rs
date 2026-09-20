@@ -3,7 +3,7 @@
 //! serde_json is built with `preserve_order` so object key order matches the
 //! input file / models.dev payload exactly, like Python dicts.
 
-use crate::paths;
+use crate::env::paths;
 use crate::{fail, Res};
 use serde_json::Value;
 use std::io::Write;
@@ -391,7 +391,7 @@ pub fn codex_status_token(doc: &Value) -> String {
     if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
         for p in arr {
             if p.get("id").and_then(Value::as_str) == Some(pid) {
-                return crate::name_or(p, pid);
+                return crate::json_utils::get_name_or(p, pid);
             }
         }
     }

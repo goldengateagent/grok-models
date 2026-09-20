@@ -12,8 +12,8 @@
 //! - Footer "box" when terminal is tall enough, single-line pill otherwise.
 
 use crate::core;
+use crate::env::paths;
 use crate::jsonio;
-use crate::paths;
 use crate::theme::{self, P, Rgb};
 use crate::Res;
 use crossterm::{
@@ -1820,7 +1820,7 @@ struct ModelPicker<'a> {
 fn configure_model_group(models: &Map<String, Value>, mid: &str) -> u8 {
     let enabled = models
         .get(mid)
-        .is_some_and(|v| v.is_object() && crate::get_bool(v, "enabled", true));
+        .is_some_and(|v| v.is_object() && crate::json_utils::get_bool_value(v, "enabled"));
     if enabled {
         0
     } else if mid.to_lowercase().contains("free") {
@@ -1861,12 +1861,12 @@ fn reorder_configure_models(
             ord.then_with(|| {
                 let an = models
                     .get(a)
-                    .map(|v| crate::name_or(v, a))
+                    .map(|v| crate::json_utils::get_name_or(v, a))
                     .unwrap_or_else(|| a.clone())
                     .to_lowercase();
                 let bn = models
                     .get(b)
-                    .map(|v| crate::name_or(v, b))
+                    .map(|v| crate::json_utils::get_name_or(v, b))
                     .unwrap_or_else(|| b.clone())
                     .to_lowercase();
                 an.cmp(&bn)
@@ -1895,7 +1895,7 @@ impl<'a> FilterList for ModelPicker<'a> {
             let n = self
                 .models
                 .get(mid)
-                .map(|v| crate::name_or(v, mid))
+                .map(|v| crate::json_utils::get_name_or(v, mid))
                 .unwrap_or_else(|| mid.clone());
             name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
         }
@@ -1912,9 +1912,9 @@ impl<'a> FilterList for ModelPicker<'a> {
 
     fn render(&mut self, mid: &String, _is_sel: bool) -> Vec<(String, P)> {
         let m = self.models.get(mid);
-        let enabled = m.map(|v| crate::get_bool(v, "enabled", true)).unwrap_or(false);
+        let enabled = m.map(|v| crate::json_utils::get_bool_value(v, "enabled")).unwrap_or(false);
         let is_free = mid.to_lowercase().contains("free");
-        let mname = m.map(|v| crate::name_or(v, mid)).unwrap_or_else(|| mid.clone());
+        let mname = m.map(|v| crate::json_utils::get_name_or(v, mid)).unwrap_or_else(|| mid.clone());
         model_list_row(
             &mname,
             &self.pname,
@@ -1966,7 +1966,7 @@ impl<'a> FilterList for ModelPicker<'a> {
         if !entry.is_object() {
             *entry = Value::Object(Map::new());
         }
-        let cur = crate::get_bool(entry, "enabled", true);
+        let cur = crate::json_utils::get_bool_value(entry, "enabled");
         entry.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(!cur));
         self.changed = true;
         true // stay open
@@ -2146,7 +2146,7 @@ impl<'a> AddProviderPicker<'a> {
                         .unwrap_or(cat_name);
                     let enabled = p
                         .as_ref()
-                        .map(|pr| crate::get_bool_map(pr, "enabled", true))
+                        .map(|pr| crate::json_utils::get_bool_map(pr, "enabled"))
                         .unwrap_or(false);
                     rows.push((name.to_string(), pid.clone(), enabled));
                 } else {
@@ -2429,7 +2429,7 @@ fn combo_enabled(doc: &Value, pid: &str, mid: &str) -> bool {
         };
         return mm
             .get(mid)
-            .is_some_and(|m| m.is_object() && crate::get_bool(m, "enabled", true));
+            .is_some_and(|m| m.is_object() && crate::json_utils::get_bool_value(m, "enabled"));
     }
     false
 }
@@ -2476,7 +2476,7 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
                 if seen.contains(&(pid.to_string(), mid.clone())) {
                     continue;
                 }
-                if !m.is_object() || !crate::get_bool(m, "enabled", true) {
+                if !m.is_object() || !crate::json_utils::get_bool_value(m, "enabled") {
                     continue;
                 }
                 let mname = m
@@ -2520,7 +2520,7 @@ impl<'a> AddModelPicker<'a> {
                 };
                 if let Some(mm) = p.get("models").and_then(Value::as_object) {
                     for (mid, m) in mm {
-                        if m.is_object() && crate::get_bool(m, "enabled", true) {
+                        if m.is_object() && crate::json_utils::get_bool_value(m, "enabled") {
                             set.insert((pid.to_string(), mid.to_string()));
                         }
                     }
@@ -2641,7 +2641,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
                 }
             }
             if disabled {
-                let _ = jsonio::dump_providers(&crate::paths::providers_path(), self.doc);
+                let _ = jsonio::dump_providers(&crate::env::paths::providers_path(), self.doc);
                 self.status = Some(format!("Disabled {mname} ({pname}) - {pid}/{mid}."));
             }
             return true; // stay open
@@ -2686,7 +2686,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
         m.as_object_mut()
             .unwrap()
             .insert("enabled".into(), Value::Bool(true));
-        let _ = jsonio::dump_providers(&crate::paths::providers_path(), self.doc);
+        let _ = jsonio::dump_providers(&crate::env::paths::providers_path(), self.doc);
         let prefix = if added {
             format!("Added provider '{pid}'. ")
         } else {
@@ -2767,20 +2767,20 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
     let mut model_rows: Vec<(String, String, String, String)> = Vec::new();
     for provider in &providers {
         let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-        let penabled = crate::get_bool_map(provider, "enabled", true);
+        let penabled = crate::json_utils::get_bool_map(provider, "enabled");
         let mm = provider.get("models").and_then(Value::as_object);
         let Some(mm) = mm else {
             continue;
         };
-        let pname = crate::name_or(&Value::Object((*provider).clone()), pid);
+        let pname = crate::json_utils::get_name_or(&Value::Object((*provider).clone()), pid);
         for (mid, m) in mm {
-            if !m.is_object() || !crate::get_bool(m, "enabled", true) {
+            if !m.is_object() || !crate::json_utils::get_bool_value(m, "enabled") {
                 continue;
             }
             if !penabled {
                 continue;
             }
-            let mname = crate::name_or(m, mid);
+            let mname = crate::json_utils::get_name_or(m, mid);
             model_rows.push((mname, pname.clone(), pid.to_string(), mid.clone()));
         }
     }
@@ -3021,7 +3021,7 @@ fn set_reasoning_win<S: Stdscr>(
         if values.is_empty() {
             return Some("No reasoning levels".into());
         }
-        (labels, values, crate::name_or(m, mid))
+        (labels, values, crate::json_utils::get_name_or(m, mid))
     };
     let pick = match select_win(
         stdscr,
@@ -3424,7 +3424,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             // One clone per render; everything below borrows from it.
             let view: Map<String, Value> =
                 core::find_provider_by_id(doc, &provider_id).unwrap_or_default();
-            let enabled = crate::get_bool_map(&view, "enabled", true);
+            let enabled = crate::json_utils::get_bool_map(&view, "enabled");
             let current_base =
                 view.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
             let actions = vec![
@@ -3448,7 +3448,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let footer = if env_key.is_empty() {
                 None
             } else {
-                Some(core::env_requirement_line(&env_key))
+                Some(crate::env::vars::env_key_masked_display(&env_key))
             };
             let doc_url = view
                 .get("doc")
@@ -3984,7 +3984,7 @@ mod tests {
     /// test. Writing it first would let a flow test repoint the paths out from
     /// under a `sync` test that already holds the lock.
     fn isolate_grok_home() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::test_support::grok_home_lock();
+        let guard = crate::env::test_support::grok_home_lock();
         let home = std::env::temp_dir()
             .join(format!("gm-unit-home-{}", std::process::id()));
         let codex = std::env::temp_dir()
@@ -4589,7 +4589,7 @@ mod tests {
     #[test]
     fn add_provider_picker_stays_open_and_records_status_after_add() {
         let _grok_home_guard = isolate_grok_home();
-        use crate::paths;
+        use crate::env::paths;
         std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
         let mut doc = serde_json::json!({"providers": []});
         let api = serde_json::json!({
@@ -6272,7 +6272,7 @@ use serde_json::json;
             doc["web_search"],
             "opencode-muse-spark-1_3-contributor-free"
         );
-        let toml = std::fs::read_to_string(crate::paths::config_toml_path()).unwrap_or_default();
+        let toml = std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
         assert!(
             toml.contains("web_search = \"opencode-muse-spark-1_3-contributor-free\""),
             "toml must emit web_search: {toml}"
@@ -6289,7 +6289,7 @@ use serde_json::json;
         let res = run_config_flow_with_backend(&mut f2, &mut doc);
         assert!(res.is_ok(), "web_search disable picker errored: {:?}", res.err());
         assert_eq!(doc["web_search"], "");
-        let toml = std::fs::read_to_string(crate::paths::config_toml_path()).unwrap_or_default();
+        let toml = std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
         assert!(
             !toml.contains("web_search"),
             "empty web_search must not be written: {toml}"

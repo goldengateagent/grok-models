@@ -1,6 +1,6 @@
 //! TUI main-menu orchestration: TUI on a TTY, numbered fallback otherwise.
 
-use crate::{core, fallback, jsonio, paths, sync, tui};
+use crate::{core, env::paths, fallback, jsonio, sync, tui};
 use crate::Res;
 
 pub fn cmd_config() -> Res<i32> {
