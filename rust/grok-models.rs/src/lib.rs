@@ -1,7 +1,6 @@
 //! Native port of `grok-models.py` (behavior-identical).
 //!
 //! Module map:
-//! - `difflib`:   Python difflib port (`get_close_matches`) for hint messages
 //! - `jsonio`:    ordered JSON load/dump + atomic writes
 //! - `json_utils`: generic `serde_json` value accessors (no provider meaning)
 //! - `env`:       process environment — `env::paths` GROK_HOME / CODEX_HOME
@@ -23,7 +22,7 @@
 pub mod benchmarks;
 pub mod cli;
 pub mod core;
-pub mod difflib;
+
 pub mod env;
 pub mod fallback;
 pub mod flow;

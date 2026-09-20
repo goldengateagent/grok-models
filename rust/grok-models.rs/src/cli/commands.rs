@@ -1,7 +1,6 @@
 //! Non-interactive command implementations.
 
 use crate::core;
-use crate::difflib;
 use crate::env::paths;
 use crate::fallback::prompt_line;
 use crate::jsonio;
@@ -9,16 +8,6 @@ use crate::sync;
 use crate::{fail, Res};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-/// Appends ` (did you mean: ...?)` when `candidates` yields close matches.
-fn did_you_mean_hint(input: &str, candidates: &[String]) -> String {
-    let hints = difflib::get_close_matches(input, candidates);
-    if hints.is_empty() {
-        String::new()
-    } else {
-        format!(" (did you mean: {}?)", hints.join(", "))
-    }
-}
 
 /// Display name for a provider entry: `name` when set, else `id`.
 fn provider_display_name<'a>(provider: &'a Map<String, Value>) -> &'a str {
@@ -39,12 +28,7 @@ pub fn render_list_text(
     let providers = core::provider_entries(doc);
     if let Some(filter) = provider_filter {
         if !providers.iter().any(|p| p["id"].as_str() == Some(filter)) {
-            let ids: Vec<String> = providers
-                .iter()
-                .map(|p| p["id"].as_str().unwrap_or_default().to_string())
-                .collect();
-            let hint = did_you_mean_hint(filter, &ids);
-            return fail(format!("unknown provider '{filter}'{hint}"));
+            return fail(format!("unknown provider '{filter}'"));
         }
     }
     println!("Configured providers");
@@ -237,10 +221,6 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
     }
 
     let providers = core::provider_entries(doc);
-    let provider_ids: Vec<String> = providers
-        .iter()
-        .map(|p| p["id"].as_str().unwrap_or_default().to_string())
-        .collect();
 
     let mut resolved: Vec<ResolvedTarget> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -254,8 +234,7 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
             .filter(|p| norm(p["id"].as_str().unwrap_or_default()) == norm(pid_raw))
             .collect();
         if matches.len() != 1 {
-            let hint = did_you_mean_hint(pid_raw, &provider_ids);
-            errors.push(format!("unknown provider '{pid_raw}'{hint}"));
+            errors.push(format!("unknown provider '{pid_raw}'"));
             continue;
         }
         let provider = matches[0];
@@ -279,9 +258,8 @@ pub fn resolve_targets(doc: &Value, targets: &[String]) -> Res<Vec<ResolvedTarge
             .cloned()
             .collect();
         if model_hits.len() != 1 {
-            let hint = did_you_mean_hint(mid_raw, &raw_ids);
             errors.push(format!(
-                "unknown model '{mid_raw}' for provider '{pid_raw}'{hint}"
+                "unknown model '{mid_raw}' for provider '{pid_raw}'"
             ));
             continue;
         }
