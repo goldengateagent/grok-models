@@ -4,7 +4,7 @@ use crate::core;
 use crate::env::paths;
 use crate::jsonio;
 use crate::toml_out;
-use crate::{fail, Res, Error};
+use crate::{Error, Res, fail};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
@@ -119,11 +119,7 @@ pub fn parse_openai_models_list(payload: &Value) -> Option<Vec<(String, Option<S
         };
         items.push((mid.clone(), name));
     }
-    if items.is_empty() {
-        None
-    } else {
-        Some(items)
-    }
+    if items.is_empty() { None } else { Some(items) }
 }
 
 /// TUI / CLI status when GET {base_url}/models fails.
@@ -193,7 +189,10 @@ fn try_fetch_models_url(
         }
     };
     match parse_openai_models_list(&payload) {
-        None => (None, Some(format!("empty or invalid model list from {url}"))),
+        None => (
+            None,
+            Some(format!("empty or invalid model list from {url}")),
+        ),
         Some(items) => (Some(items), None),
     }
 }
@@ -255,7 +254,11 @@ fn resolve_model_name(
     catalog_name(catalog, mid)
 }
 
-fn get_api_backend(provider_id: &str, provider_npm: Option<&str>, model_npm: Option<&str>) -> &'static str {
+fn get_api_backend(
+    provider_id: &str,
+    provider_npm: Option<&str>,
+    model_npm: Option<&str>,
+) -> &'static str {
     if matches!(provider_id, "openai" | "xai" | "meta") {
         return "responses";
     }
@@ -276,10 +279,7 @@ fn write_api_backend(
     provider_id: &str,
     provider_npm: Option<&str>,
 ) {
-    let model_npm = entry
-        .get("npm")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let model_npm = entry.get("npm").and_then(Value::as_str).map(str::to_string);
     entry.insert(
         "api_backend".into(),
         Value::String(get_api_backend(provider_id, provider_npm, model_npm.as_deref()).to_string()),
@@ -317,12 +317,12 @@ fn enrich_model_entry(
                     .iter()
                     .position(|row| crate::json_utils::get_bool_map(row, "default"))
                     .unwrap_or(0);
-                let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
+                let default_value = efforts[default_idx]
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 for (key, value) in [
-                    (
-                        "supports_reasoning_effort",
-                        Value::Bool(true),
-                    ),
+                    ("supports_reasoning_effort", Value::Bool(true)),
                     (
                         "reasoning_efforts",
                         Value::Array(efforts.into_iter().map(Value::Object).collect()),
@@ -379,8 +379,9 @@ fn reconcile_models_map(
     let authority: HashSet<&str> = items.iter().map(|(m, _)| m.as_str()).collect();
     for (mid, live_name) in items {
         let is_new = !models_map.contains_key(mid);
-        let slot =
-            models_map.entry(mid.clone()).or_insert_with(|| Value::Object(Map::new()));
+        let slot = models_map
+            .entry(mid.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
         if !slot.is_object() {
             *slot = Value::Object(Map::new());
         }
@@ -389,12 +390,9 @@ fn reconcile_models_map(
 
         // Name: live /models wins, then the stored value, then the catalog.
         let stored = obj.get("name").and_then(Value::as_str).map(str::to_string);
-        if let Some(name) = resolve_model_name(
-            live_name.as_deref(),
-            stored.as_deref(),
-            catalog,
-            catalog_id,
-        ) {
+        if let Some(name) =
+            resolve_model_name(live_name.as_deref(), stored.as_deref(), catalog, catalog_id)
+        {
             if obj.get("name") != Some(&Value::String(name.clone())) {
                 obj.insert("name".into(), Value::String(name));
             }
@@ -567,7 +565,8 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             continue;
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
-        let Some(provider_models_dev) = models_dev.get(&pid).filter(|p| p.is_object()).cloned() else {
+        let Some(provider_models_dev) = models_dev.get(&pid).filter(|p| p.is_object()).cloned()
+        else {
             stats.warnings.push(SyncWarning::NotInModelsDev {
                 provider_id: pid.clone(),
             });
@@ -618,7 +617,9 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             authority_items_for_provider(&provider_models_dev, provider)
         };
         if let Some(e) = err {
-            stats.warnings.push(SyncWarning::LiveFetchFailed { message: e });
+            stats
+                .warnings
+                .push(SyncWarning::LiveFetchFailed { message: e });
         }
         if pid == OLLAMA_CLOUD_PROVIDER_ID {
             let provider = core::find_provider_by_id_mut(&mut doc, &pid).unwrap();
@@ -689,7 +690,10 @@ fn strip_codex_managed_sections(text: &str, provider_ids: &[String]) -> String {
         if stripped.starts_with('[') && stripped.ends_with(']') {
             in_root = false;
             skip = false;
-            let header = stripped.trim_start_matches('[').trim_end_matches(']').trim();
+            let header = stripped
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim();
             if let Some(rest) = header.strip_prefix("model_providers.") {
                 let pid = rest.trim().trim_matches('"');
                 if owned.contains(pid) {
@@ -765,7 +769,10 @@ fn first_enabled_model_id(provider: &Map<String, Value>) -> Option<String> {
 
 fn context_window_int(entry: &Map<String, Value>) -> i64 {
     match entry.get("context_window") {
-        Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_u64().map(|u| u as i64)).unwrap_or(128000),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_u64().map(|u| u as i64))
+            .unwrap_or(128000),
         Some(Value::String(s)) => s.parse().unwrap_or(128000),
         _ => 128000,
     }
@@ -776,7 +783,9 @@ fn catalog_reasoning_levels(entry: &Map<String, Value>) -> (Vec<Value>, Option<S
     let mut default = None;
     if let Some(arr) = entry.get("reasoning_efforts").and_then(Value::as_array) {
         for item in arr {
-            let Some(obj) = item.as_object() else { continue };
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
             let effort = obj
                 .get("value")
                 .or_else(|| obj.get("effort"))
@@ -840,7 +849,11 @@ fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
         .unwrap_or(&empty);
     for (i, (mid, m)) in models.iter().enumerate() {
         let entry = m.as_object().cloned().unwrap_or_default();
-        if !entry.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+        if !entry
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
             continue;
         }
         let display = entry
@@ -890,7 +903,10 @@ fn emit_codex_model_catalog(provider: &Map<String, Value>) -> Value {
     serde_json::json!({ "models": models_out })
 }
 
-fn write_codex_model_catalog(provider_id: &str, provider: &Map<String, Value>) -> Res<std::path::PathBuf> {
+fn write_codex_model_catalog(
+    provider_id: &str,
+    provider: &Map<String, Value>,
+) -> Res<std::path::PathBuf> {
     let path = paths::codex_models_json_path(provider_id);
     let payload = emit_codex_model_catalog(provider);
     jsonio::dump_json(&path, &payload)?;
@@ -992,11 +1008,12 @@ pub fn codex_config_toml(
     if path.exists() {
         let bak = path.with_file_name(format!(
             "{}.bak",
-            path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+            path.file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default()
         ));
-        std::fs::copy(&path, &bak).map_err(|e| {
-            crate::Error::new(format!("failed to write {}: {}", bak.display(), e))
-        })?;
+        std::fs::copy(&path, &bak)
+            .map_err(|e| crate::Error::new(format!("failed to write {}: {}", bak.display(), e)))?;
     }
     let existing = if path.exists() {
         std::fs::read_to_string(&path).unwrap_or_default()
@@ -1040,10 +1057,7 @@ pub fn codex_config_toml(
 
 /// Persists one provider's enabled flag to providers.json.
 pub fn set_provider_enabled(doc: &mut Value, provider_id: &str, enabled: bool) -> Res<()> {
-    if let Some(arr) = doc
-        .get_mut("providers")
-        .and_then(Value::as_array_mut)
-    {
+    if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
         if let Some(p) = arr
             .iter_mut()
             .find(|p| p.get("id").and_then(Value::as_str) == Some(provider_id))
@@ -1084,10 +1098,7 @@ pub fn delete_provider_and_flush(doc: &mut Value, provider_id: &str) -> Res<Upda
 }
 
 fn remove_provider(doc: &mut Value, provider_id: &str) {
-    if let Some(arr) = doc
-        .get_mut("providers")
-        .and_then(Value::as_array_mut)
-    {
+    if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
         arr.retain(|p| p.get("id").and_then(Value::as_str) != Some(provider_id));
     }
 }
@@ -1118,7 +1129,12 @@ pub fn add_provider_entry(
     }
     let provider_models_dev = match api.get(provider_id) {
         Some(p) if p.is_object() => p.clone(),
-        _ => return fail(format!("provider '{}' not found in models.dev", provider_id)),
+        _ => {
+            return fail(format!(
+                "provider '{}' not found in models.dev",
+                provider_id
+            ));
+        }
     };
     let catalog = provider_models_dev
         .get("models")
@@ -1127,7 +1143,10 @@ pub fn add_provider_entry(
         .unwrap_or_default();
     let mut provider = Map::new();
     provider.insert("id".into(), Value::String(provider_id.to_string()));
-    let name_val = provider_models_dev.get("name").cloned().unwrap_or(Value::String(provider_id.to_string()));
+    let name_val = provider_models_dev
+        .get("name")
+        .cloned()
+        .unwrap_or(Value::String(provider_id.to_string()));
     let name_val = if crate::json_utils::is_truthy(Some(&name_val)) {
         name_val
     } else {
@@ -1171,10 +1190,8 @@ pub fn add_provider_entry(
         );
         provider.insert("extra_headers".into(), Value::Object(extra));
     }
-    let (mut items, fetch_warning_url) = authority_items_for_provider(
-        &provider_models_dev,
-        &mut provider,
-    );
+    let (mut items, fetch_warning_url) =
+        authority_items_for_provider(&provider_models_dev, &mut provider);
     // Diagnostics produced from here on travel with any failure, so a caller
     // that only sees the error can still print them.
     let warning_lines: Vec<String> = fetch_warning_url
@@ -1285,13 +1302,20 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
         if !provider.is_object() || provider.get("id").is_none() {
             continue;
         }
-        if !provider.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+        if !provider
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
             continue;
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
         // base_url comes straight from providers.json; empty means the
         // provider has none stored and the catalog had nothing to backfill.
-        let base_url = provider.get("base_url").and_then(Value::as_str).unwrap_or("");
+        let base_url = provider
+            .get("base_url")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if base_url.is_empty() {
             providers_without_base_url.push(pid.clone());
         }
@@ -1324,20 +1348,14 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .unwrap_or_else(|| core::first_letter_cap(mid));
-            fields.insert(
-                "name".into(),
-                Value::String(format!("{name} ({pname})")),
-            );
+            fields.insert("name".into(), Value::String(format!("{name} ({pname})")));
             fields.insert("env_key".into(), Value::String(env_key.clone()));
             let backend = entry
                 .get("api_backend")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("chat_completions");
-            fields.insert(
-                "api_backend".into(),
-                Value::String(backend.to_string()),
-            );
+            fields.insert("api_backend".into(), Value::String(backend.to_string()));
             if let Some(ctx) = entry.get("context_window") {
                 fields.insert("context_window".into(), ctx.clone());
             }
@@ -1349,10 +1367,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
                 }
             }
             if crate::json_utils::is_truthy(entry.get("supports_reasoning_effort")) {
-                fields.insert(
-                    "supports_reasoning_effort".into(),
-                    Value::Bool(true),
-                );
+                fields.insert("supports_reasoning_effort".into(), Value::Bool(true));
                 if let Some(efforts) = entry.get("reasoning_efforts") {
                     fields.insert("reasoning_efforts".into(), efforts.clone());
                     // Default effort was precomputed when the entry was
@@ -1363,9 +1378,7 @@ pub fn update_config_toml() -> Res<UpdateConfigResponse> {
                 }
             }
             if include_descriptions {
-                if let Some(desc) =
-                    crate::jsonio::catalog_description_map(entry)
-                {
+                if let Some(desc) = crate::jsonio::catalog_description_map(entry) {
                     fields.insert("description".into(), Value::String(desc.to_string()));
                 }
             }
@@ -1755,14 +1768,19 @@ tables will have an empty base_url"
         let stored = jsonio::load_providers().expect("reload providers.json");
 
         let prov = stored["providers"]
-            .as_array().unwrap().iter()
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|p| p["id"] == "prov")
             .expect("provider present after sync");
         let models = prov["models"].as_object().unwrap();
 
         let include_descriptions = true;
         for (mid, minfo) in api["prov"]["models"].as_object().unwrap() {
-            assert!(models.contains_key(mid), "{mid} missing from providers.json");
+            assert!(
+                models.contains_key(mid),
+                "{mid} missing from providers.json"
+            );
             let entry = &models[mid];
 
             let fields = core::build_fields(
@@ -1813,13 +1831,19 @@ tables will have an empty base_url"
                 }
             }
             // reasoning_efforts rows must match verbatim, including order.
-            match (fields.get("reasoning_efforts"), entry.get("reasoning_efforts")) {
-                (Some(tbl), Some(json)) => assert_eq!(tbl, json, "{mid}: reasoning_efforts mismatch"),
+            match (
+                fields.get("reasoning_efforts"),
+                entry.get("reasoning_efforts"),
+            ) {
+                (Some(tbl), Some(json)) => {
+                    assert_eq!(tbl, json, "{mid}: reasoning_efforts mismatch")
+                }
                 (None, None) => {}
-                (t, j) => panic!("{mid}: reasoning_efforts presence differs (table {t:?}, json {j:?})"),
+                (t, j) => {
+                    panic!("{mid}: reasoning_efforts presence differs (table {t:?}, json {j:?})")
+                }
             }
         }
-
     }
 
     /// Deletion flow: a provider is deleted and recorded with its enabled
@@ -1878,8 +1902,7 @@ tables will have an empty base_url"
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump live_only");
         {
-            let mut config =
-                std::fs::read_to_string(paths::config_toml_path()).expect("config");
+            let mut config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
             config.push_str("\n[model.prov-live_only]\nmodel = \"live_only\"\n");
             std::fs::write(paths::config_toml_path(), config).expect("append live_only table");
         }
@@ -1887,8 +1910,7 @@ tables will have an empty base_url"
         // Delete the provider: entry gone, deletion recorded with its model ids.
         let mut doc = jsonio::load_providers().expect("reload");
         let enabled = core::enabled_model_ids(&doc["providers"][0]);
-        let enabled_set: std::collections::HashSet<String> =
-            enabled.iter().cloned().collect();
+        let enabled_set: std::collections::HashSet<String> = enabled.iter().cloned().collect();
         let expected: std::collections::HashSet<String> = [
             "full".to_string(),
             "plain".to_string(),
@@ -1908,8 +1930,14 @@ tables will have an empty base_url"
         update_config_toml().expect("flush delete");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
-        assert!(!config.contains("[model.prov-plain]"), "known-model table must be removed");
-        assert!(!config.contains("[model.prov-live_only]"), "/models-only table must be removed");
+        assert!(
+            !config.contains("[model.prov-plain]"),
+            "known-model table must be removed"
+        );
+        assert!(
+            !config.contains("[model.prov-live_only]"),
+            "/models-only table must be removed"
+        );
 
         // The list is consumed after use.
         let stored = jsonio::load_providers().expect("reload");
@@ -1927,7 +1955,9 @@ tables will have an empty base_url"
             p.insert("enabled".into(), Value::Bool(true));
             let models = p.get_mut("models").unwrap().as_object_mut().unwrap();
             for (_, m) in models.iter_mut() {
-                m.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(true));
+                m.as_object_mut()
+                    .unwrap()
+                    .insert("enabled".into(), Value::Bool(true));
             }
         }
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump re-add");
@@ -1935,7 +1965,10 @@ tables will have an empty base_url"
         update_config_toml().expect("re-add write");
 
         let config = std::fs::read_to_string(paths::config_toml_path()).expect("config");
-        assert!(config.contains("[model.prov-plain]"), "re-added provider's tables must return");
+        assert!(
+            config.contains("[model.prov-plain]"),
+            "re-added provider's tables must return"
+        );
     }
 
     #[test]
@@ -2048,9 +2081,11 @@ tables will have an empty base_url"
         assert!(text.contains("wire_api = \"responses\""), "{text}");
         let catalog_path = paths::codex_models_json_path("openrouter");
         let catalog = std::fs::read_to_string(&catalog_path).expect("catalog");
-        assert!(catalog.contains("\"slug\": \"openrouter/free\""), "{catalog}");
+        assert!(
+            catalog.contains("\"slug\": \"openrouter/free\""),
+            "{catalog}"
+        );
     }
-
 
     #[test]
     fn codex_config_toml_only_writes_selected_provider_and_first_enabled_model() {
@@ -2146,7 +2181,10 @@ tables will have an empty base_url"
         let loaded = jsonio::load_providers().unwrap();
         assert_eq!(loaded["codex_model_provider"], "");
         let cleared = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
-        assert!(!cleared.contains("[model_providers.openrouter]"), "{cleared}");
+        assert!(
+            !cleared.contains("[model_providers.openrouter]"),
+            "{cleared}"
+        );
         assert!(!cleared.contains("model = "), "{cleared}");
         assert!(
             !paths::codex_models_json_path("openrouter").exists(),
@@ -2157,7 +2195,10 @@ tables will have an empty base_url"
         std::fs::write(paths::codex_config_toml_path(), manual).unwrap();
         update_config_toml().unwrap();
         let after = std::fs::read_to_string(paths::codex_config_toml_path()).unwrap();
-        assert_eq!(after, manual, "later writes must not re-enter Codex cleanup");
+        assert_eq!(
+            after, manual,
+            "later writes must not re-enter Codex cleanup"
+        );
     }
 
     #[test]
@@ -2259,9 +2300,16 @@ tables will have an empty base_url"
     #[test]
     fn get_api_backend_provider_id_and_npm() {
         assert_eq!(get_api_backend("openai", None, None), "responses");
-        assert_eq!(get_api_backend("xai", Some("@ai-sdk/anthropic"), None), "responses");
         assert_eq!(
-            get_api_backend("prov", Some("@ai-sdk/openai-compatible"), Some("@ai-sdk/openai")),
+            get_api_backend("xai", Some("@ai-sdk/anthropic"), None),
+            "responses"
+        );
+        assert_eq!(
+            get_api_backend(
+                "prov",
+                Some("@ai-sdk/openai-compatible"),
+                Some("@ai-sdk/openai")
+            ),
             "responses"
         );
         assert_eq!(
@@ -2392,8 +2440,7 @@ tables will have an empty base_url"
             None,
         );
         assert_eq!(
-            models_map["m"]["npm"],
-            "@ai-sdk/anthropic",
+            models_map["m"]["npm"], "@ai-sdk/anthropic",
             "omitted catalog npm must not delete the stored value"
         );
     }
@@ -2603,7 +2650,6 @@ tables will have an empty base_url"
             empty.get("npm").is_none(),
             "empty catalog npm must not be stored"
         );
-
     }
 
     #[test]
@@ -2658,7 +2704,9 @@ tables will have an empty base_url"
             assert_eq!(session.len(), 30, "{session}");
             session_ids.push(session);
         }
-        assert_ne!(session_ids[0], session_ids[1], "each add must mint a new session");
-
+        assert_ne!(
+            session_ids[0], session_ids[1],
+            "each add must mint a new session"
+        );
     }
 }

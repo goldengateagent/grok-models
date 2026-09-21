@@ -5,7 +5,7 @@
 use crate::core;
 use crate::env::paths;
 use crate::jsonio;
-use crate::{fail, Res};
+use crate::{Res, fail};
 use serde_json::{Map, Value};
 use std::io::{BufRead, Write};
 
@@ -124,18 +124,10 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                     println!("  {}", "─".repeat(40));
                 }
                 let free_sep_idx = enabled_count + free_disabled_count;
-                if n == start + free_sep_idx
-                    && free_disabled_count > 0
-                    && free_sep_idx < total
-                {
+                if n == start + free_sep_idx && free_disabled_count > 0 && free_sep_idx < total {
                     println!("  {}", "─".repeat(40));
                 }
-                println!(
-                    "  {}. [{}] {}",
-                    n,
-                    if enabled { "x" } else { " " },
-                    mid
-                );
+                println!("  {}. [{}] {}", n, if enabled { "x" } else { " " }, mid);
             }
             let more = end < total;
             let mut nav: Vec<&str> = Vec::new();
@@ -171,7 +163,9 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
                 if n >= start + 1 && n <= end {
                     let i = matches[n - 1];
                     let mid = ids[i].clone();
-                    let entry = models.entry(mid).or_insert_with(|| Value::Object(Map::new()));
+                    let entry = models
+                        .entry(mid)
+                        .or_insert_with(|| Value::Object(Map::new()));
                     if !entry.is_object() {
                         *entry = Value::Object(Map::new());
                     }
@@ -191,7 +185,11 @@ pub fn config_models_numbered(ids: &[String], models: &mut Map<String, Value>) -
 }
 
 /// `_config_models`: numbered model configuration for one provider entry.
-pub fn config_models(provider_id: &str, doc: &mut Value, selected: &mut Map<String, Value>) -> Res<bool> {
+pub fn config_models(
+    provider_id: &str,
+    doc: &mut Value,
+    selected: &mut Map<String, Value>,
+) -> Res<bool> {
     let empty = Map::new();
     let models_is_map = selected.get("models").is_some_and(Value::is_object);
     let models_len = selected
@@ -263,7 +261,11 @@ fn provider_label_list(doc: &Value) -> Vec<(String, String)> {
     // Returns (id, label) pairs in loader order (name-sorted by load_providers).
     let mut entries: Vec<(String, String)> = Vec::new();
     for p in crate::core::provider_entries(doc) {
-        let id = p.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let id = p
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let label = crate::core::provider_label(&p);
         entries.push((id, label));
     }
@@ -322,9 +324,8 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
             ];
             let mut footer_parts: Vec<String> = Vec::new();
             if !doc_url.is_empty() {
-                footer_parts.push(
-                    "Provider docs: official documentation for this provider:".to_string(),
-                );
+                footer_parts
+                    .push("Provider docs: official documentation for this provider:".to_string());
                 footer_parts.push(doc_url.clone());
             }
             if !env_key.is_empty() {
@@ -382,4 +383,3 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
         }
     }
 }
-

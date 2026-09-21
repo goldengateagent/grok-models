@@ -1,4 +1,4 @@
 mod args;
 pub mod commands;
 
-pub use args::{parse, print_help, Args};
+pub use args::{Args, parse, print_help};

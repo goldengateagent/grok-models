@@ -1,8 +1,8 @@
 //! Argparse-equivalent parser: mutually exclusive group, repeatable
 //! `--enable`/`--disable`, same help text and epilog.
 
-use crate::fail;
 use crate::Res;
+use crate::fail;
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -47,6 +47,7 @@ examples:
   grok-models --sync                       refresh from models.dev; rewrite config.toml
   grok-models --import                     pull [model.*] from an existing config.toml";
 
+#[rustfmt::skip]
 pub fn print_help() {
     println!("usage: grok-models [OPTION]...");
     println!();
@@ -99,7 +100,8 @@ pub fn parse(argv: &[String]) -> Res<Args> {
         // --foo=bar form
         if let Some((name, val)) = arg.split_once('=') {
             match name {
-                "--add-provider" | "--search" | "--enable" | "--disable" | "--provider" | "--codex" => {
+                "--add-provider" | "--search" | "--enable" | "--disable" | "--provider"
+                | "--codex" => {
                     consume_value(&mut a, val.to_string(), name)?;
                     i += 1;
                     continue;
@@ -210,8 +212,10 @@ mod tests {
     #[test]
     fn repeated_enable_disable() {
         let argv = a(&[
-            "--enable", "opencode",
-            "--disable", "openrouter/x",
+            "--enable",
+            "opencode",
+            "--disable",
+            "openrouter/x",
             "--enable=foo/bar",
         ]);
         let p = parse(&argv).unwrap();

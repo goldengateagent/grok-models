@@ -1,6 +1,6 @@
 //! Domain helpers ported verbatim from grok-models.py.
 
-use crate::{fail, Res};
+use crate::{Res, fail};
 use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +34,10 @@ pub fn provider_env_key_from_api(provider_models_dev: &Value) -> String {
 
 /// String at `key` on a JSON object, or `""`.
 pub fn get_json_str(obj: &Map<String, Value>, key: &str) -> String {
-    obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    obj.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// `env_key` on a providers.json provider entry, or `""`.
@@ -118,7 +121,10 @@ pub fn sort_model_indices(
     };
     base.sort_by(|&a, &b| key_of(&ids[a]).cmp(&key_of(&ids[b])));
 
-    let enabled_count = base.iter().filter(|&&i| model_enabled(models, &ids[i])).count();
+    let enabled_count = base
+        .iter()
+        .filter(|&&i| model_enabled(models, &ids[i]))
+        .count();
     let free_disabled_count = base[enabled_count.min(base.len())..]
         .iter()
         .filter(|&&i| is_free(&ids[i]))
@@ -159,7 +165,10 @@ pub fn efforts_from_models_dev(minfo: &Value) -> Option<Vec<Map<String, Value>>>
     if rows.is_empty() {
         return None;
     }
-    let idx = rows.iter().position(|r| r["value"].as_str() != Some("none")).unwrap_or(0);
+    let idx = rows
+        .iter()
+        .position(|r| r["value"].as_str() != Some("none"))
+        .unwrap_or(0);
     rows[idx].insert("default".into(), Value::Bool(true));
     Some(rows)
 }
@@ -219,7 +228,10 @@ pub fn build_fields(
         Value::String(format!("{name} ({provider_name})")),
     );
     fields.insert("env_key".into(), Value::String(env_key.to_string()));
-    fields.insert("api_backend".into(), Value::String("chat_completions".into()));
+    fields.insert(
+        "api_backend".into(),
+        Value::String("chat_completions".into()),
+    );
 
     if let Some(ctx) = context_window_field(minfo) {
         fields.insert("context_window".into(), ctx);
@@ -232,7 +244,10 @@ pub fn build_fields(
                     .iter()
                     .position(|row| crate::json_utils::get_bool_map(row, "default"))
                     .unwrap_or(0);
-                let default_value = efforts[default_idx].get("value").cloned().unwrap_or(Value::Null);
+                let default_value = efforts[default_idx]
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 fields.insert("supports_reasoning_effort".into(), Value::Bool(true));
                 fields.insert(
                     "reasoning_efforts".into(),
@@ -308,14 +323,23 @@ pub fn provider_label(provider: &serde_json::Map<String, Value>) -> String {
     } else {
         "disabled"
     };
-    let provider_id = provider.get("id").and_then(Value::as_str).unwrap_or_default();
-    let name = provider.get("name").and_then(Value::as_str).unwrap_or(provider_id);
+    let provider_id = provider
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let name = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(provider_id);
     format!("({name}) - {provider_id} [{state}]")
 }
 
 /// Main-list identity: `(name) - id`.
 pub fn provider_display(provider: &serde_json::Map<String, Value>) -> String {
-    let provider_id = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+    let provider_id = provider
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let name = provider
         .get("name")
         .and_then(Value::as_str)
@@ -339,7 +363,11 @@ pub fn format_provider_id_rows(rows: &[(String, String, bool)]) -> Vec<String> {
         .collect();
     let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
     let id_w = rows.iter().map(|(_, pid, _)| pid.len()).max().unwrap_or(0);
-    let token_col = if rows.is_empty() { 0 } else { name_w + 1 + id_w + 1 };
+    let token_col = if rows.is_empty() {
+        0
+    } else {
+        name_w + 1 + id_w + 1
+    };
     names
         .iter()
         .zip(rows.iter())
@@ -392,7 +420,12 @@ pub fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
         .unwrap_or(0);
     let id_w = providers
         .iter()
-        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().len())
+        .map(|p| {
+            p.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .len()
+        })
         .max()
         .unwrap_or(0);
     let provider_col = if providers.is_empty() {
@@ -432,7 +465,12 @@ pub fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
     let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
     let id_w = providers
         .iter()
-        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().len())
+        .map(|p| {
+            p.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .len()
+        })
         .max()
         .unwrap_or(0);
     let token_col = provider_state_token_col(providers);
@@ -549,7 +587,11 @@ mod tests {
         ]);
         let tok_a = rows[0].find('[').unwrap();
         let tok_b = rows[1].find('[').unwrap();
-        assert_eq!(tok_a, tok_b, "state tokens must share a column:\n{}\n{}", rows[0], rows[1]);
+        assert_eq!(
+            tok_a, tok_b,
+            "state tokens must share a column:\n{}\n{}",
+            rows[0], rows[1]
+        );
         assert!(rows[0].starts_with("(A)"), "{}", rows[0]);
         assert!(rows[1].contains(" long-id"), "{}", rows[1]);
         assert!(!rows[1].contains(" - "), "{}", rows[1]);
@@ -574,10 +616,18 @@ mod tests {
         let labels = provider_menu_labels(&[a.clone(), b.clone()]);
         let tok_a = labels[0].find('[').unwrap();
         let tok_b = labels[1].find('[').unwrap();
-        assert_eq!(tok_a, tok_b, "state tokens must share a column:\n{}\n{}", labels[0], labels[1]);
+        assert_eq!(
+            tok_a, tok_b,
+            "state tokens must share a column:\n{}\n{}",
+            labels[0], labels[1]
+        );
         let env_a = labels[0].find("A_KEY").unwrap();
         let env_b = labels[1].find("LONGER_API_KEY").unwrap();
-        assert_eq!(env_a, env_b, "env cells must share a column:\n{}\n{}", labels[0], labels[1]);
+        assert_eq!(
+            env_a, env_b,
+            "env cells must share a column:\n{}\n{}",
+            labels[0], labels[1]
+        );
         assert_eq!(
             labels[0].find(" = "),
             labels[1].find(" = "),
@@ -595,9 +645,21 @@ mod tests {
         let desc = pad_state_label(MODEL_DESC_LABEL, "[enabled]", col);
         let upd = pad_state_label(UPDATE_LIST_LABEL, "[08-26-2026 03:15 PM]", col);
         let syn = pad_state_label(SYNC_CONFIG_LABEL, "[08-26-2026 03:15 PM]", col);
-        assert_eq!(desc.find('['), Some(tok_a), "Model Descriptions token must line up");
-        assert_eq!(upd.find('['), Some(tok_a), "Update Model List token must line up");
-        assert_eq!(syn.find('['), Some(tok_a), "Sync Model Config token must line up");
+        assert_eq!(
+            desc.find('['),
+            Some(tok_a),
+            "Model Descriptions token must line up"
+        );
+        assert_eq!(
+            upd.find('['),
+            Some(tok_a),
+            "Update Model List token must line up"
+        );
+        assert_eq!(
+            syn.find('['),
+            Some(tok_a),
+            "Sync Model Config token must line up"
+        );
     }
 
     #[test]
@@ -625,11 +687,7 @@ mod tests {
         .unwrap()
         .clone();
         let labels = provider_menu_labels(&[p]);
-        assert!(
-            labels[0].starts_with("(MiniMax Token P) "),
-            "{}",
-            labels[0]
-        );
+        assert!(labels[0].starts_with("(MiniMax Token P) "), "{}", labels[0]);
     }
 
     #[test]
@@ -667,7 +725,10 @@ mod tests {
             assert!(id.ends_with("uwtb"), "{id}");
             assert_eq!(id.len(), 30, "{id}"); // "ses_" + 12 + 10 + 4
             assert!(id[4..16].chars().all(|c| c.is_ascii_hexdigit()), "{id}");
-            assert!(id[16..26].chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+            assert!(
+                id[16..26].chars().all(|c| c.is_ascii_alphanumeric()),
+                "{id}"
+            );
         }
         assert_ne!(a, b);
     }

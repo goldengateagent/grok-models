@@ -1,5 +1,5 @@
 use grok_models::cli::commands;
-use grok_models::{cli, flow, Res};
+use grok_models::{Res, cli, flow};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

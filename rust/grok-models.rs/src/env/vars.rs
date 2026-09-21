@@ -65,8 +65,9 @@ pub fn env_key_masked_display(env_key: &str) -> String {
 fn get_windows_env_var(name: &str) -> String {
     let mut bytes = name.bytes();
     let valid = match bytes.next() {
-        Some(b'A'..=b'Z' | b'a'..=b'z' | b'_') => bytes
-            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')),
+        Some(b'A'..=b'Z' | b'a'..=b'z' | b'_') => {
+            bytes.all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+        }
         _ => false,
     };
     if !valid {
@@ -86,7 +87,10 @@ fn get_windows_env_var(name: &str) -> String {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => String::new(),
     };
-    cache.lock().unwrap().insert(name.to_string(), value.clone());
+    cache
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), value.clone());
     value
 }
 

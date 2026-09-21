@@ -3,7 +3,7 @@
 //! output is byte-identical. The `toml` crate is used only to validate the
 //! generated text, mirroring Python's `tomllib` check.
 
-use crate::{core, fail, Res};
+use crate::{Res, core, fail};
 use serde_json::Value;
 use std::path::Path;
 
@@ -24,8 +24,14 @@ pub fn toml_escape(value: &Value) -> Res<String> {
     match value {
         Value::Bool(b) => Ok(if *b { "true".into() } else { "false".into() }),
         Value::Number(n) => Ok(number_to_string(n)),
-        Value::String(s) => Ok(format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))),
-        other => fail(format!("unsupported TOML value type: {}", json_type_name(other))),
+        Value::String(s) => Ok(format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        )),
+        other => fail(format!(
+            "unsupported TOML value type: {}",
+            json_type_name(other)
+        )),
     }
 }
 
@@ -144,7 +150,9 @@ fn owned_table_key(header: &str) -> Option<String> {
 fn is_owned_header(header: &str, provider_ids: &[String]) -> bool {
     match owned_table_key(header) {
         None => false,
-        Some(key) => provider_ids.iter().any(|pid| key.starts_with(&format!("{pid}-"))),
+        Some(key) => provider_ids
+            .iter()
+            .any(|pid| key.starts_with(&format!("{pid}-"))),
     }
 }
 
@@ -266,10 +274,7 @@ pub fn apply_models_web_search(text: &str, value: &str) -> Res<String> {
         .copied()
         .filter(|l| !is_web_search_assignment(l))
         .collect();
-    while body
-        .last()
-        .is_some_and(|l| l.trim().is_empty())
-    {
+    while body.last().is_some_and(|l| l.trim().is_empty()) {
         body.pop();
     }
     let mut out: Vec<String> = lines[..start + 1].iter().map(|s| s.to_string()).collect();
@@ -338,11 +343,12 @@ pub fn write_config_toml(
     if path.exists() {
         let bak = path.with_file_name(format!(
             "{}.bak",
-            path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()
+            path.file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default()
         ));
-        std::fs::copy(path, &bak).map_err(|e| {
-            crate::Error::new(format!("failed to write {}: {}", bak.display(), e))
-        })?;
+        std::fs::copy(path, &bak)
+            .map_err(|e| crate::Error::new(format!("failed to write {}: {}", bak.display(), e)))?;
     }
     let mut text = write_toml_stdlib(path, provider_ids, tables, removed_keys)?;
     text = apply_models_web_search(&text, web_search)?;
@@ -361,7 +367,8 @@ mod tests {
     #[test]
     fn apply_models_web_search_appends_and_clears() {
         let src = "[models]\ndefault = \"kilo-x\"\ndefault_reasoning_effort = \"high\"\n\n[model.foo]\nmodel = \"x\"\n";
-        let with = apply_models_web_search(src, "opencode-muse-spark-1_3-contributor-free").unwrap();
+        let with =
+            apply_models_web_search(src, "opencode-muse-spark-1_3-contributor-free").unwrap();
         assert!(
             with.contains("[models]\ndefault = \"kilo-x\"\ndefault_reasoning_effort = \"high\"\nweb_search = \"opencode-muse-spark-1_3-contributor-free\"\n"),
             "{with}"

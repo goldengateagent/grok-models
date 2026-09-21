@@ -5,13 +5,16 @@ use crate::env::paths;
 use crate::fallback::prompt_line;
 use crate::jsonio;
 use crate::sync;
-use crate::{fail, Res};
+use crate::{Res, fail};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Display name for a provider entry: `name` when set, else `id`.
 fn provider_display_name<'a>(provider: &'a Map<String, Value>) -> &'a str {
-    let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+    let pid = provider
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     provider
         .get("name")
         .and_then(Value::as_str)
@@ -40,7 +43,12 @@ pub fn render_list_text(
     // Python keeps full doc-order list, filtered to the one id when given.
     let shown_providers: Vec<&Map<String, Value>> = match provider_filter {
         None => providers.iter().collect(),
-        Some(f) => vec![providers.iter().find(|p| p["id"].as_str() == Some(f)).unwrap()],
+        Some(f) => vec![
+            providers
+                .iter()
+                .find(|p| p["id"].as_str() == Some(f))
+                .unwrap(),
+        ],
     };
 
     if providers_only && provider_filter.is_none() {
@@ -80,7 +88,10 @@ pub fn render_list_text(
         }
 
         let empty = Map::new();
-        let models_map = provider.get("models").and_then(Value::as_object).unwrap_or(&empty);
+        let models_map = provider
+            .get("models")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
         let ids: Vec<String> = models_map.keys().cloned().collect();
         let en_count = ids
             .iter()
@@ -112,7 +123,9 @@ pub fn render_list_text(
         }
         for mid in &ids {
             let m = models_map.get(mid);
-            let menabled = m.map(|v| crate::json_utils::get_bool_value(v, "enabled")).unwrap_or(false);
+            let menabled = m
+                .map(|v| crate::json_utils::get_bool_value(v, "enabled"))
+                .unwrap_or(false);
             let free_tag = if mid.to_lowercase().contains("free") {
                 "  [free]"
             } else {
@@ -160,10 +173,16 @@ pub fn render_models_text() -> Res<i32> {
     let mut lines_out: Vec<String> = Vec::new();
 
     for provider in &providers {
-        let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+        let pid = provider
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let penabled = crate::json_utils::get_bool_map(provider, "enabled");
         let empty = Map::new();
-        let mm = provider.get("models").and_then(Value::as_object).unwrap_or(&empty);
+        let mm = provider
+            .get("models")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
         let pname = provider_display_name(provider);
         for (mid, m) in mm {
             if !m.is_object() || !crate::json_utils::get_bool_value(m, "enabled") {
@@ -195,7 +214,11 @@ pub fn render_models_text() -> Res<i32> {
         let env = core::provider_env_key_from_json(provider);
         if !env.is_empty() {
             let pname = provider_display_name(provider);
-            env_rows.push((env.clone(), crate::env::vars::env_key_masked(&env), pname.to_string()));
+            env_rows.push((
+                env.clone(),
+                crate::env::vars::env_key_masked(&env),
+                pname.to_string(),
+            ));
         }
     }
     if !env_rows.is_empty() {
@@ -282,8 +305,7 @@ fn missing_combo_providers(enable_targets: &[String], existing_ids: &[String]) -
     let mut missing: Vec<String> = Vec::new();
     for target in enable_targets {
         if let Some((pid, _mid)) = target.split_once('/') {
-            let known = existing_ids.iter().any(|e| e == pid)
-                || missing.iter().any(|m| m == pid);
+            let known = existing_ids.iter().any(|e| e == pid) || missing.iter().any(|m| m == pid);
             if !known {
                 missing.push(pid.to_string());
             }
@@ -303,7 +325,12 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
     // behavior.
     let existing_ids: Vec<String> = core::provider_entries(&doc)
         .iter()
-        .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+        .map(|p| {
+            p.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
         .collect();
     let missing = missing_combo_providers(enable_targets, &existing_ids);
     if !missing.is_empty() {
@@ -438,7 +465,6 @@ models won't be written to config.toml",
     Ok(0)
 }
 
-
 /// `cmd_disable_all`. Returns exit code.
 pub fn cmd_disable_all() -> Res<i32> {
     let providers_path = paths::providers_path();
@@ -486,7 +512,10 @@ pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
             if !provider_models_dev.is_object() {
                 continue;
             }
-            let name = provider_models_dev.get("name").and_then(Value::as_str).unwrap_or("");
+            let name = provider_models_dev
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if pid.to_lowercase().contains(&term_l) || name.to_lowercase().contains(&term_l) {
                 matches.push((pid.clone(), name.to_string()));
             }
@@ -546,8 +575,7 @@ fn report_add(provider_id: &str, r: &sync::AddProviderResponse) {
     } else {
         println!(
             "Added provider '{}' with {} models (all disabled).",
-            provider_id,
-            r.model_count
+            provider_id, r.model_count
         );
     }
 }
@@ -607,13 +635,22 @@ pub fn cmd_import() -> Res<i32> {
         };
         let safe_model_id: String = model_id
             .chars()
-            .map(|c| if c == '.' || c == '/' || c == ':' { '_' } else { c })
+            .map(|c| {
+                if c == '.' || c == '/' || c == ':' {
+                    '_'
+                } else {
+                    c
+                }
+            })
             .collect();
         let provider_id = match table_key.strip_suffix(&format!("-{safe_model_id}")) {
             Some(p) if !p.is_empty() => p.to_string(),
             _ => table_key.clone(),
         };
-        provider_models.entry(provider_id).or_default().push(model_id);
+        provider_models
+            .entry(provider_id)
+            .or_default()
+            .push(model_id);
     }
 
     if provider_models.is_empty() {
@@ -774,6 +811,5 @@ mod tests {
         );
 
         assert!(cmd_codex("missing").is_err());
-
     }
 }

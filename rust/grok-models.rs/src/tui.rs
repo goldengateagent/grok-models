@@ -11,11 +11,11 @@
 //! - Identical keybindings (↑/↓/←/→/Enter/Space/Backspace/ESC/q/type).
 //! - Footer "box" when terminal is tall enough, single-line pill otherwise.
 
+use crate::Res;
 use crate::core;
 use crate::env::paths;
 use crate::jsonio;
 use crate::theme::{self, P, Rgb};
-use crate::Res;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -24,12 +24,12 @@ use crossterm::{
     },
     execute,
     style::ResetColor,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
-    Terminal,
 };
 use serde_json::{Map, Value};
 use std::cell::RefCell;
@@ -103,8 +103,14 @@ pub enum Key {
 /// Provider ids highlighted in the Add Provider screen's "Suggested" section.
 /// Anything already configured lands in the "Added" section above it; the rest
 /// are listed unhighlighted below. Mirrors `SUGGESTED_PROVIDER_IDS` in Python.
-pub const SUGGESTED_PROVIDER_IDS: [&str; 6] =
-    ["opencode", "opencode-go", "openrouter", "ollama-cloud", "gmicloud", "kilo"];
+pub const SUGGESTED_PROVIDER_IDS: [&str; 6] = [
+    "opencode",
+    "opencode-go",
+    "openrouter",
+    "ollama-cloud",
+    "gmicloud",
+    "kilo",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Paint {
@@ -163,13 +169,21 @@ fn color_of(p: P) -> (Rgb, Rgb) {
         P::LegendKey => (theme::tn(5), theme::tn(0)),
         P::LegendDesc => (theme::tn(6), theme::tn(0)),
         P::Error => (
-            Rgb { r: theme::RED.0, g: theme::RED.1, b: theme::RED.2 },
+            Rgb {
+                r: theme::RED.0,
+                g: theme::RED.1,
+                b: theme::RED.2,
+            },
             theme::tn(0),
         ),
         P::CodeText => (theme::CODE_TEXT, theme::CODE_BG),
         P::CodeComment => (theme::CODE_COMMENT, theme::CODE_BG),
         P::CodeError => (
-            Rgb { r: theme::RED.0, g: theme::RED.1, b: theme::RED.2 },
+            Rgb {
+                r: theme::RED.0,
+                g: theme::RED.1,
+                b: theme::RED.2,
+            },
             theme::CODE_BG,
         ),
         P::CodeString => (theme::CODE_STRING, theme::CODE_BG),
@@ -323,10 +337,7 @@ fn sh_assign_name_end(chars: &[char]) -> Option<usize> {
     None
 }
 
-pub fn code_line_segments(
-    ln: &str,
-    highlight: Option<(usize, usize, P)>,
-) -> Vec<(String, P)> {
+pub fn code_line_segments(ln: &str, highlight: Option<(usize, usize, P)>) -> Vec<(String, P)> {
     let chars: Vec<char> = ln.chars().collect();
     let n = chars.len();
     if chars.iter().all(|c| c.is_whitespace()) || ln.trim_start().starts_with('#') {
@@ -452,15 +463,19 @@ fn draw_code_panel<S: Stdscr>(
     legend_y: i32,
 ) {
     const PAD_X: usize = 1;
-    let panel_segs: Vec<Vec<(String, P)>> =
-        panel_lines.iter().map(|l| code_line_segments(l, None)).collect();
+    let panel_segs: Vec<Vec<(String, P)>> = panel_lines
+        .iter()
+        .map(|l| code_line_segments(l, None))
+        .collect();
     let panel_w = panel_segs
         .iter()
         .map(|segs| segs.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
         .max()
         .unwrap_or(0)
         + 2 * PAD_X;
-    let panel_w = panel_w.min(((width.max(1) as usize).saturating_sub(bx as usize)).saturating_sub(2)).max(1);
+    let panel_w = panel_w
+        .min(((width.max(1) as usize).saturating_sub(bx as usize)).saturating_sub(2))
+        .max(1);
     if row + panel_lines.len() as i32 > legend_y {
         return;
     }
@@ -583,10 +598,7 @@ fn draw_header_segs<S: Stdscr>(stdscr: &mut S, y: i32, x0: i32, segs: &[(String,
     let _ = h;
 }
 
-fn draw_legend<S: Stdscr>(
-    stdscr: &mut S,
-    entries: &[(String, String)],
-) {
+fn draw_legend<S: Stdscr>(stdscr: &mut S, entries: &[(String, String)]) {
     let (h, w) = stdscr.getmaxyx();
     let legend_y = h - 2;
     let bg = Paint::plain(tn_color(P::Text), bg_color(P::Text));
@@ -596,7 +608,12 @@ fn draw_legend<S: Stdscr>(
     let mut x = 2i32;
     for (i, (key, desc)) in entries.iter().enumerate() {
         if i > 0 {
-            stdscr.addstr(legend_y, x, "  │  ", Paint::plain(tn_color(P::Muted), bg_color(P::Muted)));
+            stdscr.addstr(
+                legend_y,
+                x,
+                "  │  ",
+                Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
+            );
             x += 5;
         }
         let run = format!("{key} {desc}");
@@ -612,9 +629,19 @@ fn draw_legend<S: Stdscr>(
             stdscr.addstr(legend_y, x, &ch.to_string(), attr);
             x += char_cols(ch) as i32;
         }
-        stdscr.addstr(legend_y, x, " ", Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)));
+        stdscr.addstr(
+            legend_y,
+            x,
+            " ",
+            Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)),
+        );
         x += 1;
-        stdscr.addstr(legend_y, x, desc, Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)));
+        stdscr.addstr(
+            legend_y,
+            x,
+            desc,
+            Paint::plain(tn_color(P::LegendDesc), bg_color(P::LegendDesc)),
+        );
         x += str_cols(desc) as i32;
     }
 }
@@ -630,7 +657,11 @@ pub enum SelectOutcome {
     /// Main-menu `S`: cycle Enabled Models sort; carries the current cursor.
     SortToggled(usize),
     /// Enter on an Enabled Models row.
-    ModelPicked { pid: String, mid: String, scroll: usize },
+    ModelPicked {
+        pid: String,
+        mid: String,
+        scroll: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -724,13 +755,12 @@ fn restore_preview_model_cursor(
     model_cursor: &mut Option<usize>,
     preview_scroll: &mut usize,
 ) {
-    let Some((pid, mid, scroll)) = focus else { return };
+    let Some((pid, mid, scroll)) = focus else {
+        return;
+    };
     let Some(preview) = preview else { return };
     let models = preview_model_entries(preview);
-    if let Some(i) = models
-        .iter()
-        .position(|(_, p, m)| p == pid && m == mid)
-    {
+    if let Some(i) = models.iter().position(|(_, p, m)| p == pid && m == mid) {
         *model_cursor = Some(i);
         if n > 0 {
             *current = n - 1;
@@ -916,7 +946,12 @@ pub fn select_win<S: Stdscr>(
                 if trial_sep + 1 <= avail_bottom {
                     let rule_y = list_top as i32 + (before - top) as i32;
                     let rule = "─".repeat((w.max(1) as usize).saturating_sub(1));
-                    stdscr.addstr(rule_y, 0, &rule, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+                    stdscr.addstr(
+                        rule_y,
+                        0,
+                        &rule,
+                        Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)),
+                    );
                     true
                 } else {
                     false
@@ -953,8 +988,16 @@ pub fn select_win<S: Stdscr>(
                 Paint::plain(tn_color(P::Text), bg_color(P::Text))
             };
             let row_bg = Paint::plain(
-                if is_sel { tn_color(P::Selected) } else { tn_color(P::Text) },
-                if is_sel { bg_color(P::Selected) } else { bg_color(P::Text) },
+                if is_sel {
+                    tn_color(P::Selected)
+                } else {
+                    tn_color(P::Text)
+                },
+                if is_sel {
+                    bg_color(P::Selected)
+                } else {
+                    bg_color(P::Text)
+                },
             );
             let fill = "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
             stdscr.addstr(y, 0, &fill, row_bg);
@@ -969,11 +1012,7 @@ pub fn select_win<S: Stdscr>(
             // paint it gold like '='.
             let vis_limit = (w.max(1) as usize).saturating_sub(2);
             let vis = clip_cols(&line, vis_limit);
-            let label = if !multi && is_sel {
-                row_paint
-            } else {
-                row_bg
-            };
+            let label = if !multi && is_sel { row_paint } else { row_bg };
             // Colorize a [enabled]/[disabled] token green/red, mirroring
             // Python's `_curses_select_win` (P.ENABLED/P.ERROR pairs).
             if let Some((head, token, tail)) = split_state_token(&line) {
@@ -1008,7 +1047,10 @@ pub fn select_win<S: Stdscr>(
                     let nspaces = tail.len() - tail.trim_start_matches(' ').len();
                     let env = &tail[nspaces..];
                     if nspaces > 0 {
-                        let gap = clip_cols(&" ".repeat(nspaces), vis_limit.saturating_sub(tail_x as usize));
+                        let gap = clip_cols(
+                            &" ".repeat(nspaces),
+                            vis_limit.saturating_sub(tail_x as usize),
+                        );
                         if !gap.is_empty() && (tail_x as usize) < vis_limit {
                             stdscr.addstr(y, tail_x, &gap, label);
                         }
@@ -1017,7 +1059,8 @@ pub fn select_win<S: Stdscr>(
                     if !env.is_empty() {
                         let box_x = (tail_x - env_pad).max(0);
                         let box_w = max_env_w + 2 * env_pad as usize;
-                        let fill_w = box_w.min((w.max(1) as usize).saturating_sub(box_x as usize + 1));
+                        let fill_w =
+                            box_w.min((w.max(1) as usize).saturating_sub(box_x as usize + 1));
                         stdscr.addstr(
                             y,
                             box_x,
@@ -1051,7 +1094,12 @@ pub fn select_win<S: Stdscr>(
             }
             if !multi {
                 let chev_x = (str_cols(&vis) as i32 + 2).max(w - 4);
-                stdscr.addstr(y, chev_x, "›", Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+                stdscr.addstr(
+                    y,
+                    chev_x,
+                    "›",
+                    Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)),
+                );
             }
         }
 
@@ -1097,7 +1145,12 @@ pub fn select_win<S: Stdscr>(
         }
         if !is_codex_config {
             let sep = "─".repeat((w.max(1) as usize).saturating_sub(1));
-            stdscr.addstr(sep_y, 0, &sep, Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)));
+            stdscr.addstr(
+                sep_y,
+                0,
+                &sep,
+                Paint::plain(tn_color(P::Chevron), bg_color(P::Chevron)),
+            );
         }
 
         // Models preview: fill the empty space below the list (the TUI
@@ -1117,14 +1170,12 @@ pub fn select_win<S: Stdscr>(
                 // preview_scroll can exceed the window after a resize; clamp
                 // the slice so a stale offset can't panic.
                 let end = (preview_top + max_lines).min(preview.len());
-                let draw_lines: Vec<PreviewLine> =
-                    preview[preview_top..end].to_vec();
+                let draw_lines: Vec<PreviewLine> = preview[preview_top..end].to_vec();
                 for (i, line) in draw_lines.iter().enumerate() {
                     let y = avail_top + i as i32;
                     match line {
                         PreviewLine::Heading(text) => {
-                            let hfill = "\u{00a0}"
-                                .repeat((w.max(1) as usize).saturating_sub(1));
+                            let hfill = "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
                             let hp = Paint::plain(tn_color(P::Selected), bg_color(P::Selected));
                             stdscr.addstr(y, 0, &hfill, hp);
                             stdscr.addstr(y, 4, text, hp.bold());
@@ -1133,7 +1184,13 @@ pub fn select_win<S: Stdscr>(
                             draw_header_segs(stdscr, y, 4, parts);
                         }
                         PreviewLine::Segs(segs) => {
-                            draw_seg_line(stdscr, y, 2, segs, (w.max(1) as usize).saturating_sub(3));
+                            draw_seg_line(
+                                stdscr,
+                                y,
+                                2,
+                                segs,
+                                (w.max(1) as usize).saturating_sub(3),
+                            );
                         }
                         PreviewLine::Model { segs, .. } => {
                             let models = preview_model_entries(preview);
@@ -1142,18 +1199,16 @@ pub fn select_win<S: Stdscr>(
                                 .and_then(|c| models.get(c).map(|(idx, _, _)| *idx == abs_i))
                                 .unwrap_or(false);
                             if is_sel {
-                                let hfill = "\u{00a0}"
-                                    .repeat((w.max(1) as usize).saturating_sub(1));
+                                let hfill =
+                                    "\u{00a0}".repeat((w.max(1) as usize).saturating_sub(1));
                                 stdscr.addstr(
                                     y,
                                     0,
                                     &hfill,
                                     Paint::plain(tn_color(P::Selected), bg_color(P::Selected)),
                                 );
-                                let sel: Vec<(String, P)> = segs
-                                    .iter()
-                                    .map(|(t, _)| (t.clone(), P::Selected))
-                                    .collect();
+                                let sel: Vec<(String, P)> =
+                                    segs.iter().map(|(t, _)| (t.clone(), P::Selected)).collect();
                                 draw_seg_line(
                                     stdscr,
                                     y,
@@ -1162,7 +1217,13 @@ pub fn select_win<S: Stdscr>(
                                     (w.max(1) as usize).saturating_sub(3),
                                 );
                             } else {
-                                draw_seg_line(stdscr, y, 2, segs, (w.max(1) as usize).saturating_sub(3));
+                                draw_seg_line(
+                                    stdscr,
+                                    y,
+                                    2,
+                                    segs,
+                                    (w.max(1) as usize).saturating_sub(3),
+                                );
                             }
                         }
                     }
@@ -1234,9 +1295,7 @@ pub fn select_win<S: Stdscr>(
             }
         }
 
-        let mut legend: Vec<(String, String)> = vec![
-            ("↑/↓".to_string(), "nav".to_string()),
-        ];
+        let mut legend: Vec<(String, String)> = vec![("↑/↓".to_string(), "nav".to_string())];
         if multi {
             legend.push(("Space".to_string(), "toggle".to_string()));
         }
@@ -1335,11 +1394,7 @@ pub fn select_win<S: Stdscr>(
             Key::WheelDown(y) => {
                 let models = preview.map(preview_model_entries).unwrap_or_default();
                 let avail_top = sep_y + 1;
-                if !models.is_empty()
-                    && !back_on_left
-                    && y >= avail_top
-                    && y <= h - 5
-                {
+                if !models.is_empty() && !back_on_left && y >= avail_top && y <= h - 5 {
                     let max_top = preview.map(|p| p.len().saturating_sub(1)).unwrap_or(0);
                     preview_scroll = (preview_scroll + 1).min(max_top);
                     model_cursor = Some(0);
@@ -1350,11 +1405,7 @@ pub fn select_win<S: Stdscr>(
             Key::WheelUp(y) => {
                 let models = preview.map(preview_model_entries).unwrap_or_default();
                 let avail_top = sep_y + 1;
-                if !models.is_empty()
-                    && !back_on_left
-                    && y >= avail_top
-                    && y <= h - 5
-                {
+                if !models.is_empty() && !back_on_left && y >= avail_top && y <= h - 5 {
                     preview_scroll = preview_scroll.saturating_sub(1);
                     model_cursor = Some(0);
                     pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
@@ -1362,16 +1413,32 @@ pub fn select_win<S: Stdscr>(
                 }
             }
             Key::Left | Key::Esc if back_on_left => return Some(SelectOutcome::Cancelled),
-            Key::Char('q') | Key::Char('Q') if !back_on_left => return Some(SelectOutcome::Cancelled),
+            Key::Char('q') | Key::Char('Q') if !back_on_left => {
+                return Some(SelectOutcome::Cancelled);
+            }
             Key::Char('s') | Key::Char('S') if !back_on_left => {
                 return Some(SelectOutcome::SortToggled(current));
             }
             Key::PageDown => {
-                page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, true);
+                page_preview(
+                    preview,
+                    sep_y,
+                    h,
+                    status.is_some(),
+                    &mut preview_scroll,
+                    true,
+                );
                 pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
             }
             Key::PageUp => {
-                page_preview(preview, sep_y, h, status.is_some(), &mut preview_scroll, false);
+                page_preview(
+                    preview,
+                    sep_y,
+                    h,
+                    status.is_some(),
+                    &mut preview_scroll,
+                    false,
+                );
                 pin_model_cursor_to_scroll(preview, preview_scroll, &mut model_cursor);
             }
             Key::Interrupt => return Some(SelectOutcome::Cancelled),
@@ -1403,7 +1470,11 @@ pub trait FilterList {
     type Entry: PartialEq + Clone;
     /// (entries, query) -> (ordered entries, separators). Separators are
     /// (index before which to insert a `─` rule occupying its own row).
-    fn compute_view(&mut self, entries: &[Self::Entry], query: &str) -> (Vec<Self::Entry>, Vec<(usize, P)>);
+    fn compute_view(
+        &mut self,
+        entries: &[Self::Entry],
+        query: &str,
+    ) -> (Vec<Self::Entry>, Vec<(usize, P)>);
     /// (entry, is_selected) -> colored segments for the row.
     fn render(&mut self, entry: &Self::Entry, is_selected: bool) -> Vec<(String, P)>;
     /// Enter on an entry: return true to keep the window open, false to close.
@@ -1463,9 +1534,7 @@ pub fn filter_list_win<S: Stdscr, M: FilterList>(
     legend: &[(String, String)],
     model: &mut M,
 ) {
-    filter_list_win_with(
-        stdscr, entries, title, legend, model, 0, None,
-    )
+    filter_list_win_with(stdscr, entries, title, legend, model, 0, None)
 }
 
 pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
@@ -1550,9 +1619,7 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
 
         let list_top = if has_cols { 4usize } else { 2usize };
         // Locked chrome: H-4 blank, H-3 status, H-2 nav, H-1 blank.
-        let list_h = ((h as usize)
-            .saturating_sub(list_top + 4 + bottom_pad))
-        .max(1);
+        let list_h = ((h as usize).saturating_sub(list_top + 4 + bottom_pad)).max(1);
         if snap_to_current {
             top = cur_vis;
             if top + list_h > view.len() {
@@ -1586,7 +1653,12 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
             match view[vis_i] {
                 FilterViewRow::Sep(sep_pair) => {
                     let sep = "─".repeat((w.max(1) as usize).saturating_sub(1));
-                    stdscr.addstr(y, 0, &sep, Paint::plain(tn_color(sep_pair), bg_color(sep_pair)));
+                    stdscr.addstr(
+                        y,
+                        0,
+                        &sep,
+                        Paint::plain(tn_color(sep_pair), bg_color(sep_pair)),
+                    );
                 }
                 FilterViewRow::Item(idx) => {
                     let entry = &filtered[idx];
@@ -1599,7 +1671,11 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                         &fill,
                         Paint::plain(tn_color(fill_pair), bg_color(fill_pair)),
                     );
-                    let bg_pair = if idx == current { Some(P::Selected) } else { None };
+                    let bg_pair = if idx == current {
+                        Some(P::Selected)
+                    } else {
+                        None
+                    };
                     draw_seg_line_bg(
                         stdscr,
                         y,
@@ -1730,12 +1806,10 @@ pub fn filter_list_win_with<S: Stdscr, M: FilterList>(
                 }
                 if let Some(i) = view.get(top).and_then(|r| match r {
                     FilterViewRow::Item(i) => Some(*i),
-                    FilterViewRow::Sep(_) => view[top..]
-                        .iter()
-                        .find_map(|r| match r {
-                            FilterViewRow::Item(i) => Some(*i),
-                            _ => None,
-                        }),
+                    FilterViewRow::Sep(_) => view[top..].iter().find_map(|r| match r {
+                        FilterViewRow::Item(i) => Some(*i),
+                        _ => None,
+                    }),
                 }) {
                     current = i;
                 }
@@ -1782,19 +1856,15 @@ fn model_list_row(
         (format!("{mname:<name_w$}"), name_pair),
     ];
     if with_scores {
-        let (intel_cell, coding_cell, score_pair) =
-            match crate::benchmarks::scores_for_live_id(mid) {
-                Some(s) => (
-                    format!("{:>w$.1}", s.intel, w = INTEL_COL_W),
-                    format!("{:>w$.1}", s.coding, w = CODING_COL_W),
-                    P::Value,
-                ),
-                None => (
-                    " ".repeat(INTEL_COL_W),
-                    " ".repeat(CODING_COL_W),
-                    P::Muted,
-                ),
-            };
+        let (intel_cell, coding_cell, score_pair) = match crate::benchmarks::scores_for_live_id(mid)
+        {
+            Some(s) => (
+                format!("{:>w$.1}", s.intel, w = INTEL_COL_W),
+                format!("{:>w$.1}", s.coding, w = CODING_COL_W),
+                P::Value,
+            ),
+            None => (" ".repeat(INTEL_COL_W), " ".repeat(CODING_COL_W), P::Muted),
+        };
         segs.push(("  ".to_string(), P::Text));
         segs.push((intel_cell, score_pair));
         segs.push(("  ".to_string(), P::Text));
@@ -1880,7 +1950,11 @@ impl<'a> FilterList for ModelPicker<'a> {
 
     fn compute_view(&mut self, _entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
         let sorted = core::sort_model_indices(self.ids, self.models, Some(query));
-        let mut ordered: Vec<String> = sorted.filtered.iter().map(|&i| self.ids[i].clone()).collect();
+        let mut ordered: Vec<String> = sorted
+            .filtered
+            .iter()
+            .map(|&i| self.ids[i].clone())
+            .collect();
         reorder_configure_models(&mut ordered, self.models, self.sort);
         let mut separators: Vec<(usize, P)> = Vec::new();
         if 0 < sorted.enabled_count && sorted.enabled_count < ordered.len() {
@@ -1900,21 +1974,20 @@ impl<'a> FilterList for ModelPicker<'a> {
             name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
         }
         self.name_w = name_w.max("Model".chars().count());
-        self.pname_w = self
-            .pname
-            .chars()
-            .count()
-            .min(core::PROVIDER_NAME_COL_MAX)
-            + 2;
+        self.pname_w = self.pname.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2;
         self.pname_w = self.pname_w.max("Provider".chars().count());
         (ordered, separators)
     }
 
     fn render(&mut self, mid: &String, _is_sel: bool) -> Vec<(String, P)> {
         let m = self.models.get(mid);
-        let enabled = m.map(|v| crate::json_utils::get_bool_value(v, "enabled")).unwrap_or(false);
+        let enabled = m
+            .map(|v| crate::json_utils::get_bool_value(v, "enabled"))
+            .unwrap_or(false);
         let is_free = mid.to_lowercase().contains("free");
-        let mname = m.map(|v| crate::json_utils::get_name_or(v, mid)).unwrap_or_else(|| mid.clone());
+        let mname = m
+            .map(|v| crate::json_utils::get_name_or(v, mid))
+            .unwrap_or_else(|| mid.clone());
         model_list_row(
             &mname,
             &self.pname,
@@ -1962,12 +2035,18 @@ impl<'a> FilterList for ModelPicker<'a> {
     }
 
     fn on_enter<S: Stdscr>(&mut self, _stdscr: &mut S, mid: &String) -> bool {
-        let entry = self.models.entry(mid.clone()).or_insert_with(|| Value::Object(Map::new()));
+        let entry = self
+            .models
+            .entry(mid.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
         if !entry.is_object() {
             *entry = Value::Object(Map::new());
         }
         let cur = crate::json_utils::get_bool_value(entry, "enabled");
-        entry.as_object_mut().unwrap().insert("enabled".into(), Value::Bool(!cur));
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("enabled".into(), Value::Bool(!cur));
         self.changed = true;
         true // stay open
     }
@@ -2052,18 +2131,23 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
     let (h, w) = stdscr.getmaxyx();
     stdscr.erase();
     paint_bg(stdscr, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-    let trunc: String = message.chars().take((w.max(1) as usize).saturating_sub(4)).collect();
-    stdscr.addstr(h / 2, 2, &trunc, Paint::plain(tn_color(P::Disabled), bg_color(P::Disabled)));
+    let trunc: String = message
+        .chars()
+        .take((w.max(1) as usize).saturating_sub(4))
+        .collect();
+    stdscr.addstr(
+        h / 2,
+        2,
+        &trunc,
+        Paint::plain(tn_color(P::Disabled), bg_color(P::Disabled)),
+    );
     stdscr.addstr(
         h / 2 + 2,
         2,
         "Press any key to go back",
         Paint::plain(tn_color(P::Muted), bg_color(P::Muted)),
     );
-    draw_legend(
-        stdscr,
-        &[("any key".to_string(), "back".to_string())],
-    );
+    draw_legend(stdscr, &[("any key".to_string(), "back".to_string())]);
     stdscr.refresh();
     let _ = emit_sgr_bg_keep_alive();
     let _ = stdscr.getch();
@@ -2087,9 +2171,7 @@ struct AddProviderPicker<'a> {
 }
 
 fn provider_matches(pid: &str, name: &str, term_l: &str) -> bool {
-    term_l.is_empty()
-        || pid.to_lowercase().contains(term_l)
-        || name.to_lowercase().contains(term_l)
+    term_l.is_empty() || pid.to_lowercase().contains(term_l) || name.to_lowercase().contains(term_l)
 }
 
 impl<'a> AddProviderPicker<'a> {
@@ -2098,7 +2180,12 @@ impl<'a> AddProviderPicker<'a> {
     fn added_ids(&self) -> std::collections::HashSet<String> {
         core::provider_entries(self.doc)
             .iter()
-            .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+            .map(|p| {
+                p.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .filter(|id| !id.is_empty())
             .collect()
     }
@@ -2194,8 +2281,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
             })
             .collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.0.cmp(&b.1.0)));
-        let ordered: Vec<(String, String)> =
-            rows.iter().map(|(_, e)| (*e).clone()).collect();
+        let ordered: Vec<(String, String)> = rows.iter().map(|(_, e)| (*e).clone()).collect();
         // Green divider before Suggested would be wrong: the first rule sits
         // before the Suggested bucket (mirrors Configure Models' enabled |
         // free-disabled | rest layout).
@@ -2296,7 +2382,11 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
                 .map(|(pid, provider_models_dev)| {
                     (
                         pid.clone(),
-                        provider_models_dev.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        provider_models_dev
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                     )
                 })
                 .collect()
@@ -2358,7 +2448,12 @@ pub fn edit_inline_row<S: Stdscr>(
                 break;
             }
             if i == edit_index {
-                stdscr.addstr(y, 0, &fill, Paint::plain(tn_color(P::Selected), bg_color(P::Selected)));
+                stdscr.addstr(
+                    y,
+                    0,
+                    &fill,
+                    Paint::plain(tn_color(P::Selected), bg_color(P::Selected)),
+                );
                 // Draw the field without its closing bracket, then a block
                 // cursor followed by the bracket, so the caret sits inside.
                 let line = format!("  ▸ {label} [{buf}");
@@ -2368,8 +2463,7 @@ pub fn edit_inline_row<S: Stdscr>(
                     &pad_cols(&line, (w.max(1) as usize).saturating_sub(1), ' '),
                     Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold(),
                 );
-                let cur_x =
-                    (4 + str_cols(label) + 2 + str_cols(&buf)) as i32;
+                let cur_x = (4 + str_cols(label) + 2 + str_cols(&buf)) as i32;
                 stdscr.addstr(
                     y,
                     cur_x,
@@ -2377,11 +2471,13 @@ pub fn edit_inline_row<S: Stdscr>(
                     Paint::plain(tn_color(P::Selected), bg_color(P::Selected)).bold(),
                 );
             } else {
-                stdscr.addstr(y, 0, &fill, Paint::plain(tn_color(P::Text), bg_color(P::Text)));
-                let line = clip_cols(
-                    &format!("    {row}"),
-                    (w.max(1) as usize).saturating_sub(2),
+                stdscr.addstr(
+                    y,
+                    0,
+                    &fill,
+                    Paint::plain(tn_color(P::Text), bg_color(P::Text)),
                 );
+                let line = clip_cols(&format!("    {row}"), (w.max(1) as usize).saturating_sub(2));
                 stdscr.addstr(
                     y,
                     0,
@@ -2458,20 +2554,29 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .unwrap_or(mid);
-                catalog.push((pid.clone(), mid.clone(), mname.to_string(), pname.to_string()));
+                catalog.push((
+                    pid.clone(),
+                    mid.clone(),
+                    mname.to_string(),
+                    pname.to_string(),
+                ));
                 seen.insert((pid.clone(), mid.clone()));
             }
         }
     }
     if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
         for p in arr {
-            let Some(pid) = p.get("id").and_then(Value::as_str) else { continue };
+            let Some(pid) = p.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             let pname = p
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(pid);
-            let Some(mm) = p.get("models").and_then(Value::as_object) else { continue };
+            let Some(mm) = p.get("models").and_then(Value::as_object) else {
+                continue;
+            };
             for (mid, m) in mm {
                 if seen.contains(&(pid.to_string(), mid.clone())) {
                     continue;
@@ -2484,7 +2589,12 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .unwrap_or(mid);
-                catalog.push((pid.to_string(), mid.clone(), mname.to_string(), pname.to_string()));
+                catalog.push((
+                    pid.to_string(),
+                    mid.clone(),
+                    mname.to_string(),
+                    pname.to_string(),
+                ));
                 seen.insert((pid.to_string(), mid.clone()));
             }
         }
@@ -2505,7 +2615,8 @@ struct AddModelPicker<'a> {
 
 impl<'a> AddModelPicker<'a> {
     fn is_enabled(&self, pid: &str, mid: &str) -> bool {
-        self.enabled_cache.contains(&(pid.to_string(), mid.to_string()))
+        self.enabled_cache
+            .contains(&(pid.to_string(), mid.to_string()))
     }
 
     fn refresh_enabled_cache(&mut self) {
@@ -2558,7 +2669,11 @@ impl<'a> FilterList for AddModelPicker<'a> {
             })
             .map(|(pid, mid, mname, pname)| {
                 let en = if self.is_enabled(pid, mid) { 0u8 } else { 1 };
-                let free = if mid.to_lowercase().contains("free") { 0u8 } else { 1 };
+                let free = if mid.to_lowercase().contains("free") {
+                    0u8
+                } else {
+                    1
+                };
                 let key = (en, free, mname.to_lowercase(), pid.clone(), mid.clone());
                 (
                     key,
@@ -2618,17 +2733,18 @@ impl<'a> FilterList for AddModelPicker<'a> {
         )
     }
 
-    fn on_enter<S: Stdscr>(&mut self, stdscr: &mut S, entry: &(String, String, String, String)) -> bool {
+    fn on_enter<S: Stdscr>(
+        &mut self,
+        stdscr: &mut S,
+        entry: &(String, String, String, String),
+    ) -> bool {
         let (pid, mid, mname, pname) = entry;
         if combo_enabled(self.doc, pid, mid) {
             // Already enabled: disable it. The model stays in the catalog
             // (from models.dev) so it visibly moves into the disabled or
             // free-disabled section.
             let Some(slot) = core::find_provider_by_id_mut(self.doc, pid) else {
-                inline_error_win(
-                    stdscr,
-                    &format!("Disable failed: provider {pid:?} missing"),
-                );
+                inline_error_win(stdscr, &format!("Disable failed: provider {pid:?} missing"));
                 return true; // stay open
             };
             let mut disabled = false;
@@ -2648,7 +2764,12 @@ impl<'a> FilterList for AddModelPicker<'a> {
         }
         let existing: Vec<String> = core::provider_entries(self.doc)
             .iter()
-            .map(|p| p.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
+            .map(|p| {
+                p.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
         let mut added = false;
         let mut fetch_warning_url = None;
@@ -2766,7 +2887,10 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
     let mut lines: Vec<PreviewLine> = Vec::new();
     let mut model_rows: Vec<(String, String, String, String)> = Vec::new();
     for provider in &providers {
-        let pid = provider.get("id").and_then(Value::as_str).unwrap_or_default();
+        let pid = provider
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let penabled = crate::json_utils::get_bool_map(provider, "enabled");
         let mm = provider.get("models").and_then(Value::as_object);
         let Some(mm) = mm else {
@@ -2822,7 +2946,13 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
         .iter()
         .map(|(mname, pname, pid, mid)| {
             let level = model_reasoning_level(doc, pid, mid);
-            (mname.clone(), pname.clone(), pid.clone(), mid.clone(), level)
+            (
+                mname.clone(),
+                pname.clone(),
+                pid.clone(),
+                mid.clone(),
+                level,
+            )
         })
         .collect();
     let name_w = rows_with_levels
@@ -2886,19 +3016,15 @@ pub fn build_config_models_preview(doc: &Value, sort: EnabledSort) -> Vec<Previe
     lines.push(PreviewLine::Segs(vec![("".to_string(), P::Text)])); // gap under the models header
     for (mname, pname, pid, mid, level) in &rows_with_levels {
         let level_pair = if level != "none" { P::Free } else { P::Muted };
-        let (intel_cell, coding_cell, score_pair) =
-            match crate::benchmarks::scores_for_live_id(mid) {
-                Some(s) => (
-                    format!("{:>w$.1}", s.intel, w = INTEL_W),
-                    format!("{:>w$.1}", s.coding, w = CODING_W),
-                    P::Value,
-                ),
-                None => (
-                    " ".repeat(INTEL_W),
-                    " ".repeat(CODING_W),
-                    P::Muted,
-                ),
-            };
+        let (intel_cell, coding_cell, score_pair) = match crate::benchmarks::scores_for_live_id(mid)
+        {
+            Some(s) => (
+                format!("{:>w$.1}", s.intel, w = INTEL_W),
+                format!("{:>w$.1}", s.coding, w = CODING_W),
+                P::Value,
+            ),
+            None => (" ".repeat(INTEL_W), " ".repeat(CODING_W), P::Muted),
+        };
         lines.push(PreviewLine::Model {
             pid: pid.clone(),
             mid: mid.clone(),
@@ -2956,7 +3082,11 @@ fn model_reasoning_level(doc: &Value, pid: &str, mid: &str) -> String {
         if p.get("id").and_then(Value::as_str) != Some(pid) {
             continue;
         }
-        let Some(m) = p.get("models").and_then(Value::as_object).and_then(|mm| mm.get(mid)) else {
+        let Some(m) = p
+            .get("models")
+            .and_then(Value::as_object)
+            .and_then(|mm| mm.get(mid))
+        else {
             return "none".into();
         };
         if let Some(efforts) = m.get("reasoning_efforts").and_then(Value::as_array) {
@@ -3104,7 +3234,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         ));
         labels.push(crate::core::pad_state_label(
             crate::core::MODEL_DESC_LABEL,
-            &format!("[{}]", if descriptions_on { "enabled" } else { "disabled" }),
+            &format!(
+                "[{}]",
+                if descriptions_on {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            ),
             token_col,
         ));
         labels.push(crate::core::pad_state_label(
@@ -3137,7 +3274,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         let preview = build_config_models_preview(doc, enabled_sort);
         // Trailing-block rows (Codex Config, Model Descriptions, Web Search, …) are
         // selectable; Enter lands on them as SelectOutcome::Picked.
-        let pi = match select_win(stdscr,
+        let pi = match select_win(
+            stdscr,
             &labels,
             "Select Provider (changes sync on exit)",
             false,
@@ -3149,7 +3287,9 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             Some(&preview),
             menu_cursor,
             Some(ordered.len()),
-            model_focus.as_ref().map(|(p, m, s)| (p.as_str(), m.as_str(), *s)),
+            model_focus
+                .as_ref()
+                .map(|(p, m, s)| (p.as_str(), m.as_str(), *s)),
             None,
         ) {
             None => return Ok(changed),
@@ -3182,9 +3322,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         .filter(|p| {
                             p.is_object()
                                 && p.get("id").is_some()
-                                && p.get("enabled")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(true)
+                                && p.get("enabled").and_then(Value::as_bool).unwrap_or(true)
                         })
                         .filter_map(|p| p.as_object().cloned())
                         .collect()
@@ -3203,8 +3341,9 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let pid = crate::jsonio::codex_model_provider_id(doc);
             let initial = if !writing || pid.is_empty() {
                 0
-            } else if let Some(pos) =
-                values.iter().position(|v| v.as_deref() == Some(pid.as_str()))
+            } else if let Some(pos) = values
+                .iter()
+                .position(|v| v.as_deref() == Some(pid.as_str()))
             {
                 pos
             } else {
@@ -3289,8 +3428,9 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let current = crate::jsonio::web_search_id(doc);
             let initial = if current.is_empty() {
                 0
-            } else if let Some(pos) =
-                values.iter().position(|v| v.as_deref() == Some(current.as_str()))
+            } else if let Some(pos) = values
+                .iter()
+                .position(|v| v.as_deref() == Some(current.as_str()))
             {
                 pos
             } else {
@@ -3349,11 +3489,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     status_msg = Some(if fetch_messages.len() == 1 {
                         fetch_messages[0].to_string()
                     } else if fetch_messages.len() > 1 {
-                        format!(
-                            "{} (+{} more)",
-                            fetch_messages[0],
-                            fetch_messages.len() - 1
-                        )
+                        format!("{} (+{} more)", fetch_messages[0], fetch_messages.len() - 1)
                     } else {
                         format!(
                             "Updated model list · {} providers synced",
@@ -3425,11 +3561,17 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             let view: Map<String, Value> =
                 core::find_provider_by_id(doc, &provider_id).unwrap_or_default();
             let enabled = crate::json_utils::get_bool_map(&view, "enabled");
-            let current_base =
-                view.get("base_url").and_then(Value::as_str).unwrap_or_default().to_string();
+            let current_base = view
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let actions = vec![
                 "Configure Models".to_string(),
-                format!("Provider [{}]", if enabled { "enabled" } else { "disabled" }),
+                format!(
+                    "Provider [{}]",
+                    if enabled { "enabled" } else { "disabled" }
+                ),
                 format!("Base Url [{current_base}]"),
                 "Delete Provider".to_string(),
                 "Back".to_string(),
@@ -3440,7 +3582,8 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             } else {
                 Some(format!(
                     "# config {} api keys\npbpaste > key-file\necho 'export {env_key}=\"$(cat ~/key-file)\"' >> ~/.zshrc",
-                    view.get("id").and_then(Value::as_str)
+                    view.get("id")
+                        .and_then(Value::as_str)
                         .or_else(|| view.get("name").and_then(Value::as_str))
                         .unwrap_or_default()
                 ))
@@ -3454,9 +3597,15 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 .get("doc")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty());
-            let ai = match select_win(stdscr,
+            let ai = match select_win(
+                stdscr,
                 &actions,
-                &format!("Provider: {}", view.get("name").and_then(Value::as_str).unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default())),
+                &format!(
+                    "Provider: {}",
+                    view.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default())
+                ),
                 false,
                 &[],
                 true,
@@ -3504,7 +3653,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                             .filter(|s| !s.is_empty())
                             .unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default());
                         let provider_title = "Configure Models".to_string();
-                        model_search_win(stdscr, &ids, &mut models, &provider_title, &provider_id, pname);
+                        model_search_win(
+                            stdscr,
+                            &ids,
+                            &mut models,
+                            &provider_title,
+                            &provider_id,
+                            pname,
+                        );
                         let updated = Value::Object(models);
                         if let Some(slot) = core::find_provider_by_id_mut(doc, &provider_id) {
                             slot.insert("models".to_string(), updated);
@@ -3523,18 +3679,13 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     // becomes the text field; Enter saves, ESC cancels.
                     let title_fmt = format!(
                         "Provider: {}",
-                        view.get("name").and_then(Value::as_str).unwrap_or(
-                            view.get("id").and_then(Value::as_str).unwrap_or_default()
-                        )
+                        view.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(view.get("id").and_then(Value::as_str).unwrap_or_default())
                     );
-                    if let Some(value) = edit_inline_row(
-                        stdscr,
-                        &title_fmt,
-                        &actions,
-                        2,
-                        "Base Url",
-                        &current_base,
-                    ) {
+                    if let Some(value) =
+                        edit_inline_row(stdscr, &title_fmt, &actions, 2, "Base Url", &current_base)
+                    {
                         let trimmed = value.trim().to_string();
                         if trimmed.is_empty() {
                             // Empty input clears the override (falls back to
@@ -3553,7 +3704,10 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                     }
                 }
                 3 => {
-                    if confirm_win(stdscr, &format!("Delete Provider {}?", core::provider_display(&view))) {
+                    if confirm_win(
+                        stdscr,
+                        &format!("Delete Provider {}?", core::provider_display(&view)),
+                    ) {
                         crate::sync::delete_provider_and_flush(doc, &provider_id)?;
                         changed = true;
                     }
@@ -3565,8 +3719,6 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
         }
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Real terminal backend (skip under tests)
@@ -3854,7 +4006,13 @@ impl Drop for RealStdscr {
         // order. Then cooked mode and default signal handlers.
         self.terminal.take();
         let mut out = std::io::stdout();
-        let _ = execute!(out, DisableMouseCapture, Show, LeaveAlternateScreen, ResetColor);
+        let _ = execute!(
+            out,
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen,
+            ResetColor
+        );
         let _ = disable_raw_mode();
         reset_signal_handlers();
     }
@@ -3906,7 +4064,11 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
                     return None; // wait for the tail
                 }
                 if buf[3] == b'~' {
-                    let key = if buf[2] == b'5' { Key::PageUp } else { Key::PageDown };
+                    let key = if buf[2] == b'5' {
+                        Key::PageUp
+                    } else {
+                        Key::PageDown
+                    };
                     return Some((key, 4));
                 }
             }
@@ -3925,7 +4087,10 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
                 let press = buf[end - 1] == b'M';
                 let payload = std::str::from_utf8(&buf[3..end - 1]).unwrap_or("");
                 let mut parts = payload.split(';');
-                let btn = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                let btn = parts
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
                 let _x = parts.next();
                 // SGR mouse coords are 1-based.
                 let y = parts
@@ -4026,18 +4191,11 @@ mod tests {
         }
         fn getch(&mut self) -> Key {
             let mut k = self.keys.borrow_mut();
-            if k.is_empty() {
-                Key::Eof
-            } else {
-                k.remove(0)
-            }
+            if k.is_empty() { Key::Eof } else { k.remove(0) }
         }
     }
 
-    fn token_paints(
-        calls: &[(i32, i32, String, Paint)],
-        token: &str,
-    ) -> Vec<Paint> {
+    fn token_paints(calls: &[(i32, i32, String, Paint)], token: &str) -> Vec<Paint> {
         calls
             .iter()
             .filter(|(_, _, t, _)| t == token)
@@ -4076,7 +4234,11 @@ mod tests {
     }
     impl FilterList for CountList {
         type Entry = String;
-        fn compute_view(&mut self, entries: &[String], query: &str) -> (Vec<String>, Vec<(usize, P)>) {
+        fn compute_view(
+            &mut self,
+            entries: &[String],
+            query: &str,
+        ) -> (Vec<String>, Vec<(usize, P)>) {
             let q = query.to_lowercase();
             (
                 entries
@@ -4121,7 +4283,9 @@ mod tests {
             "unfiltered count missing: {headers:?}"
         );
         assert!(
-            headers.iter().any(|t| t.contains("(1)") && t.contains("Search: b")),
+            headers
+                .iter()
+                .any(|t| t.contains("(1)") && t.contains("Search: b")),
             "filtered count missing: {headers:?}"
         );
     }
@@ -4204,8 +4368,16 @@ mod tests {
         let y_a = last_y(&calls, "alpha");
         let y_b = last_y(&calls, "beta");
         let y_c = last_y(&calls, "gamma");
-        assert_eq!(y_b, y_a + 2, "separator should sit between alpha and beta: a={y_a} b={y_b}");
-        assert_eq!(y_c, y_b + 2, "separator should sit between beta and gamma: b={y_b} c={y_c}");
+        assert_eq!(
+            y_b,
+            y_a + 2,
+            "separator should sit between alpha and beta: a={y_a} b={y_b}"
+        );
+        assert_eq!(
+            y_c,
+            y_b + 2,
+            "separator should sit between beta and gamma: b={y_b} c={y_c}"
+        );
         let beta_paints = token_paints(&calls, "  beta");
         assert!(
             beta_paints.iter().any(|p| p.bg == bg_color(P::Selected)),
@@ -4280,19 +4452,13 @@ mod tests {
         // characters. The selected row's fill uses the Selected bg.
         let calls = f.recorded();
         let sel_bg = bg_color(P::Selected);
-        let selected_y: Option<i32> = calls
-            .iter()
-            .rev()
-            .find_map(|(y, _, t, p)| {
-                if !t.is_empty()
-                    && t.chars().all(|c| c == '\u{00a0}')
-                    && p.bg == sel_bg
-                {
-                    Some(*y)
-                } else {
-                    None
-                }
-            });
+        let selected_y: Option<i32> = calls.iter().rev().find_map(|(y, _, t, p)| {
+            if !t.is_empty() && t.chars().all(|c| c == '\u{00a0}') && p.bg == sel_bg {
+                Some(*y)
+            } else {
+                None
+            }
+        });
         // Find the y of each model name in the last frame.
         let find_y_of = |needle: &str| -> Option<i32> {
             calls
@@ -4323,12 +4489,29 @@ mod tests {
         // initial = 0: first (enabled) row selected.
         let mut f = FakeStdscr::new(h, w);
         f.script(Key::Char('q'));
-        let _ = select_win(&mut f, &options, "Select Provider", false, &[], false, None, None, None, None, 0, None, None, None);
+        let _ = select_win(
+            &mut f,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+            None,
+        );
         let calls = f.recorded();
 
         // Title present.
         assert!(
-            calls.iter().any(|(_, _, t, _)| t.contains("Select Provider")),
+            calls
+                .iter()
+                .any(|(_, _, t, _)| t.contains("Select Provider")),
             "title 'Select Provider' not drawn"
         );
         // Full-screen NBSP background sweep present.
@@ -4379,7 +4562,22 @@ mod tests {
         // initial = 1: disabled row selected -> token red AND bold (selected).
         let mut f2 = FakeStdscr::new(h, w);
         f2.script(Key::Char('q'));
-        let _ = select_win(&mut f2, &options, "Select Provider", false, &[], false, None, None, None, None, 1, None, None, None);
+        let _ = select_win(
+            &mut f2,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            None,
+            1,
+            None,
+            None,
+            None,
+        );
         let calls2 = f2.recorded();
         let dis2 = token_paints(&calls2, "[disabled]");
         assert!(
@@ -4413,11 +4611,17 @@ mod tests {
         // Non-empty string content renders white inside gold quotes.
         let segs = code_line_segments("echo 'export FOO=\"bar\"'", None);
         assert!(segs.iter().any(|(t, p)| *p == P::CodeSymbol && t == "'"));
-        assert!(segs.iter().any(|(t, p)| *p == P::CodeString && t.contains("export FOO=")));
+        assert!(
+            segs.iter()
+                .any(|(t, p)| *p == P::CodeString && t.contains("export FOO="))
+        );
 
         // Bare operators outside quotes are gold symbols.
         let segs = code_line_segments("a >> b | c", None);
-        assert!(segs.iter().any(|(t, p)| *p == P::CodeSymbol && t.contains('>')));
+        assert!(
+            segs.iter()
+                .any(|(t, p)| *p == P::CodeSymbol && t.contains('>'))
+        );
 
         // A width-truncated env cell with the '=' clipped off is a command
         // word (gold). The row renderer must tokenize the full cell first.
@@ -4463,7 +4667,10 @@ mod tests {
         assert!(
             !name_paints.is_empty(),
             "env var name missing from a clipped env cell: {:?}",
-            calls.iter().map(|(_, _, t, _)| t.clone()).collect::<Vec<_>>()
+            calls
+                .iter()
+                .map(|(_, _, t, _)| t.clone())
+                .collect::<Vec<_>>()
         );
         assert!(
             name_paints.iter().all(|p| p.fg != gold),
@@ -4513,9 +4720,16 @@ mod tests {
             ];
             let (ordered, seps) = picker.compute_view(&entries, "");
             // Added first, then Suggested, then the rest; alphabetical inside.
-        assert_eq!(
+            assert_eq!(
                 ordered.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
-                ["opencode", "ollama-cloud", "opencode-go", "openrouter", "anthropic", "zzz-last"]
+                [
+                    "opencode",
+                    "ollama-cloud",
+                    "opencode-go",
+                    "openrouter",
+                    "anthropic",
+                    "zzz-last"
+                ]
             );
             assert_eq!(
                 seps,
@@ -4556,7 +4770,10 @@ mod tests {
 
             // Enter on an Added row must NOT call add_provider_entry.
             let before = picker.doc["providers"].as_array().unwrap().len();
-            let keep = picker.on_enter(&mut FakeStdscr::new(20, 80), &("opencode".to_string(), "OpenCode".to_string()));
+            let keep = picker.on_enter(
+                &mut FakeStdscr::new(20, 80),
+                &("opencode".to_string(), "OpenCode".to_string()),
+            );
             assert!(keep, "Enter on an Added row keeps the modal open");
             assert_eq!(
                 picker.doc["providers"].as_array().unwrap().len(),
@@ -4614,7 +4831,10 @@ mod tests {
         // after two PgDn presses the drawn window starts past the heading;
         // PgUp walks back. The provider row above never moves.
         let mut preview: Vec<PreviewLine> = vec![PreviewLine::Heading("Enabled Models".into())];
-        preview.push(PreviewLine::Segs(vec![("Model Descriptions [enabled]".into(), P::Text)]));
+        preview.push(PreviewLine::Segs(vec![(
+            "Model Descriptions [enabled]".into(),
+            P::Text,
+        )]));
         for i in 0..40 {
             preview.push(PreviewLine::Segs(vec![(format!("model-{i}"), P::Value)]));
         }
@@ -4624,14 +4844,44 @@ mod tests {
         // Baseline frame (scroll 0).
         let mut f0 = FakeStdscr::new(h, 80);
         f0.script(Key::Char('q'));
-        let _ = select_win(&mut f0, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None, None);
+        let _ = select_win(
+            &mut f0,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
+        );
 
         // Two PageDowns, then quit.
         let mut f1 = FakeStdscr::new(h, 80);
         f1.script(Key::PageDown);
         f1.script(Key::PageDown);
         f1.script(Key::Char('q'));
-        let _ = select_win(&mut f1, &options, "Select Provider", false, &[], false, None, None, None, Some(&preview), 0, None, None, None);
+        let _ = select_win(
+            &mut f1,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
+        );
 
         let base_rows: Vec<i32> = f0
             .recorded()
@@ -4663,7 +4913,10 @@ mod tests {
             .into_iter()
             .find(|(_, _, t, _)| t == "one")
             .map(|(y, _, _, _)| y);
-        assert_eq!(base_prov_y, scroll_prov_y, "provider row moved while paging");
+        assert_eq!(
+            base_prov_y, scroll_prov_y,
+            "provider row moved while paging"
+        );
     }
 
     #[test]
@@ -4687,8 +4940,20 @@ mod tests {
         f_paged.script(Key::PageDown);
         f_paged.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_paged, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_paged,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
 
         let mut f_up = FakeStdscr::new(h, 80);
@@ -4697,8 +4962,20 @@ mod tests {
         f_up.script(Key::Up);
         f_up.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_up, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_up,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
 
         fn last_frame_models(f: &FakeStdscr) -> Vec<String> {
@@ -4782,8 +5059,20 @@ mod tests {
         f_base.script(Key::Down);
         f_base.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_base, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_base,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         let initial = last_frame_model_names(&f_base);
         assert!(!initial.is_empty(), "no models drawn at scroll 0");
@@ -4796,8 +5085,20 @@ mod tests {
         }
         f_down.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_down, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_down,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         let after = last_frame_model_names(&f_down);
         let selected = last_frame_selected_models(&f_down);
@@ -4828,8 +5129,20 @@ mod tests {
         f_paged.script(Key::PageDown);
         f_paged.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_paged, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_paged,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         assert!(
             !last_frame_has_enabled_heading(&f_paged),
@@ -4850,15 +5163,29 @@ mod tests {
         }
         f_first.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_first, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_first,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         assert!(
             last_frame_has_enabled_heading(&f_first),
             "Up to the first enabled model must bring the heading back"
         );
         assert_eq!(
-            last_frame_selected_models(&f_first).first().map(String::as_str),
+            last_frame_selected_models(&f_first)
+                .first()
+                .map(String::as_str),
             Some("model-0"),
             "first enabled model should be highlighted"
         );
@@ -4871,8 +5198,20 @@ mod tests {
         }
         f_menu.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_menu, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_menu,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         assert!(
             last_frame_has_enabled_heading(&f_menu),
@@ -4898,12 +5237,27 @@ mod tests {
         }
         f_before.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_before, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_before,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         let before_models = last_frame_model_names(&f_before);
         let before_selected = last_frame_selected_models(&f_before);
-        assert!(!before_selected.is_empty(), "expected a highlighted model before Enter");
+        assert!(
+            !before_selected.is_empty(),
+            "expected a highlighted model before Enter"
+        );
 
         let mut f_enter = FakeStdscr::new(h, 80);
         f_enter.script(Key::Down);
@@ -4912,8 +5266,20 @@ mod tests {
         }
         f_enter.script(Key::Enter);
         let picked = select_win(
-            &mut f_enter, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None, None, None,
+            &mut f_enter,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            None,
+            None,
         );
         let (pid, mid, scroll) = match picked {
             Some(SelectOutcome::ModelPicked { pid, mid, scroll }) => (pid, mid, scroll),
@@ -4924,9 +5290,20 @@ mod tests {
         let mut f_after = FakeStdscr::new(h, 80);
         f_after.script(Key::Char('q'));
         let _ = select_win(
-            &mut f_after, &options, "Select Provider", false, &[], false,
-            None, None, None, Some(&preview), 0, None,
-            Some((pid.as_str(), mid.as_str(), scroll)), None,
+            &mut f_after,
+            &options,
+            "Select Provider",
+            false,
+            &[],
+            false,
+            None,
+            None,
+            None,
+            Some(&preview),
+            0,
+            None,
+            Some((pid.as_str(), mid.as_str(), scroll)),
+            None,
         );
         assert_eq!(
             last_frame_model_names(&f_after),
@@ -4961,7 +5338,10 @@ mod tests {
             }
         }]});
         let cat = build_add_model_catalog(&api, &doc);
-        let mut keys: Vec<(String, String)> = cat.iter().map(|(p, m, _, _)| (p.clone(), m.clone())).collect();
+        let mut keys: Vec<(String, String)> = cat
+            .iter()
+            .map(|(p, m, _, _)| (p.clone(), m.clone()))
+            .collect();
         keys.sort();
         assert_eq!(
             keys,
@@ -5005,7 +5385,10 @@ mod tests {
         };
         let (ordered, seps) = picker.compute_view(&catalog, "");
         assert_eq!(
-            ordered.iter().map(|(p, m, _, _)| (p.as_str(), m.as_str())).collect::<Vec<_>>(),
+            ordered
+                .iter()
+                .map(|(p, m, _, _)| (p.as_str(), m.as_str()))
+                .collect::<Vec<_>>(),
             vec![
                 ("zeta", "alpha"),
                 ("zeta", "zeta-free"),
@@ -5020,7 +5403,9 @@ mod tests {
         assert_eq!(enabled_row[3], (format!("{:<9}", "(Zeta AI)"), P::Text));
         assert_eq!(enabled_row[5], (format!("{:<10}", "[enabled]"), P::Enabled));
         assert!(
-            enabled_row.iter().all(|(t, _)| !t.contains("zeta/") && !t.contains("/alpha")),
+            enabled_row
+                .iter()
+                .all(|(t, _)| !t.contains("zeta/") && !t.contains("/alpha")),
             "enabled row still shows model/provider id"
         );
 
@@ -5114,11 +5499,13 @@ mod tests {
         // The preview builder produces the heading and enabled-model rows;
         // env cells live on the provider list, not in this pane.
         let preview = build_config_models_preview(&doc, EnabledSort::Model);
-        assert!(preview.iter().any(|l| match l {
-            PreviewLine::HeadingCols(parts) => parts
-                .iter()
-                .any(|(t, _)| t.starts_with("Enabled Models: 1")),
-            _ => false,
+        assert!(preview.iter().any(|l| {
+            match l {
+                PreviewLine::HeadingCols(parts) => parts
+                    .iter()
+                    .any(|(t, _)| t.starts_with("Enabled Models: 1")),
+                _ => false,
+            }
         }));
         assert!(
             !preview.iter().any(|l| matches!(
@@ -5127,16 +5514,19 @@ mod tests {
             )),
             "preview must not carry a trailing Summary line"
         );
-        let has_enabled_row = preview.iter().any(|l| matches!(
-            l,
-            PreviewLine::Model { segs, .. } if segs
-                .iter()
-                .any(|(t, p)| t == "● " && *p == P::Enabled)
-        ));
+        let has_enabled_row = preview.iter().any(|l| {
+            matches!(
+                l,
+                PreviewLine::Model { segs, .. } if segs
+                    .iter()
+                    .any(|(t, p)| t == "● " && *p == P::Enabled)
+            )
+        });
         assert!(has_enabled_row, "preview missing enabled-model row");
 
         // Drive the selector with padded provider rows + env suffix.
-        let options = crate::core::provider_menu_labels(&[doc["providers"][0].as_object().unwrap().clone()]);
+        let options =
+            crate::core::provider_menu_labels(&[doc["providers"][0].as_object().unwrap().clone()]);
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Char('q'));
         let _ = select_win(
@@ -5157,11 +5547,15 @@ mod tests {
         );
         let calls = f.recorded();
         assert!(
-            calls.iter().any(|(_, _, t, _)| t.contains("Enabled Models")),
+            calls
+                .iter()
+                .any(|(_, _, t, _)| t.contains("Enabled Models")),
             "preview heading not drawn"
         );
         assert!(
-            calls.iter().any(|(_, _, t, _)| t.contains("OPENCODE_API_KEY")),
+            calls
+                .iter()
+                .any(|(_, _, t, _)| t.contains("OPENCODE_API_KEY")),
             "provider-row env cell not drawn"
         );
         // 'Q' drawn inline with the legend items (row h-2), not right corner.
@@ -5338,7 +5732,8 @@ mod tests {
         });
         let by_model = preview_model_names(&build_config_models_preview(&doc, EnabledSort::Model));
         assert_eq!(by_model, ["Alpha", "Zulu"]);
-        let by_prov = preview_model_names(&build_config_models_preview(&doc, EnabledSort::Provider));
+        let by_prov =
+            preview_model_names(&build_config_models_preview(&doc, EnabledSort::Provider));
         assert_eq!(by_prov, ["Zulu", "Alpha"]);
     }
 
@@ -5377,11 +5772,7 @@ mod tests {
         let header = preview.iter().find_map(|l| match l {
             PreviewLine::HeadingCols(parts) => {
                 let t: String = parts.iter().map(|(s, _)| s.as_str()).collect();
-                if t.contains("Intel") {
-                    Some(t)
-                } else {
-                    None
-                }
+                if t.contains("Intel") { Some(t) } else { None }
             }
             _ => None,
         });
@@ -5413,7 +5804,11 @@ mod tests {
     #[test]
     fn configure_models_renders_name_provider_id_without_free_tag() {
         use serde_json::json;
-        let ids = vec!["pro".to_string(), "hy3-free".to_string(), "omega".to_string()];
+        let ids = vec![
+            "pro".to_string(),
+            "hy3-free".to_string(),
+            "omega".to_string(),
+        ];
         let mut models = json!({
             "pro": { "name": "Pro", "enabled": true },
             "hy3-free": { "name": "HY3 Free", "enabled": false },
@@ -5443,7 +5838,10 @@ mod tests {
         let nw = picker.name_w;
         let enabled_row = picker.render(&"pro".to_string(), false);
         assert_eq!(enabled_row[1], (format!("{:<nw$}", "Pro"), P::Enabled));
-        assert_eq!(enabled_row[7], (format!("{:<13}", "(OpenCode Go)"), P::Text));
+        assert_eq!(
+            enabled_row[7],
+            (format!("{:<13}", "(OpenCode Go)"), P::Text)
+        );
         assert_eq!(enabled_row[9], (format!("{:<10}", "[enabled]"), P::Enabled));
         assert!(
             enabled_row
@@ -5460,10 +5858,7 @@ mod tests {
         assert_eq!(free_row[1], (format!("{:<nw$}", "HY3 Free"), P::Free));
         assert_eq!(free_row[7], (format!("{:<13}", "(OpenCode Go)"), P::Text));
         assert_eq!(free_row[9], (format!("{:<10}", "[disabled]"), P::Error));
-        assert!(
-            is_blue(tn_color(free_row[1].1)),
-            "free model name not blue"
-        );
+        assert!(is_blue(tn_color(free_row[1].1)), "free model name not blue");
         assert!(
             free_row.iter().all(|(t, _)| !t.contains("[free]")),
             "[free] suffix still present"
@@ -5605,9 +6000,9 @@ mod tests {
             .map(|(_, _, t, _)| t.clone())
             .collect();
         assert!(
-            headers
-                .iter()
-                .any(|t| t.contains("Search:") && !t.contains("Search: S") && !t.contains("Search: s")),
+            headers.iter().any(|t| t.contains("Search:")
+                && !t.contains("Search: S")
+                && !t.contains("Search: s")),
             "Shift+S should not type into the filter: {headers:?}"
         );
     }
@@ -5625,7 +6020,12 @@ mod tests {
 
     impl CaptureStdscr {
         fn new(h: i32, w: i32) -> Self {
-            CaptureStdscr { h, w, buf: Vec::new(), keys: Default::default() }
+            CaptureStdscr {
+                h,
+                w,
+                buf: Vec::new(),
+                keys: Default::default(),
+            }
         }
         fn script(&mut self, k: Key) {
             self.keys.push_back(k);
@@ -5697,13 +6097,15 @@ mod tests {
     }
 
     fn row_text(grid: &[Vec<char>], r: usize) -> String {
-        grid.get(r).map(|row| row.iter().collect()).unwrap_or_default()
+        grid.get(r)
+            .map(|row| row.iter().collect())
+            .unwrap_or_default()
     }
 
     #[test]
     fn config_flow_renders_fullscreen_layout() {
         let _homes = crate::env::test_support::TestHomes::setup();
-use serde_json::json;
+        use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -5754,13 +6156,17 @@ use serde_json::json;
         );
         // Every visible content row is distinct — nothing was wrapped onto a
         // single line. Sanity: row 0 and row 2 differ.
-        assert_ne!(row_text(&grid, 0), row_text(&grid, 2), "rows collapsed/identical");
+        assert_ne!(
+            row_text(&grid, 0),
+            row_text(&grid, 2),
+            "rows collapsed/identical"
+        );
     }
 
     #[test]
     fn config_flow_action_menu_enable_toggles_display() {
         let _homes = crate::env::test_support::TestHomes::setup();
-use serde_json::json;
+        use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -5804,7 +6210,7 @@ use serde_json::json;
     #[test]
     fn config_flow_restores_terminal_on_exit() {
         let _homes = crate::env::test_support::TestHomes::setup();
-use serde_json::json;
+        use serde_json::json;
 
         let mut doc = json!({
             "providers": [{
@@ -5828,12 +6234,17 @@ use serde_json::json;
         leave_alt_screen(&mut cap.buf);
 
         let s = String::from_utf8_lossy(&cap.buf);
-        assert!(s.contains("\x1b[?1049h"), "TUI did not enter alternate screen");
+        assert!(
+            s.contains("\x1b[?1049h"),
+            "TUI did not enter alternate screen"
+        );
         assert!(s.contains("\x1b[?25l"), "TUI did not hide cursor on entry");
         assert!(s.contains("\x1b[?25h"), "TUI did not show cursor on exit");
         // The restore sequence must be the LAST thing emitted, so closing the
         // TUI returns the terminal to its prior state (no blue bg / history).
-        let leave_pos = s.rfind("\x1b[?1049l").expect("TUI did not restore terminal on exit");
+        let leave_pos = s
+            .rfind("\x1b[?1049l")
+            .expect("TUI did not restore terminal on exit");
         assert!(
             leave_pos + "\x1b[?1049l".len() >= s.len() - 8,
             "terminal restore not emitted last"
@@ -5851,7 +6262,10 @@ use serde_json::json;
         // (mouse tracking + cursor + alt screen). Unix-only: Windows restore
         // uses crossterm, not this sequence.
         #[cfg(unix)]
-        assert_eq!(RESTORE_SEQ, b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m");
+        assert_eq!(
+            RESTORE_SEQ,
+            b"\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[0m"
+        );
         let mut buf: Vec<u8> = Vec::new();
         enter_alt_screen(&mut buf);
         hide_cursor(&mut buf);
@@ -5884,22 +6298,46 @@ use serde_json::json;
         // PageUp/PageDown arrive as CSI 5~/6~.
         assert_eq!(parse_key_prefix(b"\x1b[5~"), Some((Key::PageUp, 4)));
         assert_eq!(parse_key_prefix(b"\x1b[6~"), Some((Key::PageDown, 4)));
-        assert_eq!(parse_key_prefix(b"\x1b[5"), None, "partial PageUp must wait for its tail");
+        assert_eq!(
+            parse_key_prefix(b"\x1b[5"),
+            None,
+            "partial PageUp must wait for its tail"
+        );
         // SGR mouse wheel: ESC [ < 64/65 ; x ; y M. y is 1-based in the
         // sequence and 0-based on Key::Wheel*.
-        assert_eq!(parse_key_prefix(b"\x1b[<64;1;5M"), Some((Key::WheelUp(4), 10)));
-        assert_eq!(parse_key_prefix(b"\x1b[<65;10;12M"), Some((Key::WheelDown(11), 12)));
-        assert_eq!(parse_key_prefix(b"\x1b[<64;1;5"), None, "partial SGR mouse must wait for its tail");
+        assert_eq!(
+            parse_key_prefix(b"\x1b[<64;1;5M"),
+            Some((Key::WheelUp(4), 10))
+        );
+        assert_eq!(
+            parse_key_prefix(b"\x1b[<65;10;12M"),
+            Some((Key::WheelDown(11), 12))
+        );
+        assert_eq!(
+            parse_key_prefix(b"\x1b[<64;1;5"),
+            None,
+            "partial SGR mouse must wait for its tail"
+        );
         // Release (`m`) does not scroll; modifier/motion bits still count as wheel.
         assert_eq!(parse_key_prefix(b"\x1b[<64;1;5m"), Some((Key::Eof, 10)));
-        assert_eq!(parse_key_prefix(b"\x1b[<96;1;5M"), Some((Key::WheelUp(4), 10)));
-        assert_eq!(parse_key_prefix(b"\x1b[<97;1;8M"), Some((Key::WheelDown(7), 10)));
+        assert_eq!(
+            parse_key_prefix(b"\x1b[<96;1;5M"),
+            Some((Key::WheelUp(4), 10))
+        );
+        assert_eq!(
+            parse_key_prefix(b"\x1b[<97;1;8M"),
+            Some((Key::WheelDown(7), 10))
+        );
         // X10 mouse: ESC [ M Cb Cx Cy with wheel-up button 64 (+32 => 96).
         assert_eq!(
             parse_key_prefix(&[0x1b, b'[', b'M', 64 + 32, 1 + 32, 5 + 32]),
             Some((Key::WheelUp(4), 6))
         );
-        assert_eq!(parse_key_prefix(b"\x1b[M"), None, "partial X10 mouse must wait");
+        assert_eq!(
+            parse_key_prefix(b"\x1b[M"),
+            None,
+            "partial X10 mouse must wait"
+        );
     }
 
     #[test]
@@ -5970,7 +6408,7 @@ use serde_json::json;
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Enter); // open action menu (Back-on-left submenu)
         f.script(Key::Char('d'));
-        f.script(Key::Esc);   // leave the action menu
+        f.script(Key::Esc); // leave the action menu
         f.script(Key::Char('q')); // quit the main menu
         let out = run_config_flow_with_backend(&mut f, &mut doc);
         assert!(out.is_ok());
@@ -6007,7 +6445,9 @@ use serde_json::json;
         assert!(
             !grid_contains(&grid, "Delete Provider"),
             "confirm/action leftover on main menu after delete: {:?}",
-            (0..h as usize).map(|r| row_text(&grid, r)).collect::<Vec<_>>()
+            (0..h as usize)
+                .map(|r| row_text(&grid, r))
+                .collect::<Vec<_>>()
         );
         let bottom = row_text(&grid, (h - 2) as usize);
         assert!(
@@ -6057,7 +6497,10 @@ use serde_json::json;
         let res = run_config_flow_with_backend(&mut f, &mut doc);
         assert!(res.is_ok(), "reasoning flow errored: {:?}", res.err());
         let m = &doc["providers"][0]["models"]["alpha-1"];
-        assert_eq!(m.get("reasoning_effort").and_then(Value::as_str), Some("high"));
+        assert_eq!(
+            m.get("reasoning_effort").and_then(Value::as_str),
+            Some("high")
+        );
         let efforts = m["reasoning_efforts"].as_array().unwrap();
         assert_eq!(efforts[0]["default"], Value::Bool(false));
         assert_eq!(efforts[1]["default"], Value::Bool(true));
@@ -6144,7 +6587,15 @@ use serde_json::json;
             bg_color(P::Selected),
             "current enabled-model row must be highlighted"
         );
-        for needle in ["Add Model", "Add Provider", "Codex Config", "Model Descriptions", "Web Search", "Sync Model Config", "Update Model List"] {
+        for needle in [
+            "Add Model",
+            "Add Provider",
+            "Codex Config",
+            "Model Descriptions",
+            "Web Search",
+            "Sync Model Config",
+            "Update Model List",
+        ] {
             let row = last_matching(needle);
             assert_ne!(
                 row.3.bg,
@@ -6252,7 +6703,8 @@ use serde_json::json;
             doc["web_search"],
             "opencode-muse-spark-1_3-contributor-free"
         );
-        let toml = std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
+        let toml =
+            std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
         assert!(
             toml.contains("web_search = \"opencode-muse-spark-1_3-contributor-free\""),
             "toml must emit web_search: {toml}"
@@ -6267,9 +6719,14 @@ use serde_json::json;
         f2.script(Key::Enter);
         f2.script(Key::Char('q'));
         let res = run_config_flow_with_backend(&mut f2, &mut doc);
-        assert!(res.is_ok(), "web_search disable picker errored: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "web_search disable picker errored: {:?}",
+            res.err()
+        );
         assert_eq!(doc["web_search"], "");
-        let toml = std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
+        let toml =
+            std::fs::read_to_string(crate::env::paths::config_toml_path()).unwrap_or_default();
         assert!(
             !toml.contains("web_search"),
             "empty web_search must not be written: {toml}"
@@ -6279,5 +6736,6 @@ use serde_json::json;
 
 #[cfg(test)]
 fn grid_contains(grid: &[Vec<char>], needle: &str) -> bool {
-    grid.iter().any(|row| row.iter().collect::<String>().contains(needle))
+    grid.iter()
+        .any(|row| row.iter().collect::<String>().contains(needle))
 }

@@ -27,7 +27,11 @@ pub const ACCENT: [(u8, u8, u8); 3] = [
 pub const RED: (u8, u8, u8) = (247, 118, 142); // #f7768e
 
 /// Tokyo Night yellow — active sort-column label on the blue header bar.
-pub const YELLOW: Rgb = Rgb { r: 224, g: 175, b: 104 }; // #e0af68
+pub const YELLOW: Rgb = Rgb {
+    r: 224,
+    g: 175,
+    b: 104,
+}; // #e0af68
 
 /// Curses pair ids preserved from the Python `P` enum (1..=10, plus `Error`).
 #[allow(non_camel_case_types)]
@@ -60,9 +64,21 @@ pub enum P {
 /// color is truecolor because ANSI yellow reads olive/brown.
 pub const CODE_BG: Rgb = Rgb { r: 0, g: 0, b: 0 };
 pub const CODE_TEXT: Rgb = Rgb { r: 0, g: 255, b: 0 };
-pub const CODE_COMMENT: Rgb = Rgb { r: 0, g: 255, b: 255 };
-pub const CODE_STRING: Rgb = Rgb { r: 255, g: 255, b: 255 };
-pub const CODE_SYMBOL_GOLD: Rgb = Rgb { r: 255, g: 204, b: 0 };
+pub const CODE_COMMENT: Rgb = Rgb {
+    r: 0,
+    g: 255,
+    b: 255,
+};
+pub const CODE_STRING: Rgb = Rgb {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+pub const CODE_SYMBOL_GOLD: Rgb = Rgb {
+    r: 255,
+    g: 204,
+    b: 0,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb {
@@ -73,12 +89,20 @@ pub struct Rgb {
 
 pub fn tn(palette: usize) -> Rgb {
     let c = TN[palette.min(TN.len() - 1)];
-    Rgb { r: c.0, g: c.1, b: c.2 }
+    Rgb {
+        r: c.0,
+        g: c.1,
+        b: c.2,
+    }
 }
 
 pub fn accent(i: usize) -> Rgb {
     let c = ACCENT[i.min(ACCENT.len() - 1)];
-    Rgb { r: c.0, g: c.1, b: c.2 }
+    Rgb {
+        r: c.0,
+        g: c.1,
+        b: c.2,
+    }
 }
 
 /// Compute the SGR bg to emit (compensated for translucent macOS Terminal
@@ -120,10 +144,12 @@ fn compute_compensated(target: Rgb, fallback: Rgb) -> Rgb {
         }
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
-    let profile = match run(r#"tell application "Terminal" to get name of current settings of front window"#) {
-        Some(p) => p,
-        None => return fallback,
-    };
+    let profile =
+        match run(r#"tell application "Terminal" to get name of current settings of front window"#)
+        {
+            Some(p) => p,
+            None => return fallback,
+        };
     let bg_script = format!(
         r#"tell application "Terminal" to get background color of settings set "{}""#,
         profile

@@ -1,7 +1,7 @@
 //! TUI main-menu orchestration: TUI on a TTY, numbered fallback otherwise.
 
-use crate::{core, env::paths, fallback, jsonio, sync, tui};
 use crate::Res;
+use crate::{core, env::paths, fallback, jsonio, sync, tui};
 
 pub fn cmd_config() -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
@@ -16,9 +16,8 @@ pub fn cmd_config() -> Res<i32> {
         return Ok(0);
     }
     let changed = if tty {
-        let tui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_tui_safely(&mut doc)
-        }));
+        let tui_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_tui_safely(&mut doc)));
         match tui_result {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => {

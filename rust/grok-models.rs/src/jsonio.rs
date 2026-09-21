@@ -4,7 +4,7 @@
 //! input file / models.dev payload exactly.
 
 use crate::env::paths;
-use crate::{fail, Res};
+use crate::{Res, fail};
 use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
