@@ -1,7 +1,7 @@
-//! Ordered JSON load/dump + atomic writes, mirroring the Python helpers.
+//! Ordered JSON load/dump + atomic writes.
 //!
 //! serde_json is built with `preserve_order` so object key order matches the
-//! input file / models.dev payload exactly, like Python dicts.
+//! input file / models.dev payload exactly.
 
 use crate::env::paths;
 use crate::{fail, Res};
@@ -16,20 +16,25 @@ pub fn atomic_write(path: &Path, text: &str) -> Res<()> {
             std::fs::create_dir_all(parent).map_err(io_err)?;
         }
     }
-    // Python: tmp = path.with_name(path.name + ".tmp"). The counter keeps
-    // concurrent writes in one process from sharing (and racing on) a tmp
-    // name; Python needs no equivalent because of the GIL.
+    // Unique temp name per process plus a counter for writes within one process.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_file_name(format!(
-        "{}.{}.tmp",
-        path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default(),
+        "{}.{}-{}.tmp",
+        path.file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default(),
+        std::process::id(),
         seq,
     ));
-    std::fs::File::create(&tmp)
-        .and_then(|mut f| f.write_all(text.as_bytes()))
-        .map_err(io_err)?;
-    std::fs::rename(&tmp, path).map_err(io_err)?;
+    if let Err(e) = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(text.as_bytes())) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(e).into());
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err(e).into());
+    }
     Ok(())
 }
 
@@ -41,16 +46,16 @@ impl From<SyncErrIo> for crate::Error {
     }
 }
 
-/// Serialize with Python's `json.dumps(obj, indent=2, ensure_ascii=False)`
-/// formatting plus trailing newline.
-pub fn dumps_pretty(v: &Value) -> String {
-    let mut out = serde_json::to_string_pretty(v).expect("serializable JSON");
+/// Serialize with two-space pretty JSON, unescaped UTF-8, plus trailing newline.
+pub fn dumps_pretty(v: &Value) -> Res<String> {
+    let mut out = serde_json::to_string_pretty(v)
+        .map_err(|e| crate::Error::new(format!("failed to serialize JSON: {}", e)))?;
     out.push('\n');
-    out
+    Ok(out)
 }
 
 pub fn dump_json(path: &Path, v: &Value) -> Res<()> {
-    atomic_write(path, &dumps_pretty(v))
+    atomic_write(path, &dumps_pretty(v)?)
 }
 
 pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
@@ -58,9 +63,8 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
         dump_json(path, default)?;
         return Ok(default.clone());
     }
-    let text = std::fs::read_to_string(path).map_err(|e| crate::Error::new(format!(
-        "invalid JSON in {}: {}", path.display(), e
-    )))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::Error::new(format!("invalid JSON in {}: {}", path.display(), e)))?;
     match serde_json::from_str::<Value>(&text) {
         Ok(v) => {
             if !v.is_object() {
@@ -79,17 +83,16 @@ pub fn load_json(path: &Path, default: &Value) -> Res<Value> {
 // alphabetically by display name, models alphabetically by display name.
 // ---------------------------------------------------------------------------
 
-pub const TOP_LEVEL_KEY_ORDER: [&str; 8] =
-    [
-        "include_descriptions",
-        "write_codex_config_toml",
-        "codex_model_provider",
-        "web_search",
-        "last_updated",
-        "last_synced",
-        "providers",
-        "removed_providers",
-    ];
+pub const TOP_LEVEL_KEY_ORDER: [&str; 8] = [
+    "include_descriptions",
+    "write_codex_config_toml",
+    "codex_model_provider",
+    "web_search",
+    "last_updated",
+    "last_synced",
+    "providers",
+    "removed_providers",
+];
 pub const PROVIDER_KEY_ORDER: [&str; 11] = [
     "id",
     "env_key",
@@ -126,6 +129,11 @@ pub const CODEX_MODEL_PROVIDER_DEFAULT: &str = "";
 /// Default for web_search when providers.json does not carry it.
 pub const WEB_SEARCH_DEFAULT: &str = "";
 
+/// Shared non-empty string getter for catalog fields.
+fn non_empty_str(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
 /// models.dev `description` for one model entry, or None when absent/empty.
 pub fn catalog_description(minfo: &Value) -> Option<&str> {
     minfo.as_object().and_then(catalog_description_map)
@@ -133,10 +141,7 @@ pub fn catalog_description(minfo: &Value) -> Option<&str> {
 
 /// models.dev `description` for a model entry map, or None when absent/empty.
 pub fn catalog_description_map(minfo: &serde_json::Map<String, Value>) -> Option<&str> {
-    minfo
-        .get("description")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+    non_empty_str(minfo.get("description"))
 }
 
 /// models.dev `modalities` object, or None when absent/not an object.
@@ -149,12 +154,12 @@ pub fn catalog_modalities(minfo: &Value) -> Option<Value> {
 
 /// models.dev `npm` package string, or None when absent/empty.
 pub fn catalog_npm(v: &Value) -> Option<&str> {
-    v.get("npm").and_then(Value::as_str).filter(|s| !s.is_empty())
+    non_empty_str(v.get("npm"))
 }
 
 /// models.dev `doc` URL string, or None when absent/empty.
 pub fn catalog_doc(v: &Value) -> Option<&str> {
-    v.get("doc").and_then(Value::as_str).filter(|s| !s.is_empty())
+    non_empty_str(v.get("doc"))
 }
 
 /// Insert the catalog description into a model entry map (seed path).
@@ -193,7 +198,11 @@ pub fn provider_sort_key(provider: &Value) -> String {
     let key = match provider.as_object() {
         Some(o) => {
             let name = str_field(o, "name");
-            if name.is_empty() { str_field(o, "id") } else { name }
+            if name.is_empty() {
+                str_field(o, "id")
+            } else {
+                name
+            }
         }
         None => "",
     };
@@ -307,7 +316,11 @@ pub fn enabled_web_search_models(doc: &Value) -> Vec<(String, String)> {
         if !p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
             continue;
         }
-        let Some(pid) = p.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        let Some(pid) = p
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
             continue;
         };
         let Some(models) = p.get("models").and_then(Value::as_object) else {
@@ -435,17 +448,18 @@ pub fn reset_web_search_if_invalid(doc: &mut Value) -> bool {
 pub fn dump_providers(path: &Path, doc: &mut Value) -> Res<()> {
     reset_codex_if_invalid(doc);
     reset_web_search_if_invalid(doc);
-    let empty = serde_json::Map::new();
-    let obj = doc.as_object().unwrap_or(&empty);
-    let mut ordered = Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER));
+    let mut ordered = match doc.as_object() {
+        Some(obj) => Value::Object(order_keys(obj, &TOP_LEVEL_KEY_ORDER)),
+        None => Value::Object(order_keys(&serde_json::Map::new(), &TOP_LEVEL_KEY_ORDER)),
+    };
     canonicalize_providers(&mut ordered);
     dump_json(path, &ordered)?;
     *doc = ordered;
     Ok(())
 }
 
-/// `load_providers()`: providers.json with the same validation and default
-/// creation as the Python tool. Order is file order; sorting happens on write.
+/// `load_providers()`: providers.json with validation and default creation.
+/// Order is file order; sorting happens on write.
 pub fn load_providers() -> Res<Value> {
     load_providers_from(&paths::providers_path())
 }
@@ -472,10 +486,10 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn dump_format_matches_python() {
+    fn dump_format_matches_pretty_json() {
         let v = serde_json::json!({"b": true, "list": [1, 2], "s": "x\"y", "empty": {}, "e": []});
         assert_eq!(
-            dumps_pretty(&v),
+            dumps_pretty(&v).expect("serializable"),
             "{\n  \"b\": true,\n  \"list\": [\n    1,\n    2\n  ],\n  \"s\": \"x\\\"y\",\n  \"empty\": {},\n  \"e\": []\n}\n"
         );
     }
@@ -503,7 +517,12 @@ mod tests {
         let mids: Vec<String> = models.keys().cloned().collect();
         assert_eq!(mids, ["alpha", "zeta"]);
         // Per-model canonical field order too.
-        let alpha: Vec<String> = models["alpha"].as_object().unwrap().keys().cloned().collect();
+        let alpha: Vec<String> = models["alpha"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         assert_eq!(alpha, ["enabled", "name"]);
     }
 
@@ -537,7 +556,15 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["enabled", "name", "description", "modalities", "npm", "api_backend", "context_window"]
+            [
+                "enabled",
+                "name",
+                "description",
+                "modalities",
+                "npm",
+                "api_backend",
+                "context_window"
+            ]
         );
     }
 
@@ -564,7 +591,8 @@ mod tests {
                  "models": {"m1": {"enabled": true}}}
             ]
         });
-        let path = std::env::temp_dir().join(format!("gm-dumpproviders-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-dumpproviders-{}.json", std::process::id()));
         dump_providers(&path, &mut doc).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -576,7 +604,11 @@ mod tests {
             .iter()
             .map(|p| p["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["a", "b"], "dump must write sorted order back into doc");
+        assert_eq!(
+            ids,
+            ["a", "b"],
+            "dump must write sorted order back into doc"
+        );
     }
 
     #[test]
@@ -604,11 +636,17 @@ mod tests {
             "include_descriptions": true,
             "providers": []
         });
-        let path = std::env::temp_dir().join(format!("gm-dump-lastupd-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-dump-lastupd-{}.json", std::process::id()));
         dump_providers(&path, &mut with_stamp).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        let keys: Vec<&str> = with_stamp.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let keys: Vec<&str> = with_stamp
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         assert_eq!(
             keys,
             [
@@ -627,10 +665,16 @@ mod tests {
             "write_codex_config_toml": true,
             "include_descriptions": false,
         });
-        let path = std::env::temp_dir().join(format!("gm-dump-codexflag-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-dump-codexflag-{}.json", std::process::id()));
         dump_providers(&path, &mut with_codex).expect("dump");
         let _ = std::fs::remove_file(&path);
-        let keys: Vec<&str> = with_codex.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let keys: Vec<&str> = with_codex
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         assert_eq!(
             keys,
             [
@@ -643,7 +687,8 @@ mod tests {
         assert!(with_codex.get("codex_model_provider").is_none());
 
         let mut without = serde_json::json!({ "providers": [] });
-        let path = std::env::temp_dir().join(format!("gm-dump-nolastupd-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-dump-nolastupd-{}.json", std::process::id()));
         dump_providers(&path, &mut without).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -693,7 +738,8 @@ mod tests {
         let mut doc = sample_providers();
         set_codex_selection(&mut doc, Some("openrouter"));
         doc["providers"][0]["enabled"] = Value::Bool(false);
-        let path = std::env::temp_dir().join(format!("gm-codex-reset-dis-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-codex-reset-dis-{}.json", std::process::id()));
         dump_providers(&path, &mut doc).expect("dump");
         let _ = std::fs::remove_file(&path);
         assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
@@ -705,7 +751,8 @@ mod tests {
         let mut doc = sample_providers();
         set_codex_selection(&mut doc, Some("openrouter"));
         doc["providers"].as_array_mut().unwrap().remove(0);
-        let path = std::env::temp_dir().join(format!("gm-codex-reset-del-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-codex-reset-del-{}.json", std::process::id()));
         dump_providers(&path, &mut doc).expect("dump");
         let _ = std::fs::remove_file(&path);
         assert_eq!(doc["write_codex_config_toml"], Value::Bool(false));
@@ -727,7 +774,8 @@ mod tests {
     #[test]
     fn dump_does_not_invent_codex_keys() {
         let mut doc = serde_json::json!({ "providers": [] });
-        let path = std::env::temp_dir().join(format!("gm-codex-noinvent-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-codex-noinvent-{}.json", std::process::id()));
         dump_providers(&path, &mut doc).expect("dump");
         let out = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
@@ -772,7 +820,10 @@ mod tests {
         doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
         set_web_search(&mut doc, Some("openrouter-openrouter_free"));
         doc["providers"][0]["models"]["openrouter/free"]["enabled"] = Value::Bool(false);
-        let path = std::env::temp_dir().join(format!("gm-websearch-model-dis-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "gm-websearch-model-dis-{}.json",
+            std::process::id()
+        ));
         dump_providers(&path, &mut doc).expect("dump");
         let _ = std::fs::remove_file(&path);
         assert_eq!(doc["web_search"], "");
@@ -804,7 +855,8 @@ mod tests {
         let mut doc = sample_providers();
         doc["providers"][0]["models"]["openrouter/free"]["api_backend"] = "responses".into();
         set_web_search(&mut doc, Some("openrouter-openrouter_free"));
-        let path = std::env::temp_dir().join(format!("gm-websearch-keep-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("gm-websearch-keep-{}.json", std::process::id()));
         dump_providers(&path, &mut doc).expect("dump");
         let _ = std::fs::remove_file(&path);
         assert_eq!(doc["web_search"], "openrouter-openrouter_free");
