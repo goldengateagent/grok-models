@@ -137,8 +137,7 @@ pub fn sort_model_indices(
 }
 
 /// `efforts_from_models_dev`: reasoning_options type=effort rows.
-pub fn efforts_from_models_dev(minfo: &Value) -> Option<Vec<Map<String, Value>>> {
-    let options = minfo.get("reasoning_options").and_then(|v| v.as_array())?;
+pub fn efforts_from_models_dev(options: &[Value]) -> Option<Vec<Map<String, Value>>> {
     let values = options
         .iter()
         .filter_map(|opt| opt.as_object())
@@ -182,8 +181,8 @@ fn value_to_string(v: &Value) -> Option<String> {
 
 /// models.dev `limit.context` as an integer under Python `int(context)`
 /// semantics (bools excluded, floats truncated). None when absent/non-numeric.
-pub fn context_window_field(minfo: &Value) -> Option<Value> {
-    let limit = minfo.get("limit").and_then(Value::as_object)?;
+pub fn context_window_field(limit: Option<&Value>) -> Option<Value> {
+    let limit = limit.and_then(Value::as_object)?;
     let ctx = limit.get("context");
     let is_number = matches!(ctx, Some(Value::Number(_)));
     if !is_number {
@@ -206,7 +205,7 @@ pub fn context_window_field(minfo: &Value) -> Option<Value> {
 /// `include_descriptions` gates the trailing `description` field.
 pub fn build_fields(
     model_id: &str,
-    minfo: &Value,
+    minfo: &crate::sync::ModelsDevModel,
     base_url: &str,
     env_key: &str,
     provider_name: &str,
@@ -218,8 +217,8 @@ pub fn build_fields(
     fields.insert("base_url".into(), Value::String(base_url.to_string()));
     let name = match stored_name {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => match minfo.get("name") {
-            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        _ => match minfo.name.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
             _ => first_letter_cap(model_id),
         },
     };
@@ -233,12 +232,12 @@ pub fn build_fields(
         Value::String("chat_completions".into()),
     );
 
-    if let Some(ctx) = context_window_field(minfo) {
+    if let Some(ctx) = context_window_field(minfo.limit.as_ref()) {
         fields.insert("context_window".into(), ctx);
     }
 
-    if crate::json_utils::is_truthy(minfo.get("reasoning")) {
-        match efforts_from_models_dev(minfo) {
+    if crate::json_utils::is_truthy(minfo.reasoning.as_ref()) {
+        match efforts_from_models_dev(&minfo.reasoning_options) {
             Some(efforts) => {
                 let default_idx = efforts
                     .iter()
@@ -261,7 +260,7 @@ pub fn build_fields(
         }
     }
     if include_descriptions {
-        if let Some(desc) = crate::jsonio::catalog_description(minfo) {
+        if let Some(desc) = minfo.description.as_deref().filter(|s| !s.is_empty()) {
             fields.insert("description".into(), Value::String(desc.to_string()));
         }
     }

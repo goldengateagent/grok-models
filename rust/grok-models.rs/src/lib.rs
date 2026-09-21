@@ -14,6 +14,7 @@
 //!                config.toml writing
 //! - `cli`:       CLI surface — `cli::args` parser and help text,
 //!                `cli::commands` command implementations
+//! - `client`:    blocking JSON HTTP client
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
 //! - `tui`:       Ratatui/Crossterm screens
@@ -21,6 +22,7 @@
 
 pub mod benchmarks;
 pub mod cli;
+pub mod client;
 pub mod core;
 
 pub mod env;

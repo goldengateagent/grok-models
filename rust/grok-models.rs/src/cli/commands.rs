@@ -504,21 +504,13 @@ pub fn cmd_disable_all() -> Res<i32> {
 }
 
 /// Search models.dev providers by term; pick via numbered menu.
-pub fn search_providers(api: &Value, term: &str) -> Res<Option<String>> {
+pub fn search_providers(api: &crate::sync::ModelsDev, term: &str) -> Res<Option<String>> {
     let term_l = term.to_lowercase();
     let mut matches: Vec<(String, String)> = Vec::new();
-    if let Some(obj) = api.as_object() {
-        for (pid, provider_models_dev) in obj {
-            if !provider_models_dev.is_object() {
-                continue;
-            }
-            let name = provider_models_dev
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if pid.to_lowercase().contains(&term_l) || name.to_lowercase().contains(&term_l) {
-                matches.push((pid.clone(), name.to_string()));
-            }
+    for (pid, provider) in &api.providers {
+        let name = provider.name.as_deref().unwrap_or("");
+        if pid.to_lowercase().contains(&term_l) || name.to_lowercase().contains(&term_l) {
+            matches.push((pid.clone(), name.to_string()));
         }
     }
     if matches.is_empty() {

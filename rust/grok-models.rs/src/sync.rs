@@ -6,7 +6,7 @@ use crate::jsonio;
 use crate::toml_out;
 use crate::{Error, Res, fail};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 /// When true, add-provider and sync take model ids from GET {base_url}/models
@@ -17,6 +17,76 @@ pub const OLLAMA_CLOUD_PROVIDER_ID: &str = "ollama-cloud";
 pub const OLLAMA_CLOUD_LOCAL_BASE_URL: &str = "http://127.0.0.1:11434/v1/";
 /// Cloud catalog used after the regular /models update for ollama-cloud.
 pub const OLLAMA_CLOUD_MODELS_BASE_URL: &str = "https://ollama.com/v1";
+
+/// models.dev api.json: provider entries keyed by provider id.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ModelsDev {
+    #[serde(flatten)]
+    pub providers: HashMap<String, ModelsDevProvider>,
+}
+
+/// One models.dev provider entry.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ModelsDevProvider {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub api: String,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub doc: Option<String>,
+    #[serde(default)]
+    pub models: HashMap<String, ModelsDevModel>,
+}
+
+/// One models.dev model entry. Scalar fields are typed; `modalities`,
+/// `limit`, `reasoning`, and `reasoning_options` keep tolerant shapes
+/// because the code only probes them.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ModelsDevModel {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub provider: Option<ModelProviderRef>,
+    #[serde(default)]
+    pub modalities: Option<Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub limit: Option<Value>,
+    #[serde(default)]
+    pub reasoning: Option<Value>,
+    #[serde(default)]
+    pub reasoning_options: Vec<Value>,
+}
+
+/// Per-model provider override carrying an npm package.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ModelProviderRef {
+    #[serde(default)]
+    pub npm: Option<String>,
+}
+
+/// OpenAI-style `{ data: [{ id, name? }] }` list.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct OpenAiList {
+    #[serde(default)]
+    pub data: Vec<OpenAiModel>,
+}
+
+/// One OpenAI-style model row.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct OpenAiModel {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
 
 /// Something the sync noticed but did not fail on.
 pub enum SyncWarning {
@@ -33,91 +103,29 @@ pub struct UpdateProvidersResponse {
     pub warnings: Vec<SyncWarning>,
 }
 
-const HTTP_TIMEOUT_SECS: u64 = 10;
-
-/// Fetch models.dev api.json over HTTPS (ureq + rustls, 10s timeout).
-pub fn fetch_models_dev() -> Res<Value> {
-    fetch_json_url(MODELS_DEV_URL)
-}
-
-pub fn http_get_json(url: &str) -> Res<Value> {
-    http_get_json_with(url, None)
-}
-
-pub fn http_get_json_with(url: &str, api_key: Option<&str>) -> Res<Value> {
-    let timeout = std::time::Duration::from_secs(HTTP_TIMEOUT_SECS);
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .timeout_connect(Some(timeout))
-        .user_agent("grok-models.py")
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut request = agent.get(url).header("Accept", "application/json");
-    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        request = request.header("Authorization", format!("Bearer {key}"));
-    }
-    match request.call() {
-        Ok(mut resp) => {
-            let status = resp.status().as_u16();
-            let text = match resp.body_mut().read_to_string() {
-                Ok(t) => t,
-                Err(e) => {
-                    return fail(format!("HTTP failure fetching {url}: {e}"));
-                }
-            };
-            if status != 200 {
-                let body: String = text.chars().take(300).collect();
-                return fail(format!("HTTP {status} fetching {url}: {body}"));
-            }
-            match serde_json::from_str::<Value>(&text) {
-                Ok(v) => Ok(v),
-                Err(e) => fail(format!("invalid JSON from {url}: {e}")),
-            }
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.to_ascii_lowercase().contains("timed out")
-                || msg.to_ascii_lowercase().contains("timeout")
-            {
-                fail(format!("HTTP timeout fetching {url}"))
-            } else {
-                fail(format!("HTTP failure fetching {url}: {e}"))
-            }
-        }
-    }
-}
-
-fn fetch_json_url(url: &str) -> Res<Value> {
-    http_get_json(url)
+/// Fetch models.dev api.json over HTTPS (10s timeout).
+pub fn fetch_models_dev() -> Res<ModelsDev> {
+    crate::client::Client::new()
+        .get_json(MODELS_DEV_URL)
+        .map_err(|e| crate::Error::new(e.message))
 }
 
 pub fn provider_models_url(base_url: &str) -> String {
     format!("{}/models", base_url.trim_end_matches('/'))
 }
 
-/// OpenAI-style `{ data: [{ id, name? }] }`. None if unusable/empty.
-pub fn parse_openai_models_list(payload: &Value) -> Option<Vec<(String, Option<String>)>> {
-    let data = payload.get("data")?.as_array()?;
-    if data.is_empty() {
+/// OpenAI-style `{ data: [{ id, name? }] }` rows. None if unusable/empty.
+pub fn parse_openai_models_list(payload: &OpenAiList) -> Option<Vec<(String, Option<String>)>> {
+    if payload.data.is_empty() {
         return None;
     }
     let mut items = Vec::new();
-    for row in data {
-        let Some(obj) = row.as_object() else {
+    for row in &payload.data {
+        let Some(mid) = row.id.as_deref().filter(|s| !s.is_empty()) else {
             continue;
         };
-        let Some(Value::String(mid)) = obj.get("id") else {
-            continue;
-        };
-        if mid.is_empty() {
-            continue;
-        }
-        let name = match obj.get("name") {
-            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None,
-        };
-        items.push((mid.clone(), name));
+        let name = row.name.clone().filter(|s| !s.is_empty());
+        items.push((mid.to_string(), name));
     }
     if items.is_empty() { None } else { Some(items) }
 }
@@ -172,7 +180,10 @@ fn try_fetch_models_url(
     } else {
         None
     };
-    let payload = match http_get_json_with(&url, key) {
+    let payload: OpenAiList = match crate::client::Client::new()
+        .get_json_with_key(&url, key)
+        .map_err(|e| crate::Error::new(e.message))
+    {
         Ok(payload) => payload,
         Err(e) => {
             if use_auth || !is_http_auth_error(&e) {
@@ -182,7 +193,10 @@ fn try_fetch_models_url(
                 return (None, Some(e.message));
             }
             provider.insert("auth_models_list".into(), Value::Bool(true));
-            match http_get_json_with(&url, Some(&val)) {
+            match crate::client::Client::new()
+                .get_json_with_key(&url, Some(&val))
+                .map_err(|e| crate::Error::new(e.message))
+            {
                 Ok(payload) => payload,
                 Err(retry_e) => return (None, Some(retry_e.message)),
             }
@@ -197,19 +211,15 @@ fn try_fetch_models_url(
     }
 }
 
-fn catalog_models_map(provider_models_dev: &Value) -> Map<String, Value> {
-    provider_models_dev
-        .get("models")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
+fn catalog_models_map(provider: &ModelsDevProvider) -> &HashMap<String, ModelsDevModel> {
+    &provider.models
 }
 
-fn items_from_catalog(catalog: &Map<String, Value>) -> Vec<(String, Option<String>)> {
+fn items_from_catalog(catalog: &HashMap<String, ModelsDevModel>) -> Vec<(String, Option<String>)> {
     catalog
         .iter()
         .map(|(mid, minfo)| {
-            let name = minfo.get("name").and_then(Value::as_str).and_then(|s| {
+            let name = minfo.name.as_deref().and_then(|s| {
                 if s.is_empty() {
                     None
                 } else {
@@ -221,11 +231,10 @@ fn items_from_catalog(catalog: &Map<String, Value>) -> Vec<(String, Option<Strin
         .collect()
 }
 
-fn catalog_name(catalog: &Map<String, Value>, mid: &str) -> Option<String> {
+fn catalog_name(catalog: &HashMap<String, ModelsDevModel>, mid: &str) -> Option<String> {
     catalog
         .get(mid)
-        .and_then(|v| v.get("name"))
-        .and_then(Value::as_str)
+        .and_then(|v| v.name.as_deref())
         .and_then(|s| {
             if s.is_empty() {
                 None
@@ -238,7 +247,7 @@ fn catalog_name(catalog: &Map<String, Value>, mid: &str) -> Option<String> {
 fn resolve_model_name(
     live_name: Option<&str>,
     stored_name: Option<&str>,
-    catalog: &Map<String, Value>,
+    catalog: &HashMap<String, ModelsDevModel>,
     mid: &str,
 ) -> Option<String> {
     if let Some(s) = live_name {
@@ -292,24 +301,29 @@ fn write_api_backend(
 /// are refreshed whenever the catalog carries them.
 fn enrich_model_entry(
     entry: &mut Map<String, Value>,
-    minfo: &Value,
+    minfo: &ModelsDevModel,
     provider_id: &str,
     provider_npm: Option<&str>,
 ) {
-    if let Some(model_npm) = minfo.get("provider").and_then(jsonio::catalog_npm) {
+    if let Some(model_npm) = minfo
+        .provider
+        .as_ref()
+        .and_then(|p| p.npm.as_deref())
+        .filter(|s| !s.is_empty())
+    {
         entry.insert("npm".to_string(), Value::String(model_npm.to_string()));
     }
     write_api_backend(entry, provider_id, provider_npm);
-    if let Some(mods) = jsonio::catalog_modalities(minfo) {
+    if let Some(mods) = minfo.modalities.clone().filter(|v| v.is_object()) {
         entry.insert("modalities".to_string(), mods);
     }
     if !entry.contains_key("context_window") {
-        if let Some(ctx) = core::context_window_field(minfo) {
+        if let Some(ctx) = core::context_window_field(minfo.limit.as_ref()) {
             entry.insert("context_window".to_string(), ctx);
         }
     }
-    if crate::json_utils::is_truthy(minfo.get("reasoning")) {
-        match core::efforts_from_models_dev(minfo) {
+    if crate::json_utils::is_truthy(minfo.reasoning.as_ref()) {
+        match core::efforts_from_models_dev(&minfo.reasoning_options) {
             Some(efforts) => {
                 // Precompute the default effort (first row not named "none")
                 // so the config.toml writer never needs the catalog to pick.
@@ -345,7 +359,7 @@ fn enrich_model_entry(
 
 pub fn seed_models_from_items(
     items: &[(String, Option<String>)],
-    catalog: &Map<String, Value>,
+    catalog: &HashMap<String, ModelsDevModel>,
     provider_id: &str,
     provider_npm: Option<&str>,
 ) -> Map<String, Value> {
@@ -357,7 +371,7 @@ pub fn seed_models_from_items(
             entry.insert("name".into(), Value::String(name));
         }
         if let Some(minfo) = catalog.get(catalog_id) {
-            crate::jsonio::seed_description(&mut entry, minfo);
+            crate::jsonio::seed_description(&mut entry, minfo.description.as_deref());
             enrich_model_entry(&mut entry, minfo, provider_id, provider_npm);
         }
         if !entry.contains_key("api_backend") {
@@ -372,7 +386,7 @@ pub fn seed_models_from_items(
 fn reconcile_models_map(
     models_map: &mut Map<String, Value>,
     items: &[(String, Option<String>)],
-    catalog: &Map<String, Value>,
+    catalog: &HashMap<String, ModelsDevModel>,
     provider_id: &str,
     provider_npm: Option<&str>,
 ) {
@@ -401,12 +415,10 @@ fn reconcile_models_map(
         // Fill missing attributes; refresh the description when the catalog
         // carries a different one. User-set values are never overwritten.
         if let Some(minfo) = catalog.get(catalog_id) {
-            if minfo.is_object() {
-                enrich_model_entry(obj, minfo, provider_id, provider_npm);
-                if let Some(desc) = crate::jsonio::catalog_description(minfo) {
-                    if obj.get("description").and_then(Value::as_str) != Some(desc) {
-                        obj.insert("description".into(), Value::String(desc.to_string()));
-                    }
+            enrich_model_entry(obj, minfo, provider_id, provider_npm);
+            if let Some(desc) = minfo.description.as_deref().filter(|s| !s.is_empty()) {
+                if obj.get("description").and_then(Value::as_str) != Some(desc) {
+                    obj.insert("description".into(), Value::String(desc.to_string()));
                 }
             }
         }
@@ -498,7 +510,7 @@ pub fn expand_ollama_cloud_items(
 }
 
 pub fn authority_items_for_provider(
-    provider_models_dev: &Value,
+    provider_models_dev: &ModelsDevProvider,
     provider: &mut Map<String, Value>,
 ) -> (Vec<(String, Option<String>)>, Option<String>) {
     let base_url = core::get_json_str(provider, "base_url");
@@ -565,19 +577,18 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             continue;
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
-        let Some(provider_models_dev) = models_dev.get(&pid).filter(|p| p.is_object()).cloned()
-        else {
+        let Some(provider_models_dev) = models_dev.providers.get(&pid) else {
             stats.warnings.push(SyncWarning::NotInModelsDev {
                 provider_id: pid.clone(),
             });
             continue;
         };
 
-        let catalog_models = catalog_models_map(&provider_models_dev);
+        let catalog_models = catalog_models_map(provider_models_dev);
 
         // Backfill provider-level fields from the catalog: env key, npm,
         // and a missing base_url (a stored non-empty base_url override wins).
-        let new_env_key = core::provider_env_key_from_api(&provider_models_dev);
+        let new_env_key = provider_models_dev.env.first().cloned().unwrap_or_default();
         {
             let provider = core::find_provider_by_id_mut(&mut doc, &pid).unwrap();
             if !new_env_key.is_empty()
@@ -585,10 +596,11 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             {
                 provider.insert("env_key".into(), Value::String(new_env_key.clone()));
             }
-            if let Some(doc_url) = jsonio::catalog_doc(&provider_models_dev) {
+            if let Some(doc_url) = provider_models_dev.doc.as_deref().filter(|s| !s.is_empty()) {
                 provider.insert("doc".into(), Value::String(doc_url.to_string()));
             }
-            if let Some(provider_npm) = jsonio::catalog_npm(&provider_models_dev) {
+            if let Some(provider_npm) = provider_models_dev.npm.as_deref().filter(|s| !s.is_empty())
+            {
                 provider.insert("npm".into(), Value::String(provider_npm.to_string()));
             }
             if !provider.get("models").is_some_and(Value::is_object) {
@@ -597,11 +609,7 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             let catalog_url = if pid == OLLAMA_CLOUD_PROVIDER_ID {
                 OLLAMA_CLOUD_LOCAL_BASE_URL.to_string()
             } else {
-                provider_models_dev
-                    .get("api")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string()
+                provider_models_dev.api.clone()
             };
             if core::get_json_str(provider, "base_url").is_empty() && !catalog_url.is_empty() {
                 provider.insert("base_url".into(), Value::String(catalog_url));
@@ -630,9 +638,9 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
         reconcile_models_map(
             models_map,
             &items,
-            &catalog_models,
+            catalog_models,
             &pid,
-            jsonio::catalog_npm(&provider_models_dev),
+            provider_models_dev.npm.as_deref().filter(|s| !s.is_empty()),
         );
         stats.providers_synced += 1;
     }
@@ -1113,7 +1121,7 @@ pub struct AddProviderResponse {
 /// `add_provider_entry`: add provider with all models disabled and persist.
 pub fn add_provider_entry(
     doc: &mut Value,
-    api: &Value,
+    api: &ModelsDev,
     provider_id: &str,
 ) -> Result<AddProviderResponse, Error> {
     let existing: Vec<String> = core::provider_entries(doc)
@@ -1127,8 +1135,8 @@ pub fn add_provider_entry(
             fetch_warning_url: None,
         });
     }
-    let provider_models_dev = match api.get(provider_id) {
-        Some(p) if p.is_object() => p.clone(),
+    let provider_models_dev = match api.providers.get(provider_id) {
+        Some(p) => p,
         _ => {
             return fail(format!(
                 "provider '{}' not found in models.dev",
@@ -1136,31 +1144,28 @@ pub fn add_provider_entry(
             ));
         }
     };
-    let catalog = provider_models_dev
-        .get("models")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let catalog = &provider_models_dev.models;
     let mut provider = Map::new();
     provider.insert("id".into(), Value::String(provider_id.to_string()));
     let name_val = provider_models_dev
-        .get("name")
-        .cloned()
-        .unwrap_or(Value::String(provider_id.to_string()));
-    let name_val = if crate::json_utils::is_truthy(Some(&name_val)) {
-        name_val
+        .name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| provider_id.to_string());
+    let name_val = if !name_val.is_empty() {
+        Value::String(name_val)
     } else {
         Value::String(provider_id.to_string())
     };
     provider.insert("name".into(), name_val);
-    let env = core::provider_env_key_from_api(&provider_models_dev);
+    let env = provider_models_dev.env.first().cloned().unwrap_or_default();
     if !env.is_empty() {
         provider.insert("env_key".into(), Value::String(env.clone()));
     }
-    if let Some(doc_url) = jsonio::catalog_doc(&provider_models_dev) {
+    if let Some(doc_url) = provider_models_dev.doc.as_deref().filter(|s| !s.is_empty()) {
         provider.insert("doc".into(), Value::String(doc_url.to_string()));
     }
-    if let Some(provider_npm) = jsonio::catalog_npm(&provider_models_dev) {
+    if let Some(provider_npm) = provider_models_dev.npm.as_deref().filter(|s| !s.is_empty()) {
         provider.insert("npm".into(), Value::String(provider_npm.to_string()));
     }
     // Seed the provider-level base_url override from the catalog so the
@@ -1169,11 +1174,7 @@ pub fn add_provider_entry(
     let api_url = if provider_id == OLLAMA_CLOUD_PROVIDER_ID {
         OLLAMA_CLOUD_LOCAL_BASE_URL.to_string()
     } else {
-        provider_models_dev
-            .get("api")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
+        provider_models_dev.api.clone()
     };
     if !api_url.is_empty() {
         provider.insert("base_url".into(), Value::String(api_url.clone()));
@@ -1191,7 +1192,7 @@ pub fn add_provider_entry(
         provider.insert("extra_headers".into(), Value::Object(extra));
     }
     let (mut items, fetch_warning_url) =
-        authority_items_for_provider(&provider_models_dev, &mut provider);
+        authority_items_for_provider(provider_models_dev, &mut provider);
     // Diagnostics produced from here on travel with any failure, so a caller
     // that only sees the error can still print them.
     let warning_lines: Vec<String> = fetch_warning_url
@@ -1210,9 +1211,9 @@ pub fn add_provider_entry(
     }
     let models_map = seed_models_from_items(
         &items,
-        &catalog,
+        catalog,
         provider_id,
-        jsonio::catalog_npm(&provider_models_dev),
+        provider_models_dev.npm.as_deref().filter(|s| !s.is_empty()),
     );
     let n_models = models_map.len();
     provider.insert("enabled".into(), Value::Bool(true));
@@ -1664,10 +1665,10 @@ tables will have an empty base_url"
 
     #[test]
     fn seed_ollama_cloud_backfills_from_unsuffixed_catalog_id() {
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "gemma4:31b": { "name": "Gemma 4" }
-        });
-        let catalog = catalog.as_object().unwrap().clone();
+        }))
+        .unwrap();
         let items = vec![
             ("gemma4:31b-cloud".into(), None),
             ("local".into(), Some("Local".into())),
@@ -1708,8 +1709,8 @@ tables will have an empty base_url"
     /// Fixture models.dev payload exercising every model info field variant:
     /// context window + reasoning efforts, reasoning without efforts, plain
     /// model, and a model missing from the catalog (live /models id only).
-    fn fixture_api() -> Value {
-        serde_json::json!({
+    fn fixture_api() -> ModelsDev {
+        serde_json::from_value(serde_json::json!({
             "prov": {
                 "name": "Prov",
                 "api": "https://api.prov.example/v1",
@@ -1735,7 +1736,8 @@ tables will have an empty base_url"
                     }
                 }
             }
-        })
+        }))
+        .unwrap()
     }
 
     /// Seed providers.json with one enabled provider, run run_sync against
@@ -1776,7 +1778,7 @@ tables will have an empty base_url"
         let models = prov["models"].as_object().unwrap();
 
         let include_descriptions = true;
-        for (mid, minfo) in api["prov"]["models"].as_object().unwrap() {
+        for (mid, minfo) in &api.providers["prov"].models {
             assert!(
                 models.contains_key(mid),
                 "{mid} missing from providers.json"
@@ -1859,9 +1861,10 @@ tables will have an empty base_url"
         // Catalog knows only "plain"; "live_only" simulates a model that came
         // from the provider /models endpoint.
         let mut api = fixture_api();
-        api["prov"]["models"]
-            .as_object_mut()
+        api.providers
+            .get_mut("prov")
             .unwrap()
+            .models
             .remove("reason_no_opts");
 
         // Seed: provider with all catalog models enabled, synced into
@@ -2239,7 +2242,7 @@ tables will have an empty base_url"
 
     #[test]
     fn seed_models_from_items_copies_catalog_modalities() {
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "vision": {
                 "name": "Vision",
                 "modalities": {
@@ -2248,12 +2251,13 @@ tables will have an empty base_url"
                 }
             },
             "plain": { "name": "Plain" }
-        });
+        }))
+        .unwrap();
         let items = vec![
             ("vision".to_string(), Some("Vision".to_string())),
             ("plain".to_string(), Some("Plain".to_string())),
         ];
-        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap(), "prov", None);
+        let seeded = seed_models_from_items(&items, &catalog, "prov", None);
         assert_eq!(
             seeded["vision"]["modalities"],
             serde_json::json!({
@@ -2269,7 +2273,7 @@ tables will have an empty base_url"
 
     #[test]
     fn seed_models_from_items_copies_catalog_npm() {
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "sdk": {
                 "name": "Sdk",
                 "provider": { "npm": "@ai-sdk/openai" }
@@ -2279,13 +2283,14 @@ tables will have an empty base_url"
                 "provider": { "npm": "" }
             },
             "plain": { "name": "Plain" }
-        });
+        }))
+        .unwrap();
         let items = vec![
             ("sdk".to_string(), Some("Sdk".to_string())),
             ("empty".to_string(), Some("Empty".to_string())),
             ("plain".to_string(), Some("Plain".to_string())),
         ];
-        let seeded = seed_models_from_items(&items, catalog.as_object().unwrap(), "prov", None);
+        let seeded = seed_models_from_items(&items, &catalog, "prov", None);
         assert_eq!(seeded["sdk"]["npm"], "@ai-sdk/openai");
         assert!(
             seeded["empty"].get("npm").is_none(),
@@ -2321,24 +2326,21 @@ tables will have an empty base_url"
 
     #[test]
     fn seed_models_from_items_writes_api_backend() {
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "sdk": {
                 "name": "Sdk",
                 "provider": { "npm": "@ai-sdk/openai" }
             },
             "plain": { "name": "Plain" }
-        });
+        }))
+        .unwrap();
         let items = vec![
             ("sdk".to_string(), Some("Sdk".to_string())),
             ("plain".to_string(), Some("Plain".to_string())),
             ("live-only".to_string(), Some("Live".to_string())),
         ];
-        let seeded = seed_models_from_items(
-            &items,
-            catalog.as_object().unwrap(),
-            "prov",
-            Some("@ai-sdk/openai-compatible"),
-        );
+        let seeded =
+            seed_models_from_items(&items, &catalog, "prov", Some("@ai-sdk/openai-compatible"));
         assert_eq!(seeded["sdk"]["api_backend"], "responses");
         assert_eq!(seeded["plain"]["api_backend"], "chat_completions");
         assert_eq!(seeded["live-only"]["api_backend"], "chat_completions");
@@ -2348,34 +2350,25 @@ tables will have an empty base_url"
     fn reconcile_writes_api_backend_on_new_and_refreshes() {
         let mut models_map = Map::new();
         let items = vec![("m".to_string(), Some("M".to_string()))];
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "m": {
                 "name": "M",
                 "provider": { "npm": "@ai-sdk/openai" }
             }
-        });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        }))
+        .unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog, "prov", None);
         assert_eq!(models_map["m"]["api_backend"], "responses");
 
-        let catalog_anthropic = serde_json::json!({
-            "m": {
-                "name": "M",
-                "provider": { "npm": "@ai-sdk/anthropic" }
-            }
-        });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog_anthropic.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        let catalog_anthropic: HashMap<String, ModelsDevModel> =
+            serde_json::from_value(serde_json::json!({
+                "m": {
+                    "name": "M",
+                    "provider": { "npm": "@ai-sdk/anthropic" }
+                }
+            }))
+            .unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog_anthropic, "prov", None);
         assert_eq!(models_map["m"]["api_backend"], "messages");
     }
 
@@ -2391,11 +2384,12 @@ tables will have an empty base_url"
             other => panic!("expected object, got {other}"),
         };
         let items = vec![("live-only".to_string(), Some("Live".to_string()))];
-        let catalog = serde_json::json!({});
+        let catalog: HashMap<String, ModelsDevModel> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
         reconcile_models_map(
             &mut models_map,
             &items,
-            catalog.as_object().unwrap(),
+            &catalog,
             "prov",
             Some("@ai-sdk/openai-compatible"),
         );
@@ -2416,29 +2410,19 @@ tables will have an empty base_url"
         };
         let items = vec![("m".to_string(), Some("M".to_string()))];
 
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "m": {
                 "name": "M",
                 "provider": { "npm": "@ai-sdk/anthropic" }
             }
-        });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        }))
+        .unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog, "prov", None);
         assert_eq!(models_map["m"]["npm"], "@ai-sdk/anthropic");
 
-        let catalog_no_npm = serde_json::json!({ "m": { "name": "M" } });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog_no_npm.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        let catalog_no_npm: HashMap<String, ModelsDevModel> =
+            serde_json::from_value(serde_json::json!({ "m": { "name": "M" } })).unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog_no_npm, "prov", None);
         assert_eq!(
             models_map["m"]["npm"], "@ai-sdk/anthropic",
             "omitted catalog npm must not delete the stored value"
@@ -2459,7 +2443,7 @@ tables will have an empty base_url"
         };
         let items = vec![("m".to_string(), Some("M".to_string()))];
 
-        let catalog = serde_json::json!({
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
             "m": {
                 "name": "M",
                 "modalities": {
@@ -2467,27 +2451,17 @@ tables will have an empty base_url"
                     "output": ["text"]
                 }
             }
-        });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        }))
+        .unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog, "prov", None);
         assert_eq!(
             models_map["m"]["modalities"]["input"],
             serde_json::json!(["text", "image"])
         );
 
-        let catalog_no_mods = serde_json::json!({ "m": { "name": "M" } });
-        reconcile_models_map(
-            &mut models_map,
-            &items,
-            catalog_no_mods.as_object().unwrap(),
-            "prov",
-            None,
-        );
+        let catalog_no_mods: HashMap<String, ModelsDevModel> =
+            serde_json::from_value(serde_json::json!({ "m": { "name": "M" } })).unwrap();
+        reconcile_models_map(&mut models_map, &items, &catalog_no_mods, "prov", None);
         assert_eq!(
             models_map["m"]["modalities"]["input"],
             serde_json::json!(["text", "image"]),
@@ -2611,7 +2585,7 @@ tables will have an empty base_url"
     fn add_provider_entry_copies_catalog_npm() {
         let _homes = crate::env::test_support::TestHomes::setup();
 
-        let api = serde_json::json!({
+        let api: ModelsDev = serde_json::from_value(serde_json::json!({
             "prov": {
                 "name": "Prov",
                 "npm": "@ai-sdk/openai-compatible",
@@ -2627,7 +2601,8 @@ tables will have an empty base_url"
                 "npm": "",
                 "models": { "m": { "name": "M" } }
             }
-        });
+        }))
+        .unwrap();
         let mut doc = serde_json::json!({ "providers": [] });
         add_provider_entry(&mut doc, &api, "prov").expect("add provider");
         let prov = doc["providers"]
@@ -2656,7 +2631,7 @@ tables will have an empty base_url"
     fn add_provider_entry_uses_local_base_url_for_ollama_cloud() {
         let _homes = crate::env::test_support::TestHomes::setup();
 
-        let api = serde_json::json!({
+        let api: ModelsDev = serde_json::from_value(serde_json::json!({
             "ollama-cloud": {
                 "name": "Ollama Cloud",
                 "api": "https://ollama.com/v1",
@@ -2666,7 +2641,8 @@ tables will have an empty base_url"
                     "local-cloud": { "name": "Should Filter" }
                 }
             }
-        });
+        }))
+        .unwrap();
         let mut doc = serde_json::json!({ "providers": [] });
         add_provider_entry(&mut doc, &api, "ollama-cloud").expect("add provider");
         let prov = doc["providers"]
@@ -2682,14 +2658,15 @@ tables will have an empty base_url"
     fn add_provider_entry_generates_fresh_opencode_session_header() {
         let _homes = crate::env::test_support::TestHomes::setup();
 
-        let api = serde_json::json!({
+        let api: ModelsDev = serde_json::from_value(serde_json::json!({
             "opencode-go": {
                 "name": "OpenCode Go",
                 "api": "https://opencode.ai/v1",
                 "env": ["OPENCODE_API_KEY"],
                 "models": { "m": { "name": "M" } }
             }
-        });
+        }))
+        .unwrap();
 
         let mut session_ids = Vec::new();
         for _ in 0..2 {

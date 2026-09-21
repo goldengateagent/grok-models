@@ -134,11 +134,6 @@ fn non_empty_str(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
-/// models.dev `description` for one model entry, or None when absent/empty.
-pub fn catalog_description(minfo: &Value) -> Option<&str> {
-    minfo.as_object().and_then(catalog_description_map)
-}
-
 /// models.dev `description` for a model entry map, or None when absent/empty.
 pub fn catalog_description_map(minfo: &serde_json::Map<String, Value>) -> Option<&str> {
     non_empty_str(minfo.get("description"))
@@ -163,8 +158,8 @@ pub fn catalog_doc(v: &Value) -> Option<&str> {
 }
 
 /// Insert the catalog description into a model entry map (seed path).
-pub fn seed_description(entry: &mut serde_json::Map<String, Value>, minfo: &Value) {
-    if let Some(desc) = catalog_description(minfo) {
+pub fn seed_description(entry: &mut serde_json::Map<String, Value>, description: Option<&str>) {
+    if let Some(desc) = description.filter(|s| !s.is_empty()) {
         entry.insert("description".into(), Value::String(desc.to_string()));
     }
 }

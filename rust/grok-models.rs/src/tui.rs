@@ -2160,7 +2160,7 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
 /// one visit.
 struct AddProviderPicker<'a> {
     doc: &'a mut Value,
-    api: Value,
+    api: crate::sync::ModelsDev,
     added: Option<String>,
     status: std::rc::Rc<RefCell<Option<String>>>,
     // Cache for padded_labels(), keyed on (providers_count, api_count).
@@ -2197,7 +2197,7 @@ impl<'a> AddProviderPicker<'a> {
             .and_then(Value::as_array)
             .map(|a| a.len())
             .unwrap_or(0);
-        let api_count = self.api.as_object().map(|o| o.len()).unwrap_or(0);
+        let api_count = self.api.providers.len();
         let cache_hit = self
             .label_cache
             .as_ref()
@@ -2212,33 +2212,28 @@ impl<'a> AddProviderPicker<'a> {
     fn compute_padded_labels(&self) -> std::collections::HashMap<String, String> {
         let added = self.added_ids();
         let mut rows: Vec<(String, String, bool)> = Vec::new();
-        if let Some(obj) = self.api.as_object() {
-            for (pid, provider_models_dev) in obj {
-                if !provider_models_dev.is_object() {
-                    continue;
-                }
-                let cat_name = provider_models_dev
-                    .get("name")
-                    .and_then(Value::as_str)
+        for (pid, provider) in &self.api.providers {
+            let cat_name = provider
+                .name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(pid);
+            if added.contains(pid) {
+                let p = core::provider_entries(self.doc)
+                    .into_iter()
+                    .find(|pr| pr.get("id").and_then(Value::as_str) == Some(pid.as_str()));
+                let name = p
+                    .as_ref()
+                    .and_then(|pr| pr.get("name").and_then(Value::as_str))
                     .filter(|s| !s.is_empty())
-                    .unwrap_or(pid);
-                if added.contains(pid) {
-                    let p = core::provider_entries(self.doc)
-                        .into_iter()
-                        .find(|pr| pr.get("id").and_then(Value::as_str) == Some(pid));
-                    let name = p
-                        .as_ref()
-                        .and_then(|pr| pr.get("name").and_then(Value::as_str))
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(cat_name);
-                    let enabled = p
-                        .as_ref()
-                        .map(|pr| crate::json_utils::get_bool_map(pr, "enabled"))
-                        .unwrap_or(false);
-                    rows.push((name.to_string(), pid.clone(), enabled));
-                } else {
-                    rows.push((cat_name.to_string(), pid.clone(), false));
-                }
+                    .unwrap_or(cat_name);
+                let enabled = p
+                    .as_ref()
+                    .map(|pr| crate::json_utils::get_bool_map(pr, "enabled"))
+                    .unwrap_or(false);
+                rows.push((name.to_string(), pid.clone(), enabled));
+            } else {
+                rows.push((cat_name.to_string(), pid.clone(), false));
             }
         }
         core::format_provider_id_rows(&rows)
@@ -2375,23 +2370,10 @@ pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<St
     // Full catalog — already-added providers stay listed so the sections
     // show what is configured; they are just rendered differently.
     let mut catalog: Vec<(String, String)> = api
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .filter(|(_, provider_models_dev)| provider_models_dev.is_object())
-                .map(|(pid, provider_models_dev)| {
-                    (
-                        pid.clone(),
-                        provider_models_dev
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+        .providers
+        .iter()
+        .map(|(pid, provider)| (pid.clone(), provider.name.clone().unwrap_or_default()))
+        .collect();
     catalog.sort();
 
     let status_cell = std::rc::Rc::new(RefCell::new(None::<String>));
@@ -2534,34 +2516,31 @@ fn combo_enabled(doc: &Value, pid: &str, mid: &str) -> bool {
 /// combos stay listed so the Enabled section can show what is configured;
 /// extra enabled models that exist only in the doc are appended.
 /// Entries: (pid, mid, model display name, provider display name).
-fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, String, String)> {
+fn build_add_model_catalog(
+    api: &crate::sync::ModelsDev,
+    doc: &Value,
+) -> Vec<(String, String, String, String)> {
     let mut catalog: Vec<(String, String, String, String)> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = Default::default();
-    if let Some(api_obj) = api.as_object() {
-        for (pid, provider_models_dev) in api_obj {
-            if !provider_models_dev.is_object() {
-                continue;
-            }
-            let pname = provider_models_dev
-                .get("name")
-                .and_then(Value::as_str)
+    for (pid, provider) in &api.providers {
+        let pname = provider
+            .name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(pid);
+        for (mid, minfo) in &provider.models {
+            let mname = minfo
+                .name
+                .as_deref()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(pid);
-            let api_models = provider_models_dev.get("models").and_then(Value::as_object);
-            for (mid, minfo) in api_models.into_iter().flatten() {
-                let mname = minfo
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(mid);
-                catalog.push((
-                    pid.clone(),
-                    mid.clone(),
-                    mname.to_string(),
-                    pname.to_string(),
-                ));
-                seen.insert((pid.clone(), mid.clone()));
-            }
+                .unwrap_or(mid);
+            catalog.push((
+                pid.clone(),
+                mid.clone(),
+                mname.to_string(),
+                pname.to_string(),
+            ));
+            seen.insert((pid.clone(), mid.clone()));
         }
     }
     if let Some(arr) = doc.get("providers").and_then(Value::as_array) {
@@ -2604,7 +2583,7 @@ fn build_add_model_catalog(api: &Value, doc: &Value) -> Vec<(String, String, Str
 
 struct AddModelPicker<'a> {
     doc: &'a mut Value,
-    api: Value,
+    api: crate::sync::ModelsDev,
     status: Option<String>,
     // Cache of (pid, mid) combos that are enabled in providers.json, so render()
     // does O(1) lookups instead of a linear scan per row per keystroke.
@@ -4695,14 +4674,15 @@ mod tests {
                     "models": {}
                 }]
             });
-            let api = serde_json::json!({
+            let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
                 "zzz-last": {"name": "Zzz Last"},
                 "anthropic": {"name": "Anthropic"},
                 "opencode": {"name": "OpenCode"},
                 "openrouter": {"name": "OpenRouter"},
                 "ollama-cloud": {"name": "Ollama Cloud"},
                 "opencode-go": {"name": "OpenCode Go"}
-            });
+            }))
+            .unwrap();
             let mut picker = AddProviderPicker {
                 doc: &mut doc,
                 api,
@@ -4789,11 +4769,12 @@ mod tests {
         use crate::env::paths;
         std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
         let mut doc = serde_json::json!({"providers": []});
-        let api = serde_json::json!({
+        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
             "openrouter": {"name": "OpenRouter", "models": {
                 "or-1": {"name": "OR One"}
             }}
-        });
+        }))
+        .unwrap();
         let mut picker = AddProviderPicker {
             doc: &mut doc,
             api,
@@ -5319,7 +5300,7 @@ mod tests {
 
     #[test]
     fn build_add_model_catalog_includes_enabled_and_doc_only() {
-        let api = serde_json::json!({
+        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {}
@@ -5328,7 +5309,8 @@ mod tests {
                 "alpha": {"name": "Alpha Two"},
                 "zeta-mini": {"name": "Zeta Mini"}
             }}
-        });
+        }))
+        .unwrap();
         // zeta/alpha already enabled stays listed; doc-only enabled is appended.
         let doc = serde_json::json!({"providers": [{
             "id": "zeta", "name": "Zeta AI",
@@ -5364,7 +5346,7 @@ mod tests {
                 "models": {"alpha": {"name": "Alpha One", "enabled": true}}
             }]
         });
-        let api = serde_json::json!({
+        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {},
@@ -5373,7 +5355,8 @@ mod tests {
             "aaa": {"name": "AAA", "models": {
                 "omega": {"name": "Omega"}
             }}
-        });
+        }))
+        .unwrap();
         let catalog = build_add_model_catalog(&api, &doc);
         let mut picker = AddModelPicker {
             doc: &mut doc,
