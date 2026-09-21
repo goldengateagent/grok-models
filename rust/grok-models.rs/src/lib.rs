@@ -1,4 +1,4 @@
-//! Native port of `grok-models.py` (behavior-identical).
+//! Grok models library.
 //!
 //! Module map:
 //! - `jsonio`:    ordered JSON load/dump + atomic writes
@@ -12,11 +12,11 @@
 //! - `toml_out`:  `[model.*]` table emission and owned-section stripping
 //! - `sync`:      provider entry writes, models.dev reconciliation,
 //!                config.toml writing
-//! - `cli`:       CLI surface — `cli::args` argparse-equivalent parser and
-//!                help text, `cli::commands` command implementations
+//! - `cli`:       CLI surface — `cli::args` parser and help text,
+//!                `cli::commands` command implementations
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
-//! - `tui`:       Ratatui/Crossterm screens (curses equivalent)
+//! - `tui`:       Ratatui/Crossterm screens
 //! - `flow`:      interactive TUI orchestration (TUI + numbered fallback)
 
 pub mod benchmarks;
@@ -33,7 +33,7 @@ pub mod theme;
 pub mod toml_out;
 pub mod tui;
 
-/// Fatal error mapped to exit code 1, mirroring the Python `SyncError`.
+/// Fatal error mapped to exit code 1.
 ///
 /// `warnings` holds diagnostics the operation produced before it failed, so a
 /// caller that only receives the error still has them to print. Rendered lines
@@ -47,7 +47,7 @@ pub struct Error {
 
 impl Error {
     pub fn new(message: impl Into<String>) -> Self {
-        Error {
+        Self {
             message: message.into(),
             warnings: Vec::new(),
         }
