@@ -1,8 +1,8 @@
 [package]
 name = "grok-models"
 version = "1.2.0"
-edition = "2021"
-description = "Native port of grok-models.py: sync Grok Build [model.*] tables from models.dev"
+edition = "2024"
+description = "TUI for configuring Grok Build and Codex to use custom models from alternate providers and gateways."
 default-run = "grok-models"
 
 [lib]

@@ -3,12 +3,12 @@
 //! Grok config resolves from `$GROK_HOME` when set, else `~/.grok/`.
 //! Codex config resolves from `$CODEX_HOME` when set, else `~/.codex/`.
 
-use super::vars::is_wsl;
+use super::vars::{CODEX_HOME_ENV, GROK_HOME_ENV, HOME_ENV, is_wsl};
 use std::path::PathBuf;
 
 /// `$HOME` when set, else `home` crate fallback, else `.`.
 pub fn home_dir() -> PathBuf {
-    if let Some(home) = nonempty_var("HOME") {
+    if let Some(home) = nonempty_var(HOME_ENV) {
         return PathBuf::from(home);
     }
     // USERPROFILE on Windows; passwd fallback on Unix (`home` crate).
@@ -21,9 +21,8 @@ pub fn home_dir() -> PathBuf {
 }
 
 /// `$GROK_HOME/providers.json`, else `~/.grok/providers.json`.
-// Never the executable's directory or the current working directory.
 pub fn providers_path() -> PathBuf {
-    match nonempty_var("GROK_HOME") {
+    match nonempty_var(GROK_HOME_ENV) {
         Some(home) => PathBuf::from(home).join("providers.json"),
         None => home_dir().join(".grok").join("providers.json"),
     }
@@ -31,7 +30,7 @@ pub fn providers_path() -> PathBuf {
 
 /// `$GROK_HOME/config.toml`, else `~/.grok/config.toml`.
 pub fn config_toml_path() -> PathBuf {
-    match nonempty_var("GROK_HOME") {
+    match nonempty_var(GROK_HOME_ENV) {
         Some(home) => PathBuf::from(home).join("config.toml"),
         None => home_dir().join(".grok").join("config.toml"),
     }
@@ -39,7 +38,7 @@ pub fn config_toml_path() -> PathBuf {
 
 /// `$CODEX_HOME` if set and non-empty, else `~/.codex`.
 pub fn codex_home() -> PathBuf {
-    match nonempty_var("CODEX_HOME") {
+    match nonempty_var(CODEX_HOME_ENV) {
         Some(home) => PathBuf::from(home),
         None => home_dir().join(".codex"),
     }
@@ -62,8 +61,8 @@ pub fn codex_models_json_toml_value(provider_id: &str) -> String {
     if is_wsl() {
         return format!("~/.codex/{provider_id}-models.json");
     }
-    if nonempty_var("CODEX_HOME").is_some() {
-        format!("$CODEX_HOME/{provider_id}-models.json")
+    if nonempty_var(CODEX_HOME_ENV).is_some() {
+        format!("${CODEX_HOME_ENV}/{provider_id}-models.json")
     } else {
         format!("~/.codex/{provider_id}-models.json")
     }

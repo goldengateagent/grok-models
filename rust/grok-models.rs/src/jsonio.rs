@@ -364,9 +364,7 @@ pub fn set_codex_selection(doc: &mut Value, pid: Option<&str>) {
     }
 }
 
-/// If write is on but the configured provider is missing or disabled, turn
-/// write off and keep `codex_model_provider` for a one-shot cleanup.
-/// Does not invent keys when already unset.
+/// Sets `write_codex_config_toml` to `false` while preserving `codex_model_provider` for cleanup.
 pub fn reset_codex_if_invalid(doc: &mut Value) -> bool {
     let flag = doc
         .get("write_codex_config_toml")
@@ -425,8 +423,7 @@ pub fn web_search_status_token(doc: &Value) -> String {
     key
 }
 
-/// If the configured web_search model is missing or disabled, clear it.
-/// Does not invent keys when already unset.
+/// Sets `web_search` to empty when its model is missing or disabled.
 pub fn reset_web_search_if_invalid(doc: &mut Value) -> bool {
     let key = web_search_id(doc);
     if key.is_empty() {

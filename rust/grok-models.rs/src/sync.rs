@@ -146,13 +146,9 @@ fn provider_auth_models_list(provider: &Map<String, Value>) -> bool {
     matches!(provider.get("auth_models_list"), Some(Value::Bool(true)))
 }
 
-/// GET {base_url}/models. Returns (rows, None) or (None, Some(url)) on failure.
-/// Never prints — callers decide how to surface the URL.
-///
-/// If the provider has `auth_models_list: true`, send Authorization: Bearer.
-/// Otherwise fetch unauthenticated. On 401/403 with a usable env_key, set
-/// `auth_models_list` true and retry with the key. Success leaves the flag
-/// unchanged. Some public lists hang if a key is sent.
+/// Fetches `{base_url}/models`, retrying with the key on 401/403.
+/// Sends Authorization when `auth_models_list` is true; public lists fetch
+/// without a key because some hang with one. Returns rows or a failure URL.
 pub fn try_fetch_provider_models(
     base_url: &str,
     env_key: &str,
@@ -1042,8 +1038,7 @@ pub fn codex_config_toml(
     Ok(path)
 }
 
-/// Set one provider's enabled flag and persist providers.json immediately.
-/// No config.toml write; that waits for TUI exit / Sync Model Config.
+/// Persists one provider's enabled flag to providers.json.
 pub fn set_provider_enabled(doc: &mut Value, provider_id: &str, enabled: bool) -> Res<()> {
     if let Some(arr) = doc
         .get_mut("providers")
@@ -1558,7 +1553,6 @@ pub fn print_config_warnings(written: &UpdateConfigResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::test_support::grok_home_lock;
 
     #[test]
     fn last_updated_stamp_is_local_12h_mm_dd_yyyy() {
@@ -1738,15 +1732,7 @@ tables will have an empty base_url"
     /// config.toml writer needs.
     #[test]
     fn providers_json_holds_every_config_table_field() {
-        let _guard = grok_home_lock();
-        let home = std::env::temp_dir()
-            .join(format!("gm-sync-test-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
-        std::env::set_var("GROK_HOME", &home);
-        let codex = std::env::temp_dir().join(format!("gm-sync-test-codex-{}", std::process::id()));
-        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
-        std::env::set_var("CODEX_HOME", &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let api = fixture_api();
         // Enable all three catalog models up front so sync reconciles them
@@ -1834,7 +1820,6 @@ tables will have an empty base_url"
             }
         }
 
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Deletion flow: a provider is deleted and recorded with its enabled
@@ -1845,15 +1830,7 @@ tables will have an empty base_url"
     /// its tables back.
     #[test]
     fn delete_flow_targets_recorded_models_and_recovers_on_readd() {
-        let _guard = grok_home_lock();
-        let home = std::env::temp_dir()
-            .join(format!("gm-delete-test-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
-        std::env::set_var("GROK_HOME", &home);
-        let codex = std::env::temp_dir().join(format!("gm-delete-test-codex-{}", std::process::id()));
-        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
-        std::env::set_var("CODEX_HOME", &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         // Catalog knows only "plain"; "live_only" simulates a model that came
         // from the provider /models endpoint.
@@ -1963,8 +1940,7 @@ tables will have an empty base_url"
 
     #[test]
     fn update_config_toml_uses_stored_api_backend() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("api-backend");
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "p",
@@ -2004,19 +1980,6 @@ tables will have an empty base_url"
         );
     }
 
-    fn isolate_codex_homes(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-codex-{tag}-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-codex-{tag}-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
-        (grok, codex)
-    }
-
     fn two_provider_doc() -> Value {
         serde_json::json!({
             "providers": [
@@ -2047,8 +2010,7 @@ tables will have an empty base_url"
 
     #[test]
     fn codex_config_toml_writes_when_flag_set_and_skips_when_false() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("flag");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
@@ -2092,8 +2054,7 @@ tables will have an empty base_url"
 
     #[test]
     fn codex_config_toml_only_writes_selected_provider_and_first_enabled_model() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("one");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::set_codex_selection(&mut doc, Some("ollama-cloud"));
@@ -2121,8 +2082,7 @@ tables will have an empty base_url"
 
     #[test]
     fn codex_config_toml_skips_when_selected_provider_has_no_enabled_models() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("nomodels");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::set_codex_selection(&mut doc, Some("openrouter"));
@@ -2143,8 +2103,7 @@ tables will have an empty base_url"
 
     #[test]
     fn update_config_toml_resets_codex_when_provider_disabled() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("disable");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::set_codex_selection(&mut doc, Some("openrouter"));
@@ -2170,8 +2129,7 @@ tables will have an empty base_url"
 
     #[test]
     fn disable_clears_codex_toml_once_then_leaves_user_edits() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("once");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::set_codex_selection(&mut doc, Some("openrouter"));
@@ -2204,8 +2162,7 @@ tables will have an empty base_url"
 
     #[test]
     fn delete_codex_provider_clears_table_and_catalog_like_disable() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("delprov");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = two_provider_doc();
         jsonio::set_codex_selection(&mut doc, Some("openrouter"));
@@ -2540,8 +2497,7 @@ tables will have an empty base_url"
 
     #[test]
     fn codex_catalog_writes_filtered_input_modalities() {
-        let _guard = grok_home_lock();
-        let (_grok, _codex) = isolate_codex_homes("modalities");
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let mut doc = serde_json::json!({
             "providers": [{
@@ -2581,7 +2537,7 @@ tables will have an empty base_url"
                 .unwrap_or_default();
             panic!(
                 "catalog {catalog_path:?}: {e}; CODEX_HOME={:?}; siblings={entries:?}",
-                std::env::var("CODEX_HOME")
+                std::env::var(crate::env::vars::CODEX_HOME_ENV)
             );
         });
         let catalog: Value = serde_json::from_str(&catalog_text).expect("parse catalog");
@@ -2606,16 +2562,7 @@ tables will have an empty base_url"
 
     #[test]
     fn add_provider_entry_copies_catalog_npm() {
-        let _guard = crate::env::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-npm-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-npm-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let api = serde_json::json!({
             "prov": {
@@ -2657,22 +2604,11 @@ tables will have an empty base_url"
             "empty catalog npm must not be stored"
         );
 
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
     }
 
     #[test]
     fn add_provider_entry_uses_local_base_url_for_ollama_cloud() {
-        let _guard = crate::env::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-ollama-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-ollama-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let api = serde_json::json!({
             "ollama-cloud": {
@@ -2694,22 +2630,11 @@ tables will have an empty base_url"
             .find(|p| p["id"] == "ollama-cloud")
             .expect("provider present");
         assert_eq!(prov["base_url"], OLLAMA_CLOUD_LOCAL_BASE_URL);
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
     }
 
     #[test]
     fn add_provider_entry_generates_fresh_opencode_session_header() {
-        let _guard = crate::env::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-add-opencode-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-add-opencode-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        std::env::set_var("GROK_HOME", &grok);
-        std::env::set_var("CODEX_HOME", &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
 
         let api = serde_json::json!({
             "opencode-go": {
@@ -2735,7 +2660,5 @@ tables will have an empty base_url"
         }
         assert_ne!(session_ids[0], session_ids[1], "each add must mint a new session");
 
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
     }
 }

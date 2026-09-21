@@ -3977,26 +3977,6 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
 mod tests {
     use super::*;
     use crate::theme;
-    /// Point `GROK_HOME` and `CODEX_HOME` at this process's unit-test dirs.
-    ///
-    /// The environment is process-global, so the lock is taken *before* it is
-    /// written and returned to the caller, which must hold it for the whole
-    /// test. Writing it first would let a flow test repoint the paths out from
-    /// under a `sync` test that already holds the lock.
-    fn isolate_grok_home() -> std::sync::MutexGuard<'static, ()> {
-        let guard = crate::env::test_support::grok_home_lock();
-        let home = std::env::temp_dir()
-            .join(format!("gm-unit-home-{}", std::process::id()));
-        let codex = std::env::temp_dir()
-            .join(format!("gm-unit-codex-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&home).expect("create test GROK_HOME");
-        std::fs::create_dir_all(&codex).expect("create test CODEX_HOME");
-        std::env::set_var("GROK_HOME", &home);
-        std::env::set_var("CODEX_HOME", &codex);
-        guard
-    }
 
     /// Records every `addstr` call so tests can assert exact rendering
     /// (token colors, legend position, background sweep) without curses.
@@ -4588,7 +4568,7 @@ mod tests {
 
     #[test]
     fn add_provider_picker_stays_open_and_records_status_after_add() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         use crate::env::paths;
         std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
         let mut doc = serde_json::json!({"providers": []});
@@ -5722,7 +5702,7 @@ mod tests {
 
     #[test]
     fn config_flow_renders_fullscreen_layout() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5779,7 +5759,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_action_menu_enable_toggles_display() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5823,7 +5803,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_restores_terminal_on_exit() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
 use serde_json::json;
 
         let mut doc = json!({
@@ -5924,7 +5904,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_d_key_does_not_toggle_descriptions() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -5948,7 +5928,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_enter_on_descriptions_row_toggles_flag() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         // One provider: the trailing block starts right after it, so two
         // Downs (Codex Config, then Model Descriptions) land on the toggle.
         let mut doc = serde_json::json!({
@@ -5976,7 +5956,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_d_key_is_ignored_on_action_menu() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6003,7 +5983,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_delete_leaves_clean_main_menu() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "opencode",
@@ -6045,7 +6025,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_enter_on_enabled_model_writes_reasoning() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6096,7 +6076,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_model_cursor_stays_when_no_reasoning_levels() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6130,7 +6110,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_only_current_row_highlighted_in_enabled_models() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [{
                 "id": "prov",
@@ -6177,7 +6157,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_codex_picker_selects_enabled_provider_or_disabled() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [
                 {
@@ -6227,7 +6207,7 @@ use serde_json::json;
 
     #[test]
     fn config_flow_web_search_picker_selects_enabled_model_or_disabled() {
-        let _grok_home_guard = isolate_grok_home();
+        let _homes = crate::env::test_support::TestHomes::setup();
         let mut doc = serde_json::json!({
             "providers": [
                 {

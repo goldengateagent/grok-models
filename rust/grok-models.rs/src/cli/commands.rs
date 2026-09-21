@@ -691,12 +691,6 @@ pub fn cmd_sync() -> Res<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
-    fn set_homes(grok: &Path, codex: &Path) {
-        std::env::set_var("GROK_HOME", grok);
-        std::env::set_var("CODEX_HOME", codex);
-    }
 
     #[test]
     fn missing_combo_providers_dedupes_and_ignores_bare_and_known() {
@@ -724,15 +718,9 @@ mod tests {
 
     #[test]
     fn cmd_codex_sets_provider_or_disabled() {
-        let _guard = crate::env::test_support::grok_home_lock();
-        let pid = std::process::id();
-        let grok = std::env::temp_dir().join(format!("gm-cmd-codex-grok-{pid}"));
-        let codex = std::env::temp_dir().join(format!("gm-cmd-codex-codex-{pid}"));
-        let _ = std::fs::remove_dir_all(&grok);
-        let _ = std::fs::remove_dir_all(&codex);
-        std::fs::create_dir_all(&grok).unwrap();
-        std::fs::create_dir_all(&codex).unwrap();
-        set_homes(&grok, &codex);
+        let _homes = crate::env::test_support::TestHomes::setup();
+        let grok_home = &_homes.grok_home;
+        let codex_home = &_homes.codex_home;
 
         let mut doc = serde_json::json!({
             "providers": [{
@@ -745,51 +733,47 @@ mod tests {
         jsonio::dump_providers(&paths::providers_path(), &mut doc).unwrap();
 
         assert!(cmd_codex("true").is_err());
-        set_homes(&grok, &codex);
         cmd_codex("openrouter").expect("enable provider");
-        let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        let loaded = jsonio::load_providers_from(&grok_home.join("providers.json")).unwrap();
         assert_eq!(loaded["write_codex_config_toml"], Value::Bool(true));
         assert_eq!(loaded["codex_model_provider"], "openrouter");
         assert!(
-            !codex.join("openrouter-models.json").exists(),
+            !codex_home.join("openrouter-models.json").exists(),
             "catalog json must NOT be written on enable; only at sync"
         );
 
         // Sync is the only path that writes the Codex sibling files.
-        set_homes(&grok, &codex);
         crate::sync::update_config_toml().unwrap();
         assert!(
-            codex.join("openrouter-models.json").exists(),
+            codex_home.join("openrouter-models.json").exists(),
             "catalog json must be written by sync"
         );
 
-        set_homes(&grok, &codex);
         cmd_codex("disabled").expect("disable");
-        let loaded = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        let loaded = jsonio::load_providers_from(&grok_home.join("providers.json")).unwrap();
         assert_eq!(loaded["write_codex_config_toml"], Value::Bool(false));
         assert_eq!(
             loaded["codex_model_provider"], "openrouter",
             "disable alone must keep the remembered provider; only sync clears it"
         );
         assert!(
-            codex.join("openrouter-models.json").exists(),
+            codex_home.join("openrouter-models.json").exists(),
             "disable alone must not delete the catalog; only sync does"
         );
 
         // Next sync one-shot clears the remembered provider and deletes the catalog.
-        set_homes(&grok, &codex);
         crate::sync::update_config_toml().unwrap();
-        let cleared = jsonio::load_providers_from(&grok.join("providers.json")).unwrap();
+        let cleared = jsonio::load_providers_from(&grok_home.join("providers.json")).unwrap();
         assert_eq!(
             cleared["codex_model_provider"], "",
             "next sync must clear the remembered provider (one-shot)"
         );
         assert!(
-            !codex.join("openrouter-models.json").exists(),
+            !codex_home.join("openrouter-models.json").exists(),
             "catalog json must be deleted on sync after disable"
         );
 
-        set_homes(&grok, &codex);
         assert!(cmd_codex("missing").is_err());
+
     }
 }

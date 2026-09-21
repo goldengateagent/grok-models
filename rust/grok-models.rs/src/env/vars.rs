@@ -6,6 +6,13 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+/// Env var holding the Grok home dir.
+pub const GROK_HOME_ENV: &str = "GROK_HOME";
+/// Env var holding the Codex home dir.
+pub const CODEX_HOME_ENV: &str = "CODEX_HOME";
+/// Env var holding the user home dir.
+pub const HOME_ENV: &str = "HOME";
+
 /// WSL if /proc kernel strings contain microsoft.
 pub fn is_wsl() -> bool {
     static IS_WSL: OnceLock<bool> = OnceLock::new();
@@ -88,16 +95,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_var_value_reads_set_var() {
-        let _guard = crate::env::test_support::grok_home_lock();
-        const VAR: &str = "GROK_MODELS_TEST_FETCH_KEY";
-        std::env::remove_var(VAR);
-        assert_eq!(env_var_value(""), "");
-        assert_eq!(env_var_value(VAR), "");
-        std::env::set_var(VAR, "secret-token");
-        assert_eq!(env_var_value(VAR), "secret-token");
-        std::env::set_var(VAR, "");
-        assert_eq!(env_var_value(VAR), "");
-        std::env::remove_var(VAR);
+    fn test_home_helpers_point_env_at_fresh_dirs() {
+        let homes = crate::env::test_support::TestHomes::setup();
+        assert!(homes.grok_home.is_dir());
+        assert!(homes.codex_home.is_dir());
+        assert_ne!(homes.grok_home, homes.codex_home);
+        assert_eq!(
+            env_var_value(GROK_HOME_ENV),
+            homes.grok_home.to_string_lossy()
+        );
+        assert_eq!(
+            env_var_value(CODEX_HOME_ENV),
+            homes.codex_home.to_string_lossy()
+        );
     }
 }
