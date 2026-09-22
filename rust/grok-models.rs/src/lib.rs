@@ -9,9 +9,14 @@
 //!                `env::test_support` GROK_HOME test lock
 //! - `core`:      model id/table-key helpers, sorting, TOML field building
 //! - `benchmarks`: model benchmark score tables
-//! - `toml_out`:  `[model.*]` table emission and owned-section stripping
+//! - `toml_out`:  TOML text primitives shared by both config writers
 //! - `sync`:      provider entry writes, models.dev reconciliation,
 //!                config.toml writing
+//! - `fetch`:     provider and catalog fetching over HTTPS
+//! - `providers`: providers.json refresh, enable, delete, and add
+//! - `config_toml`: generated config.toml files
+//! - `codex_out`: Codex tables and model catalog JSON
+//! - `grok_out`:  Grok `[model.*]` tables and `[models]` section
 //! - `cli`:       CLI surface — `cli::args` parser and help text,
 //!                `cli::commands` command implementations
 //! - `client`:    blocking JSON HTTP client
@@ -23,13 +28,18 @@
 pub mod benchmarks;
 pub mod cli;
 pub mod client;
+pub mod codex_out;
 pub mod core;
 
+pub mod config_toml;
 pub mod env;
 pub mod fallback;
+pub mod fetch;
 pub mod flow;
+pub mod grok_out;
 pub mod json_utils;
 pub mod jsonio;
+pub mod providers;
 pub mod sync;
 pub mod theme;
 pub mod toml_out;

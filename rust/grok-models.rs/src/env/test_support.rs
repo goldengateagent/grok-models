@@ -4,6 +4,7 @@
 //! before writing env and hold the guard for the whole test.
 
 use super::vars::{CODEX_HOME_ENV, GROK_HOME_ENV};
+use crate::fetch::ModelsDev;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -73,4 +74,92 @@ impl Drop for TestHomes {
         let _ = std::fs::remove_dir_all(&self.grok_home);
         let _ = std::fs::remove_dir_all(&self.codex_home);
     }
+}
+
+/// Stamp shape check for sync report lines: MM-DD-YYYY HH:MM AM|PM.
+pub fn regex_lite_stamp(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 19 {
+        return false;
+    }
+    let digits = |i: usize| b[i].is_ascii_digit();
+    digits(0)
+        && digits(1)
+        && b[2] == b'-'
+        && digits(3)
+        && digits(4)
+        && b[5] == b'-'
+        && digits(6)
+        && digits(7)
+        && digits(8)
+        && digits(9)
+        && b[10] == b' '
+        && digits(11)
+        && digits(12)
+        && b[13] == b':'
+        && digits(14)
+        && digits(15)
+        && b[16] == b' '
+        && (&b[17..] == b"AM" || &b[17..] == b"PM")
+}
+
+/// Two-provider providers.json doc shared by Codex tests.
+pub fn two_provider_doc() -> serde_json::Value {
+    serde_json::json!({
+        "providers": [
+            {
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "enabled": true,
+                "env_key": "OPENROUTER_API_KEY",
+                "base_url": "https://openrouter.ai/api/v1",
+                "models": {
+                    "openrouter/free": { "name": "Free", "enabled": true }
+                }
+            },
+            {
+                "id": "ollama-cloud",
+                "name": "Ollama Cloud",
+                "enabled": true,
+                "env_key": "OLLAMA_API_KEY",
+                "base_url": "https://ollama.com/v1",
+                "models": {
+                    "gemma4:31b": { "name": "Gemma", "enabled": true },
+                    "deepseek-v4-flash:preview": { "name": "DeepSeek", "enabled": true }
+                }
+            }
+        ]
+    })
+}
+
+/// Fake models.dev payload so catalog tests run without the network.
+pub fn fixture_api() -> ModelsDev {
+    serde_json::from_value(serde_json::json!({
+        "prov": {
+            "name": "Prov",
+            "api": "https://api.prov.example/v1",
+            "env_key": "PROV_API_KEY",
+            "models": {
+                "full": {
+                    "name": "Full Model",
+                    "description": "A full model.",
+                    "limit": { "context": 200000.0 },
+                    "reasoning": true,
+                    "reasoning_options": [
+                        { "type": "effort",
+                          "values": ["none", "low", "high"] }
+                    ]
+                },
+                "reason_no_opts": {
+                    "name": "Reason No Opts",
+                    "reasoning": true
+                },
+                "plain": {
+                    "name": "Plain Model",
+                    "limit": { "context": 8192 }
+                }
+            }
+        }
+    }))
+    .unwrap()
 }
