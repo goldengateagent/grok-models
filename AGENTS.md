@@ -21,7 +21,7 @@ working tree) require the user to authorize them by saying `exec git`.
 review before asking for authorization.
 - Write the commit command as git commit -F - followed by a heredoc message with
   one summary line, a blank line, then bullet points.
-- Use formatting when emitting the git commands to the console.
+- Use a fenced sh block when emitting the git commands to the console.
 - Put git commands on separate lines, do not && git commands. 
 - Put files for git add on one line.
 - After approval, run only the authorized command(s) and echo the exact

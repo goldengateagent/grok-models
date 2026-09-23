@@ -3,7 +3,9 @@
 use crate::core;
 use crate::env::paths;
 use crate::fallback::prompt_line;
+use crate::fetch;
 use crate::jsonio;
+use crate::providers;
 use crate::sync;
 use crate::{Res, fail};
 use serde_json::{Map, Value};
@@ -334,9 +336,9 @@ pub fn cmd_toggle(enable_targets: &[String], disable_targets: &[String]) -> Res<
         .collect();
     let missing = missing_combo_providers(enable_targets, &existing_ids);
     if !missing.is_empty() {
-        let api = sync::fetch_models_dev()?;
+        let api = fetch::fetch_models_dev()?;
         for pid in &missing {
-            let r = sync::add_provider_entry(&mut doc, &api, pid)?;
+            let r = providers::add_provider_entry(&mut doc, &api, pid)?;
             report_add(pid, &r);
         }
     }
@@ -504,7 +506,7 @@ pub fn cmd_disable_all() -> Res<i32> {
 }
 
 /// Search models.dev providers by term; pick via numbered menu.
-pub fn search_providers(api: &crate::sync::ModelsDev, term: &str) -> Res<Option<String>> {
+pub fn search_providers(api: &crate::fetch::ModelsDev, term: &str) -> Res<Option<String>> {
     let term_l = term.to_lowercase();
     let mut matches: Vec<(String, String)> = Vec::new();
     for (pid, provider) in &api.providers {
@@ -550,17 +552,17 @@ pub fn search_providers(api: &crate::sync::ModelsDev, term: &str) -> Res<Option<
 /// Add a provider entry seeded from the models.dev catalog.
 pub fn cmd_add_provider(provider_id: &str) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
-    let api = sync::fetch_models_dev()?;
-    let r = sync::add_provider_entry(&mut doc, &api, provider_id)?;
+    let api = fetch::fetch_models_dev()?;
+    let r = providers::add_provider_entry(&mut doc, &api, provider_id)?;
     report_add(provider_id, &r);
     Ok(0)
 }
 
 /// Renders the stdout report for one add, matching the Python tool's wording
 /// and order: the live-fetch warning first, then the add line.
-fn report_add(provider_id: &str, r: &sync::AddProviderResponse) {
+fn report_add(provider_id: &str, r: &providers::AddProviderResponse) {
     if let Some(url) = &r.fetch_warning_url {
-        println!("{}", sync::live_fetch_error_status(url));
+        println!("{}", fetch::live_fetch_error_status(url));
     }
     if r.already_present {
         println!("Provider '{}' already exists.", provider_id);
@@ -694,13 +696,13 @@ pub fn cmd_import() -> Res<i32> {
 
 /// Search models.dev for a term, add the picked provider.
 pub fn cmd_search(term: &str) -> Res<i32> {
-    let api = sync::fetch_models_dev()?;
+    let api = fetch::fetch_models_dev()?;
     let provider_id = search_providers(&api, term)?;
     match provider_id {
         None => Ok(0),
         Some(pid) => {
             let mut doc = jsonio::load_providers()?;
-            let r = sync::add_provider_entry(&mut doc, &api, &pid)?;
+            let r = providers::add_provider_entry(&mut doc, &api, &pid)?;
             report_add(&pid, &r);
             Ok(0)
         }
@@ -772,7 +774,7 @@ mod tests {
         );
 
         // Sync is the only path that writes the Codex sibling files.
-        crate::sync::update_config_toml().unwrap();
+        crate::config_toml::update_config_toml().unwrap();
         assert!(
             codex_home.join("openrouter-models.json").exists(),
             "catalog json must be written by sync"
@@ -791,7 +793,7 @@ mod tests {
         );
 
         // Next sync one-shot clears the remembered provider and deletes the catalog.
-        crate::sync::update_config_toml().unwrap();
+        crate::config_toml::update_config_toml().unwrap();
         let cleared = jsonio::load_providers_from(&grok_home.join("providers.json")).unwrap();
         assert_eq!(
             cleared["codex_model_provider"], "",

@@ -2,7 +2,7 @@
 set -e
 
 REPO="goldengateagent/grok-models"
-VERSION="1.2.0"
+VERSION="2.0.0"
 ARTIFACT="grok-models"
 
 INSTALL_DIR="$HOME/.grok-models"

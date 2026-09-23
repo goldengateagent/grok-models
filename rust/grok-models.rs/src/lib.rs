@@ -22,8 +22,9 @@
 //! - `client`:    blocking JSON HTTP client
 //! - `fallback`:  numbered (non-TTY) interactive flows
 //! - `theme`:     Tokyo Nights palette, truecolor SGR, opacity compensation
-//! - `tui`:       Ratatui/Crossterm screens
-//! - `flow`:      interactive TUI orchestration (TUI + numbered fallback)
+//! - `tui`:       previous terminal screens, used only with `--legacy`
+//! - `ratatui`:   default interactive interface
+//! - `flow`:      interactive UI orchestration (Ratatui, legacy TUI, numbered fallback)
 
 pub mod benchmarks;
 pub mod cli;
@@ -40,6 +41,7 @@ pub mod grok_out;
 pub mod json_utils;
 pub mod jsonio;
 pub mod providers;
+pub mod ratatui;
 pub mod sync;
 pub mod theme;
 pub mod toml_out;

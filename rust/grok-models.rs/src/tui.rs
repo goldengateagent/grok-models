@@ -38,6 +38,153 @@ use std::time::Duration;
 /// Fate of a TUI invocation when /dev/tty isn't a TTY.
 pub struct CursesFailed;
 
+const PROVIDER_NAME_COL_MAX: usize = 25;
+const MAIN_PROVIDER_NAME_COL_MAX: usize = 15;
+const PROVIDER_TOKEN_W: usize = 10;
+const PROVIDER_ENV_GAP: usize = 2;
+const PROVIDER_ENV_PAD: i32 = 1;
+const MODEL_DESC_LABEL: &str = "Model Descriptions";
+const WEB_SEARCH_LABEL: &str = "Web Search";
+const CODEX_CONFIG_LABEL: &str = "Codex Config";
+const UPDATE_LIST_LABEL: &str = "Update Model List";
+const SYNC_CONFIG_LABEL: &str = "Sync Model Config";
+
+fn clipped_paren_name(name: &str, max: usize) -> String {
+    format!("({})", name.chars().take(max).collect::<String>())
+}
+
+/// Padded `(name) id [enabled/disabled]` rows (no env cell).
+fn format_provider_id_rows(rows: &[(String, String, bool)]) -> Vec<String> {
+    let names: Vec<String> = rows
+        .iter()
+        .map(|(name, _, _)| clipped_paren_name(name, PROVIDER_NAME_COL_MAX))
+        .collect();
+    let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let id_w = rows.iter().map(|(_, pid, _)| pid.len()).max().unwrap_or(0);
+    let token_col = if rows.is_empty() {
+        0
+    } else {
+        name_w + 1 + id_w + 1
+    };
+    names
+        .iter()
+        .zip(rows.iter())
+        .map(|(nlab, (_, pid, enabled))| {
+            let token = if *enabled { "[enabled]" } else { "[disabled]" };
+            let head = format!("{:<name_w$} {:<id_w$}", nlab, pid);
+            format!("{:<token_col$}{token}", head)
+        })
+        .collect()
+}
+
+/// Env-cell text on a main-menu provider row (`ENV = value`), if any.
+fn provider_row_env_text(opt: &str) -> Option<&str> {
+    for tok in ["[enabled]", "[disabled]"] {
+        if let Some(p) = opt.find(tok) {
+            let rest = opt[p + tok.len()..].trim_start_matches(' ');
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// Column where `[enabled]` / `[disabled]` / `[date]` start on the main menu.
+fn provider_state_token_col(providers: &[Map<String, Value>]) -> usize {
+    let name_w = providers
+        .iter()
+        .map(|p| {
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
+            clipped_paren_name(name, MAIN_PROVIDER_NAME_COL_MAX).len()
+        })
+        .max()
+        .unwrap_or(0);
+    let id_w = providers
+        .iter()
+        .map(|p| {
+            p.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .len()
+        })
+        .max()
+        .unwrap_or(0);
+    let provider_col = if providers.is_empty() {
+        0
+    } else {
+        name_w + 3 + id_w + 1
+    };
+    provider_col
+        .max(MODEL_DESC_LABEL.len() + 1)
+        .max(WEB_SEARCH_LABEL.len() + 1)
+        .max(CODEX_CONFIG_LABEL.len() + 1)
+        .max(UPDATE_LIST_LABEL.len() + 1)
+        .max(SYNC_CONFIG_LABEL.len() + 1)
+}
+
+fn pad_state_label(label: &str, token: &str, token_col: usize) -> String {
+    let mut out = String::from(label);
+    if out.len() < token_col {
+        out.push_str(&" ".repeat(token_col - out.len()));
+    }
+    out.push_str(token);
+    out
+}
+
+/// Padded main-menu provider rows: aligned dashes, aligned state tokens,
+/// then a gap + env cell.
+fn provider_menu_labels(providers: &[Map<String, Value>]) -> Vec<String> {
+    let names: Vec<String> = providers
+        .iter()
+        .map(|p| {
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let name = p.get("name").and_then(Value::as_str).unwrap_or(pid);
+            clipped_paren_name(name, MAIN_PROVIDER_NAME_COL_MAX)
+        })
+        .collect();
+    let name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
+    let id_w = providers
+        .iter()
+        .map(|p| {
+            p.get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .len()
+        })
+        .max()
+        .unwrap_or(0);
+    let token_col = provider_state_token_col(providers);
+    let env_w = providers
+        .iter()
+        .map(|p| crate::core::provider_env_key_from_json(p).len())
+        .max()
+        .unwrap_or(0);
+    names
+        .iter()
+        .zip(providers.iter())
+        .map(|(name, p)| {
+            let state = if p.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let pid = p.get("id").and_then(Value::as_str).unwrap_or_default();
+            let token = format!("[{state}]");
+            let head = format!("{:<name_w$} - {:<id_w$}", name, pid);
+            let mut left = format!("{:<token_col$}{:<tw$}", head, token, tw = PROVIDER_TOKEN_W);
+            let envk = crate::core::provider_env_key_from_json(p);
+            if !envk.is_empty() {
+                left.push_str(&" ".repeat(PROVIDER_ENV_GAP));
+                left.push_str(&format!("{envk:<env_w$} = "));
+                left.push_str(&crate::env::vars::env_key_masked(&envk));
+            }
+            left
+        })
+        .collect()
+}
+
 pub fn curses_failed_marker() -> CursesFailed {
     CursesFailed
 }
@@ -964,12 +1111,12 @@ pub fn select_win<S: Stdscr>(
         let mut max_env_w = env_hdr.len();
         let mut has_env_cell = false;
         for opt in options {
-            if let Some(env) = crate::core::provider_row_env_text(opt) {
+            if let Some(env) = provider_row_env_text(opt) {
                 has_env_cell = true;
                 max_env_w = max_env_w.max(env.len());
             }
         }
-        let env_pad = crate::core::PROVIDER_ENV_PAD;
+        let env_pad = PROVIDER_ENV_PAD;
 
         for row in 0..list_h {
             let idx = top + row;
@@ -1847,7 +1994,7 @@ fn model_list_row(
         P::Text
     };
     let mname: String = mname.chars().take(MODEL_NAME_COL_MAX).collect();
-    let pname: String = pname.chars().take(core::PROVIDER_NAME_COL_MAX).collect();
+    let pname: String = pname.chars().take(PROVIDER_NAME_COL_MAX).collect();
     let plab = format!("({pname})");
     let state = if enabled { "[enabled]" } else { "[disabled]" };
     let state_pair = if enabled { P::Enabled } else { P::Error };
@@ -1974,7 +2121,7 @@ impl<'a> FilterList for ModelPicker<'a> {
             name_w = name_w.max(n.chars().count().min(MODEL_NAME_COL_MAX));
         }
         self.name_w = name_w.max("Model".chars().count());
-        self.pname_w = self.pname.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2;
+        self.pname_w = self.pname.chars().count().min(PROVIDER_NAME_COL_MAX) + 2;
         self.pname_w = self.pname_w.max("Provider".chars().count());
         (ordered, separators)
     }
@@ -2160,7 +2307,7 @@ pub fn inline_error_win<S: Stdscr>(stdscr: &mut S, message: &str) {
 /// one visit.
 struct AddProviderPicker<'a> {
     doc: &'a mut Value,
-    api: crate::sync::ModelsDev,
+    api: crate::fetch::ModelsDev,
     added: Option<String>,
     status: std::rc::Rc<RefCell<Option<String>>>,
     // Cache for padded_labels(), keyed on (providers_count, api_count).
@@ -2236,7 +2383,7 @@ impl<'a> AddProviderPicker<'a> {
                 rows.push((cat_name.to_string(), pid.clone(), false));
             }
         }
-        core::format_provider_id_rows(&rows)
+        format_provider_id_rows(&rows)
             .into_iter()
             .zip(rows.iter())
             .map(|(lab, (_, pid, _))| (pid.clone(), lab))
@@ -2331,7 +2478,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
         if self.added_ids().contains(pid) {
             return true; // already configured; inert row (delete via its menu)
         }
-        let r = match crate::sync::add_provider_entry(self.doc, &self.api, pid) {
+        let r = match crate::providers::add_provider_entry(self.doc, &self.api, pid) {
             Err(e) => {
                 // Add errors surface inline so the surrounding session survives.
                 inline_error_win(stdscr, &format!("Add failed: {}", e.message));
@@ -2349,7 +2496,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
             )
         });
         *self.status.borrow_mut() = match r.fetch_warning_url {
-            Some(url) => Some(crate::sync::live_fetch_error_status(&url)),
+            Some(url) => Some(crate::fetch::live_fetch_error_status(&url)),
             None => self.added.clone(),
         };
         true // stay open so more providers can be added
@@ -2360,7 +2507,7 @@ impl<'a> FilterList for AddProviderPicker<'a> {
 /// The fetch runs before the modal opens so a failure never leaves it on
 /// screen. The modal stays open across adds; ESC or Left-at-top closes it.
 pub fn add_provider_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<String> {
-    let api = match crate::sync::fetch_models_dev() {
+    let api = match crate::fetch::fetch_models_dev() {
         Ok(a) => a,
         Err(e) => {
             inline_error_win(stdscr, &format!("Fetch failed: {}", e.message));
@@ -2517,7 +2664,7 @@ fn combo_enabled(doc: &Value, pid: &str, mid: &str) -> bool {
 /// extra enabled models that exist only in the doc are appended.
 /// Entries: (pid, mid, model display name, provider display name).
 fn build_add_model_catalog(
-    api: &crate::sync::ModelsDev,
+    api: &crate::fetch::ModelsDev,
     doc: &Value,
 ) -> Vec<(String, String, String, String)> {
     let mut catalog: Vec<(String, String, String, String)> = Vec::new();
@@ -2583,7 +2730,7 @@ fn build_add_model_catalog(
 
 struct AddModelPicker<'a> {
     doc: &'a mut Value,
-    api: crate::sync::ModelsDev,
+    api: crate::fetch::ModelsDev,
     status: Option<String>,
     // Cache of (pid, mid) combos that are enabled in providers.json, so render()
     // does O(1) lookups instead of a linear scan per row per keystroke.
@@ -2686,7 +2833,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             .unwrap_or(0);
         self.pname_w = ordered
             .iter()
-            .map(|(_, _, _, p)| p.chars().count().min(core::PROVIDER_NAME_COL_MAX) + 2)
+            .map(|(_, _, _, p)| p.chars().count().min(PROVIDER_NAME_COL_MAX) + 2)
             .max()
             .unwrap_or(0);
         (ordered, separators)
@@ -2753,7 +2900,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
         let mut added = false;
         let mut fetch_warning_url = None;
         if !existing.iter().any(|e| e == pid) {
-            match crate::sync::add_provider_entry(self.doc, &self.api, pid) {
+            match crate::providers::add_provider_entry(self.doc, &self.api, pid) {
                 Err(e) => {
                     inline_error_win(stdscr, &format!("Add failed: {}", e.message));
                     return true; // stay open
@@ -2793,7 +2940,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
             String::new()
         };
         self.status = Some(match fetch_warning_url {
-            Some(url) => crate::sync::live_fetch_error_status(&url),
+            Some(url) => crate::fetch::live_fetch_error_status(&url),
             None => format!("{prefix}Enabled {mname} ({pname}) - {pid}/{mid}."),
         });
         // Stay open so the user can keep adding models; ESC returns to the
@@ -2809,7 +2956,7 @@ impl<'a> FilterList for AddModelPicker<'a> {
 /// and are inert. Returns the confirmation status line for the parent menu,
 /// or None.
 pub fn add_model_win<S: Stdscr>(stdscr: &mut S, doc: &mut Value) -> Option<String> {
-    let api = match crate::sync::fetch_models_dev() {
+    let api = match crate::fetch::fetch_models_dev() {
         Ok(a) => a,
         Err(e) => {
             inline_error_win(stdscr, &format!("Fetch failed: {}", e.message));
@@ -3204,15 +3351,15 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             .get("include_descriptions")
             .and_then(Value::as_bool)
             .unwrap_or(crate::jsonio::INCLUDE_DESCRIPTIONS_DEFAULT);
-        let mut labels: Vec<String> = crate::core::provider_menu_labels(&ordered);
-        let token_col = crate::core::provider_state_token_col(&ordered);
-        labels.push(crate::core::pad_state_label(
-            crate::core::CODEX_CONFIG_LABEL,
+        let mut labels: Vec<String> = provider_menu_labels(&ordered);
+        let token_col = provider_state_token_col(&ordered);
+        labels.push(pad_state_label(
+            CODEX_CONFIG_LABEL,
             &format!("[{}]", crate::jsonio::codex_status_token(doc)),
             token_col,
         ));
-        labels.push(crate::core::pad_state_label(
-            crate::core::MODEL_DESC_LABEL,
+        labels.push(pad_state_label(
+            MODEL_DESC_LABEL,
             &format!(
                 "[{}]",
                 if descriptions_on {
@@ -3223,30 +3370,30 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             ),
             token_col,
         ));
-        labels.push(crate::core::pad_state_label(
-            crate::core::WEB_SEARCH_LABEL,
+        labels.push(pad_state_label(
+            WEB_SEARCH_LABEL,
             &format!("[{}]", crate::jsonio::web_search_status_token(doc)),
             token_col,
         ));
         match doc.get("last_updated").and_then(Value::as_str) {
             Some(ts) if !ts.is_empty() => {
-                labels.push(crate::core::pad_state_label(
-                    crate::core::UPDATE_LIST_LABEL,
+                labels.push(pad_state_label(
+                    UPDATE_LIST_LABEL,
                     &format!("[{ts}]"),
                     token_col,
                 ));
             }
-            _ => labels.push(crate::core::UPDATE_LIST_LABEL.to_string()),
+            _ => labels.push(UPDATE_LIST_LABEL.to_string()),
         }
         match doc.get("last_synced").and_then(Value::as_str) {
             Some(ts) if !ts.is_empty() => {
-                labels.push(crate::core::pad_state_label(
-                    crate::core::SYNC_CONFIG_LABEL,
+                labels.push(pad_state_label(
+                    SYNC_CONFIG_LABEL,
                     &format!("[{ts}]"),
                     token_col,
                 ));
             }
-            _ => labels.push(crate::core::SYNC_CONFIG_LABEL.to_string()),
+            _ => labels.push(SYNC_CONFIG_LABEL.to_string()),
         }
         labels.push("Add Provider".to_string());
         labels.push("Add Model".to_string());
@@ -3312,7 +3459,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 values.push(p.get("id").and_then(Value::as_str).map(|s| s.to_string()));
             }
             let mut choices: Vec<String> = vec!["disabled".to_string()];
-            choices.extend(crate::core::provider_menu_labels(&enabled));
+            choices.extend(provider_menu_labels(&enabled));
             let writing = doc
                 .get("write_codex_config_toml")
                 .and_then(Value::as_bool)
@@ -3358,14 +3505,14 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         // the new pick and sync again.
                         crate::jsonio::set_codex_selection(doc, None);
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml();
+                        let _ = crate::config_toml::update_config_toml();
                         crate::jsonio::set_codex_selection(doc, sel.as_deref());
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml();
+                        let _ = crate::config_toml::update_config_toml();
                     } else {
                         crate::jsonio::set_codex_selection(doc, sel.as_deref());
                         let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                        let _ = crate::sync::update_config_toml();
+                        let _ = crate::config_toml::update_config_toml();
                     }
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
@@ -3434,7 +3581,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 Some(SelectOutcome::Picked(i)) => {
                     crate::jsonio::set_web_search(doc, values[i].as_deref());
                     let _ = jsonio::dump_providers(&paths::providers_path(), doc);
-                    let _ = crate::sync::update_config_toml();
+                    let _ = crate::config_toml::update_config_toml();
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
                     }
@@ -3450,7 +3597,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 3 {
-            match crate::sync::update_providers_json() {
+            match crate::providers::update_providers_json() {
                 Ok(response) => {
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
@@ -3489,7 +3636,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
             continue;
         }
         if pi == ordered.len() + 4 {
-            match crate::sync::update_config_toml() {
+            match crate::config_toml::update_config_toml() {
                 Ok(_) => {
                     if let Ok(fresh) = jsonio::load_providers() {
                         *doc = fresh;
@@ -3650,7 +3797,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                 }
                 1 => {
                     let enabled = !enabled;
-                    crate::sync::set_provider_enabled(doc, &provider_id, enabled)?;
+                    crate::providers::set_provider_enabled(doc, &provider_id, enabled)?;
                     changed = true;
                 }
                 2 => {
@@ -3687,7 +3834,7 @@ pub fn run_config_flow_with_backend<S: Stdscr>(stdscr: &mut S, doc: &mut Value) 
                         stdscr,
                         &format!("Delete Provider {}?", core::provider_display(&view)),
                     ) {
-                        crate::sync::delete_provider_and_flush(doc, &provider_id)?;
+                        crate::providers::delete_provider_and_flush(doc, &provider_id)?;
                         changed = true;
                     }
                     menu_cursor = 0;
@@ -4121,6 +4268,118 @@ fn parse_key_prefix(buf: &[u8]) -> Option<(Key, usize)> {
 mod tests {
     use super::*;
     use crate::theme;
+    use serde_json::json;
+
+    #[test]
+    fn format_provider_id_rows_aligns_state_tokens() {
+        let rows = format_provider_id_rows(&[
+            ("A".into(), "a".into(), true),
+            ("Beta Name".into(), "long-id".into(), false),
+        ]);
+        let tok_a = rows[0].find('[').unwrap();
+        let tok_b = rows[1].find('[').unwrap();
+        assert_eq!(
+            tok_a, tok_b,
+            "state tokens must share a column:\n{}\n{}",
+            rows[0], rows[1]
+        );
+        assert!(rows[0].starts_with("(A)"), "{}", rows[0]);
+        assert!(rows[1].contains(" long-id"), "{}", rows[1]);
+        assert!(!rows[1].contains(" - "), "{}", rows[1]);
+        assert!(rows[0].ends_with("[enabled]"), "{}", rows[0]);
+        assert!(rows[1].ends_with("[disabled]"), "{}", rows[1]);
+    }
+
+    #[test]
+    fn provider_menu_labels_aligns_ids_tokens_and_env() {
+        let a = json!({
+            "id": "a", "name": "A", "enabled": true, "env_key": "A_KEY"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let b = json!({
+            "id": "long-id", "name": "Beta Name", "enabled": false, "env_key": "LONGER_API_KEY"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let labels = provider_menu_labels(&[a.clone(), b.clone()]);
+        let tok_a = labels[0].find('[').unwrap();
+        let tok_b = labels[1].find('[').unwrap();
+        assert_eq!(
+            tok_a, tok_b,
+            "state tokens must share a column:\n{}\n{}",
+            labels[0], labels[1]
+        );
+        let env_a = labels[0].find("A_KEY").unwrap();
+        let env_b = labels[1].find("LONGER_API_KEY").unwrap();
+        assert_eq!(
+            env_a, env_b,
+            "env cells must share a column:\n{}\n{}",
+            labels[0], labels[1]
+        );
+        assert_eq!(
+            labels[0].find(" = "),
+            labels[1].find(" = "),
+            "equals must share a column:\n{}\n{}",
+            labels[0],
+            labels[1]
+        );
+        assert_eq!(
+            &labels[0][tok_a..tok_a + PROVIDER_TOKEN_W],
+            "[enabled] ",
+            "[enabled] must pad to [disabled] width"
+        );
+        assert_eq!(&labels[1][tok_b..tok_b + PROVIDER_TOKEN_W], "[disabled]");
+        let col = provider_state_token_col(&[a.clone(), b.clone()]);
+        let desc = pad_state_label(MODEL_DESC_LABEL, "[enabled]", col);
+        let upd = pad_state_label(UPDATE_LIST_LABEL, "[08-26-2026 03:15 PM]", col);
+        let syn = pad_state_label(SYNC_CONFIG_LABEL, "[08-26-2026 03:15 PM]", col);
+        assert_eq!(
+            desc.find('['),
+            Some(tok_a),
+            "Model Descriptions token must line up"
+        );
+        assert_eq!(
+            upd.find('['),
+            Some(tok_a),
+            "Update Model List token must line up"
+        );
+        assert_eq!(
+            syn.find('['),
+            Some(tok_a),
+            "Sync Model Config token must line up"
+        );
+    }
+
+    #[test]
+    fn format_provider_id_rows_clips_name() {
+        let rows = format_provider_id_rows(&[(
+            "MiniMax Token Plan (minimaxi.com)".into(),
+            "x".into(),
+            true,
+        )]);
+        assert!(
+            rows[0].starts_with("(MiniMax Token Plan (minim) "),
+            "{}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn provider_menu_labels_clips_name() {
+        let p = json!({
+            "id": "x",
+            "name": "MiniMax Token Plan (minimaxi.com)",
+            "enabled": true,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let labels = provider_menu_labels(&[p]);
+        assert!(labels[0].starts_with("(MiniMax Token P) "), "{}", labels[0]);
+    }
 
     /// Records every `addstr` call so tests can assert exact rendering
     /// (token colors, legend position, background sweep) without curses.
@@ -4674,7 +4933,7 @@ mod tests {
                     "models": {}
                 }]
             });
-            let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
+            let api: crate::fetch::ModelsDev = serde_json::from_value(serde_json::json!({
                 "zzz-last": {"name": "Zzz Last"},
                 "anthropic": {"name": "Anthropic"},
                 "opencode": {"name": "OpenCode"},
@@ -4769,7 +5028,7 @@ mod tests {
         use crate::env::paths;
         std::fs::create_dir_all(paths::providers_path().parent().unwrap()).unwrap();
         let mut doc = serde_json::json!({"providers": []});
-        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
+        let api: crate::fetch::ModelsDev = serde_json::from_value(serde_json::json!({
             "openrouter": {"name": "OpenRouter", "models": {
                 "or-1": {"name": "OR One"}
             }}
@@ -5300,7 +5559,7 @@ mod tests {
 
     #[test]
     fn build_add_model_catalog_includes_enabled_and_doc_only() {
-        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
+        let api: crate::fetch::ModelsDev = serde_json::from_value(serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {}
@@ -5346,7 +5605,7 @@ mod tests {
                 "models": {"alpha": {"name": "Alpha One", "enabled": true}}
             }]
         });
-        let api: crate::sync::ModelsDev = serde_json::from_value(serde_json::json!({
+        let api: crate::fetch::ModelsDev = serde_json::from_value(serde_json::json!({
             "zeta": {"name": "Zeta AI", "models": {
                 "alpha": {"name": "Alpha One"},
                 "beta": {},
@@ -5508,8 +5767,7 @@ mod tests {
         assert!(has_enabled_row, "preview missing enabled-model row");
 
         // Drive the selector with padded provider rows + env suffix.
-        let options =
-            crate::core::provider_menu_labels(&[doc["providers"][0].as_object().unwrap().clone()]);
+        let options = provider_menu_labels(&[doc["providers"][0].as_object().unwrap().clone()]);
         let mut f = FakeStdscr::new(30, 80);
         f.script(Key::Char('q'));
         let _ = select_win(

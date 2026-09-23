@@ -361,7 +361,7 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                 }
                 1 => {
                     let enabled = !was_enabled;
-                    crate::sync::set_provider_enabled(doc, &provider_id, enabled)?;
+                    crate::providers::set_provider_enabled(doc, &provider_id, enabled)?;
                     let verb = if was_enabled { "Disabled" } else { "Enabled" };
                     println!("{verb} provider '{provider_id}'.");
                     changed = true;
@@ -371,7 +371,8 @@ pub fn numbered_config_flow(doc: &mut Value) -> Res<bool> {
                         .map(|p| crate::core::provider_display(&p))
                         .unwrap_or_else(|| format!("({provider_id}) - {provider_id}"));
                     if confirm_delete(&display)? {
-                        let written = crate::sync::delete_provider_and_flush(doc, &provider_id)?;
+                        let written =
+                            crate::providers::delete_provider_and_flush(doc, &provider_id)?;
                         crate::sync::print_config_warnings(&written);
                         println!("Deleted Provider {display}.");
                         changed = true;

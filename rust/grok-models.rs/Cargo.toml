@@ -1,6 +1,6 @@
 [package]
 name = "grok-models"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2024"
 description = "TUI for configuring Grok Build and Codex to use custom models from alternate providers and gateways."
 default-run = "grok-models"

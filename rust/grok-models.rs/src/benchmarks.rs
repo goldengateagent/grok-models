@@ -14,6 +14,79 @@ pub fn scores_for_live_id(mid: &str) -> Option<&'static Scores> {
     BENCHMARKS.get(slug)
 }
 
+/// One catalog row. `slug` is the Artificial Analysis key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BenchRow {
+    pub name: &'static str,
+    pub slug: &'static str,
+    pub intel: f32,
+    pub coding: f32,
+}
+
+/// Column order for Shift+S: name, slug, intel, coding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchSort {
+    Name,
+    Slug,
+    Intel,
+    Coding,
+}
+
+impl BenchSort {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Name => Self::Slug,
+            Self::Slug => Self::Intel,
+            Self::Intel => Self::Coding,
+            Self::Coding => Self::Name,
+        }
+    }
+
+    pub fn column(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Slug => 1,
+            Self::Intel => 2,
+            Self::Coding => 3,
+        }
+    }
+}
+
+/// Every `BENCHMARKS` entry, filtered by name or slug, then sorted.
+/// Intel and coding sort highest first. An empty query returns the full map.
+pub fn rows(query: &str, sort: BenchSort) -> Vec<BenchRow> {
+    let term = query.to_lowercase();
+    let mut out: Vec<BenchRow> = BENCHMARKS
+        .entries()
+        .filter(|(slug, scores)| {
+            term.is_empty()
+                || scores.name.to_lowercase().contains(&term)
+                || slug.to_lowercase().contains(&term)
+        })
+        .map(|(slug, scores)| BenchRow {
+            name: scores.name,
+            slug: *slug,
+            intel: scores.intel,
+            coding: scores.coding,
+        })
+        .collect();
+    out.sort_by(|a, b| match sort {
+        BenchSort::Name => a
+            .name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.slug.cmp(b.slug)),
+        BenchSort::Slug => a.slug.cmp(b.slug),
+        BenchSort::Intel => cmp_score_desc(a.intel, b.intel).then_with(|| a.slug.cmp(b.slug)),
+        BenchSort::Coding => cmp_score_desc(a.coding, b.coding).then_with(|| a.slug.cmp(b.slug)),
+    });
+    out
+}
+
+fn cmp_score_desc(a: f32, b: f32) -> std::cmp::Ordering {
+    b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
+}
+
 // Keys in both maps stay sorted ascending.
 pub static BENCHMARKS: phf::Map<&'static str, Scores> = phf_map! {
     "claude-4-5-haiku-reasoning" => Scores { name: "Claude 4.5 Haiku (Reasoning)", intel: 17.6, coding: 43.9 },
@@ -55,10 +128,13 @@ pub static BENCHMARKS: phf::Map<&'static str, Scores> = phf_map! {
     "gpt-5-6-sol" => Scores { name: "GPT-5.6 Sol (max)", intel: 47.1, coding: 77.4 },
     "gpt-5-6-terra" => Scores { name: "GPT-5.6 Terra (max)", intel: 42.3, coding: 76.7 },
     "gpt-6-astra" => Scores { name: "GPT-6 Astra (max)", intel: 52.8, coding: 76.9 },
+    "gpt-6-luna" => Scores { name: "GPT-6 Luna (max)", intel: 37.3, coding: 0.0 },
+    "gpt-6-sol" => Scores { name: "GPT-6 Sol (max)", intel: 47.5, coding: 0.0 },
     "gpt-oss-120b" => Scores { name: "gpt-oss-120b (high)", intel: 12.3, coding: 30.4 },
     "gpt-oss-20b" => Scores { name: "gpt-oss-20b (high)", intel: 9.0, coding: 20.7 },
     "grok-4-5" => Scores { name: "Grok 4.5 (high)", intel: 39.1, coding: 72.4 },
     "grok-4-6" => Scores { name: "Grok 4.6 (high)", intel: 44.4, coding: 76.8 },
+    "grok-4-7-high" => Scores { name: "Grok 4.7 (high)", intel: 46.3, coding: 0.0 },
     "hy3" => Scores { name: "Hy3", intel: 25.8, coding: 58.8 },
     "inkling" => Scores { name: "Inkling (xhigh)", intel: 25.5, coding: 52.1 },
     "inkling-small" => Scores { name: "Inkling Small", intel: 26.1, coding: 52.9 },
@@ -69,6 +145,7 @@ pub static BENCHMARKS: phf::Map<&'static str, Scores> = phf_map! {
     "longcat-2-0" => Scores { name: "LongCat 2.0", intel: 19.7, coding: 45.3 },
     "mimo-v2-5-0424" => Scores { name: "MiMo-V2.5", intel: 22.3, coding: 56.8 },
     "mimo-v2-5-pro" => Scores { name: "MiMo-V2.5-Pro", intel: 26.4, coding: 60.2 },
+    "mimo-v2-6-pro" => Scores { name: "MiMo-V2.6-Pro", intel: 46.3, coding: 0.0 },
     "minimax-m3" => Scores { name: "MiniMax-M3", intel: 29.6, coding: 58.6 },
     "mistral-large-3" => Scores { name: "Mistral Large 3", intel: 9.7, coding: 20.1 },
     "mistral-small-4" => Scores { name: "Mistral Small 4 (Reasoning)", intel: 11.5, coding: 26.6 },
@@ -89,6 +166,7 @@ pub static BENCHMARKS: phf::Map<&'static str, Scores> = phf_map! {
     "qwen3-5-397b-a17b" => Scores { name: "Qwen3.5 397B A17B (Reasoning)", intel: 19.1, coding: 48.2 },
     "qwen3-7-max" => Scores { name: "Qwen3.7 Max", intel: 29.9, coding: 66.0 },
     "qwen3-7-plus" => Scores { name: "Qwen3.7 Plus", intel: 25.8, coding: 55.9 },
+    "qwen3-8-27b" => Scores { name: "Qwen3.8 27B (xhigh)", intel: 33.7, coding: 68.1 },
     "qwen3-8-flash-next" => Scores { name: "Qwen3.8-Flash-Next", intel: 39.9, coding: 73.1 },
     "qwen3-8-max" => Scores { name: "Qwen3.8 Max (0902)", intel: 45.4, coding: 76.2 },
     "step-3-7-flash" => Scores { name: "Step 3.7 Flash", intel: 19.5, coding: 39.6 },
@@ -154,9 +232,12 @@ pub static MODEL_TO_SLUG: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.6-sol" => "gpt-5-6-sol",
     "gpt-5.6-terra" => "gpt-5-6-terra",
     "gpt-6-astra" => "gpt-6-astra",
+    "gpt-6-luna" => "gpt-6-luna",
+    "gpt-6-sol" => "gpt-6-sol",
     "gpt-oss:120b-cloud" => "gpt-oss-120b",
     "grok-4.5" => "grok-4-5",
     "grok-4.6" => "grok-4-6",
+    "grok-4.7" => "grok-4-7-high",
     "hy3" => "hy3",
     "hy4-preview" => "",
     "inclusionai/ling-3.0-flash" => "ling-3-0-flash",
@@ -180,6 +261,7 @@ pub static MODEL_TO_SLUG: phf::Map<&'static str, &'static str> = phf_map! {
     "mimo-v2.5" => "mimo-v2-5-0424",
     "mimo-v2.5-free" => "mimo-v2-5-0424",
     "mimo-v2.5-pro" => "mimo-v2-5-pro",
+    "mimo-v2.6-pro" => "mimo-v2-6-pro",
     "minimax-m3" => "minimax-m3",
     "minimax-m3:cloud" => "minimax-m3",
     "minimax/minimax-m3" => "minimax-m3",
@@ -233,6 +315,8 @@ pub static MODEL_TO_SLUG: phf::Map<&'static str, &'static str> = phf_map! {
     "poolside/laguna-s-2.1:free" => "",
     "poolside/laguna-xs-2.1" => "",
     "poolside/laguna-xs-2.1:free" => "",
+    "qwen/qwen3.8-27b" => "qwen3-8-27b",
+    "qwen/qwen3.8-27b:free" => "qwen3-8-27b",
     "qwen/qwen3.8-flash" => "qwen3-8-flash-next",
     "qwen/qwen3.8-max-0902" => "qwen3-8-max",
     "qwen3.5:397b-cloud" => "qwen3-5-397b-a17b",
@@ -248,6 +332,7 @@ pub static MODEL_TO_SLUG: phf::Map<&'static str, &'static str> = phf_map! {
     "thinkingmachines/inkling:free" => "inkling",
     "x-ai/grok-4.5" => "grok-4-5",
     "x-ai/grok-4.6" => "grok-4-6",
+    "x-ai/grok-4.7" => "grok-4-7-high",
     "xiaomi/mimo-v2.5" => "mimo-v2-5-0424",
     "z-ai/glm-5" => "glm-5",
     "z-ai/glm-5.1" => "glm-5-1",
@@ -258,3 +343,19 @@ pub static MODEL_TO_SLUG: phf::Map<&'static str, &'static str> = phf_map! {
     "zai-org/GLM-5.3" => "glm-5-3",
     "zai-org/GLM-5.3-Flash" => "glm-5-3-flash",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_filter_and_sort_from_the_map() {
+        let all = rows("", BenchSort::Slug);
+        assert!(all.len() > 2);
+        assert!(all.windows(2).all(|w| w[0].slug <= w[1].slug));
+        let grok = rows("grok 4.7", BenchSort::Intel);
+        assert!(grok.iter().any(|row| row.slug == "grok-4-7-high"));
+        assert!(grok.windows(2).all(|w| w[0].intel >= w[1].intel));
+        assert!(rows("no-such-model-zz", BenchSort::Name).is_empty());
+    }
+}

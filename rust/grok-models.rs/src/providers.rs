@@ -389,6 +389,9 @@ pub fn update_providers_json() -> Res<UpdateProvidersResponse> {
             continue;
         }
         let pid = provider["id"].as_str().unwrap_or_default().to_string();
+        if let Some(stored) = core::find_provider_by_id_mut(&mut doc, &pid) {
+            refresh_opencode_session(stored);
+        }
         let Some(provider_models_dev) = models_dev.providers.get(&pid) else {
             stats.warnings.push(SyncWarning::NotInModelsDev {
                 provider_id: pid.clone(),
@@ -582,19 +585,7 @@ pub fn add_provider_entry(
     if !api_url.is_empty() {
         provider.insert("base_url".into(), Value::String(api_url.clone()));
     }
-    if provider_id.starts_with("opencode") {
-        let mut extra = Map::new();
-        extra.insert(
-            "x-opencode-session".into(),
-            Value::String(core::new_session_id()),
-        );
-        // User-Agent = "opencode/1.18.31"
-        // extra.insert(
-        //     "User-Agent".into(),
-        //     Value::String("opencode/1.18.31".into()),
-        // );
-        provider.insert("extra_headers".into(), Value::Object(extra));
-    }
+    refresh_opencode_session(&mut provider);
     let (mut items, fetch_warning_url) =
         authority_items_for_provider(provider_models_dev, &mut provider);
     // Diagnostics produced from here on travel with any failure, so a caller
@@ -634,6 +625,25 @@ pub fn add_provider_entry(
         already_present: false,
         fetch_warning_url,
     })
+}
+
+/// Mint a new `x-opencode-session` on every OpenCode provider. Other
+/// `extra_headers` are left in place.
+fn refresh_opencode_session(provider: &mut Map<String, Value>) {
+    let pid = provider.get("id").and_then(Value::as_str).unwrap_or("");
+    if !pid.starts_with("opencode") {
+        return;
+    }
+    let headers = provider
+        .entry("extra_headers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !headers.is_object() {
+        *headers = Value::Object(Map::new());
+    }
+    headers.as_object_mut().unwrap().insert(
+        "x-opencode-session".into(),
+        Value::String(core::new_session_id()),
+    );
 }
 
 pub fn id_to_string(v: &Value) -> String {
@@ -729,7 +739,7 @@ mod tests {
         // Enable all three catalog models up front so sync reconciles them
         // through the existing-entries path, not just seeding.
         let mut doc = serde_json::json!({ "providers": [] });
-        crate::sync::add_provider_entry(&mut doc, &api, "prov").expect("add provider");
+        add_provider_entry(&mut doc, &api, "prov").expect("add provider");
         if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
             let p = arr.first_mut().unwrap().as_object_mut().unwrap();
             p.insert("enabled".into(), Value::Bool(true));
@@ -846,7 +856,7 @@ mod tests {
         // Seed: provider with all catalog models enabled, synced into
         // config.toml.
         let mut doc = serde_json::json!({ "providers": [] });
-        crate::sync::add_provider_entry(&mut doc, &api, "prov").expect("add");
+        add_provider_entry(&mut doc, &api, "prov").expect("add");
         {
             let p = doc["providers"][0].as_object_mut().unwrap();
             p.insert("enabled".into(), Value::Bool(true));
@@ -902,7 +912,7 @@ mod tests {
         if let Some(arr) = doc.get_mut("providers").and_then(Value::as_array_mut) {
             arr.retain(|p| p.get("id").and_then(Value::as_str) != Some("prov"));
         }
-        crate::sync::record_removed_provider(&mut doc, "prov", enabled);
+        record_removed_provider(&mut doc, "prov", enabled);
         jsonio::dump_providers(&paths::providers_path(), &mut doc).expect("dump post-delete");
 
         // Flush phase 2 alone (what the TUI does on confirm).
@@ -928,7 +938,7 @@ mod tests {
 
         // Re-add in-session: tables come back on next sync.
         let mut doc = jsonio::load_providers().expect("reload");
-        crate::sync::add_provider_entry(&mut doc, &api, "prov").expect("re-add");
+        add_provider_entry(&mut doc, &api, "prov").expect("re-add");
         {
             let p = doc["providers"][0].as_object_mut().unwrap();
             p.insert("enabled".into(), Value::Bool(true));
@@ -1283,5 +1293,27 @@ mod tests {
             session_ids[0], session_ids[1],
             "each add must mint a new session"
         );
+    }
+
+    #[test]
+    fn refresh_opencode_session_replaces_only_the_session_header() {
+        let mut provider = serde_json::json!({
+            "id": "opencode-go",
+            "extra_headers": { "X-Keep": "yes", "x-opencode-session": "ses_old" }
+        });
+        let map = provider.as_object_mut().unwrap();
+        refresh_opencode_session(map);
+        let headers = map.get("extra_headers").unwrap().as_object().unwrap();
+        assert_eq!(headers.get("X-Keep").and_then(Value::as_str), Some("yes"));
+        let session = headers
+            .get("x-opencode-session")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(session.starts_with("ses_"));
+        assert_ne!(session, "ses_old");
+
+        let mut other = serde_json::json!({ "id": "openrouter" });
+        refresh_opencode_session(other.as_object_mut().unwrap());
+        assert!(other.get("extra_headers").is_none());
     }
 }

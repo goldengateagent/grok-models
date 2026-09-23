@@ -1,9 +1,18 @@
-//! TUI main-menu orchestration: TUI on a TTY, numbered fallback otherwise.
+//! Interactive orchestration: Ratatui by default, the previous TUI with `--legacy`, numbered fallback when stdout is not a TTY.
 
 use crate::Res;
-use crate::{core, env::paths, fallback, jsonio, sync, tui};
+use crate::{config_toml, core, env::paths, fallback, jsonio, sync, tui};
 
 pub fn cmd_config() -> Res<i32> {
+    cmd_config_inner(false)
+}
+
+/// Same interactive flow as [`cmd_config`], drawing the previous terminal interface.
+pub fn cmd_config_legacy() -> Res<i32> {
+    cmd_config_inner(true)
+}
+
+fn cmd_config_inner(legacy: bool) -> Res<i32> {
     let mut doc = jsonio::load_providers()?;
     let providers = core::provider_entries(&doc);
 
@@ -16,8 +25,13 @@ pub fn cmd_config() -> Res<i32> {
         return Ok(0);
     }
     let changed = if tty {
-        let tui_result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_tui_safely(&mut doc)));
+        let tui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if legacy {
+                run_tui_safely(&mut doc)
+            } else {
+                crate::ratatui::run(&mut doc)
+            }
+        }));
         match tui_result {
             Ok(Ok(b)) => b,
             Ok(Err(e)) => {
@@ -36,7 +50,7 @@ pub fn cmd_config() -> Res<i32> {
     let _ = providers; // silence unused
 
     if changed {
-        let written = sync::update_config_toml()?;
+        let written = config_toml::update_config_toml()?;
         sync::print_config_warnings(&written);
         sync::print_sync_report(&written.path, &doc);
         sync::print_relaunch();

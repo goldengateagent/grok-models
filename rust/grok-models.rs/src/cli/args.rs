@@ -17,6 +17,8 @@ pub struct Args {
     pub providers: bool,
     pub provider: Option<String>,
     pub codex: Option<String>,
+    /// Open the previous terminal interface instead of the Ratatui UI.
+    pub legacy: bool,
 }
 
 const HELP: &str = "\
@@ -26,15 +28,17 @@ Writes [model.<provider-id>-<model-id>] into ~/.grok/config.toml (or $GROK_HOME)
 Matching tables are added, updated, or deleted on sync. Give custom models
 unique table names so they are not overwritten.
 
-No arguments opens the interactive TUI (numbered menus if stdout is not a TTY).";
+No arguments opens the interactive UI (numbered menus if stdout is not a TTY).
+--legacy opens the previous terminal interface.";
 const EPILOG: &str = "\
 quick start:
   grok-models --add-provider opencode-go
   grok-models --enable opencode-go/glm-5.3
-  grok-models                              then: TUI, or just use the model
+  grok-models                              then: the UI, or just use the model
 
 examples:
-  grok-models                              interactive TUI
+  grok-models                              interactive UI
+  grok-models --legacy                     previous terminal interface
   grok-models --providers                  list configured providers
   grok-models --provider opencode-go       list models for a provider
   grok-models --models                     list enabled models
@@ -45,7 +49,8 @@ examples:
   grok-models --disable-all
   grok-models --codex openrouter           write Codex config for this provider on sync (or 'disabled')
   grok-models --sync                       refresh from models.dev; rewrite config.toml
-  grok-models --import                     pull [model.*] from an existing config.toml";
+  grok-models --import                     pull [model.*] from an existing config.toml
+  grok-models --legacy                     previous terminal interface";
 
 #[rustfmt::skip]
 pub fn print_help() {
@@ -65,6 +70,7 @@ pub fn print_help() {
     println!("  --codex PROVIDER         Write Codex config for this enabled provider on sync (or 'disabled')");
     println!("  --sync                   Refresh providers.json from models.dev; rewrite config.toml");
     println!("  --import                 Import providers/models from existing config.toml [model.*]");
+    println!("  --legacy                 Open the previous terminal interface");
     println!("  -h, --help               Show this help and exit");
     println!("  -V, --version            Print version and exit");
     println!();
@@ -138,6 +144,10 @@ pub fn parse(argv: &[String]) -> Res<Args> {
             }
             "--models" => {
                 a.models = true;
+                i += 1;
+            }
+            "--legacy" => {
+                a.legacy = true;
                 i += 1;
             }
             "--providers" => {
@@ -235,6 +245,15 @@ mod tests {
     fn rejects_unknown() {
         let argv = a(&["--bogus"]);
         assert!(parse(&argv).is_err());
+    }
+
+    #[test]
+    fn parses_legacy_alone_and_with_a_command() {
+        let p = parse(&a(&["--legacy"])).unwrap();
+        assert!(p.legacy);
+        assert!(p.add_provider.is_none());
+        let p = parse(&a(&["--sync", "--legacy"])).unwrap();
+        assert!(p.legacy && p.sync);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Sync orchestration surface: shared types, report strings, and re-exports.
+//! Sync orchestration: `run_sync`, warning types, and the report printers.
 //!
 //! Fetching lives in [`crate::fetch`], providers.json updates in
 //! [`crate::providers`], and generated config files in [`crate::config_toml`].
@@ -6,12 +6,9 @@
 #[cfg(test)]
 use crate::Error;
 use crate::Res;
-pub use crate::codex_out::*;
-pub use crate::config_toml::*;
+use crate::config_toml::{UpdateConfigResponse, update_config_toml};
 use crate::core;
-pub use crate::fetch::*;
-pub use crate::grok_out::*;
-pub use crate::providers::*;
+use crate::providers::{UpdateProvidersResponse, update_providers_json};
 use serde_json::Value;
 
 /// Something the sync noticed but did not fail on.

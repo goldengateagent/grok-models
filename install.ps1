@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Repo = "goldengateagent/grok-models"
-$Version = "1.2.0"
+$Version = "2.0.0"
 $Artifact = "grok-models"
 
 $InstallDir = Join-Path $env:USERPROFILE ".grok-models"

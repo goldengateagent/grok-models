@@ -61,6 +61,9 @@ fn dispatch(args: cli::Args) -> Res<i32> {
     if args.sync {
         return commands::cmd_sync();
     }
-    // Default (no args): straight into the TUI.
+    // `--legacy` only changes the interactive screen. Other flags still win.
+    if args.legacy {
+        return flow::cmd_config_legacy();
+    }
     flow::cmd_config()
 }
