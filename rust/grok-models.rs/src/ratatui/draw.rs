@@ -268,6 +268,11 @@ fn render_help(frame: &mut Frame, area: Rect, pairs: &[(&str, &str)], leading: b
 }
 
 fn text_arrows(key: &str) -> String {
+    // Windows console fonts lack the arrow + VS16 sequence, so emit the
+    // same arrow codepoints without the suffix there.
+    if cfg!(target_os = "windows") {
+        return key.to_string();
+    }
     let mut out = String::with_capacity(key.len() + 4);
     for ch in key.chars() {
         out.push(ch);
