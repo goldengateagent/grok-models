@@ -1250,6 +1250,10 @@ impl App {
             }
             if disabled {
                 jsonio::dump_providers(&paths::providers_path(), doc)?;
+                crate::config_toml::update_config_toml()?;
+                if let Ok(fresh) = jsonio::load_providers() {
+                    *doc = fresh;
+                }
                 self.changed = true;
                 self.note(
                     format!(
@@ -1301,6 +1305,10 @@ impl App {
             .unwrap()
             .insert("enabled".into(), Value::Bool(true));
         jsonio::dump_providers(&paths::providers_path(), doc)?;
+        crate::config_toml::update_config_toml()?;
+        if let Ok(fresh) = jsonio::load_providers() {
+            *doc = fresh;
+        }
         let prefix = if added {
             format!("Added provider '{}'. ", row.pid)
         } else {
