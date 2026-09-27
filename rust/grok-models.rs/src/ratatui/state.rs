@@ -245,6 +245,7 @@ pub(crate) enum ModelSort {
     Name,
     Intel,
     Coding,
+    Input,
 }
 
 impl ModelSort {
@@ -252,7 +253,8 @@ impl ModelSort {
         match self {
             Self::Name => Self::Intel,
             Self::Intel => Self::Coding,
-            Self::Coding => Self::Name,
+            Self::Coding => Self::Input,
+            Self::Input => Self::Name,
         }
     }
 
@@ -261,6 +263,7 @@ impl ModelSort {
             Self::Name => 0,
             Self::Intel => 1,
             Self::Coding => 2,
+            Self::Input => 3,
         }
     }
 }
@@ -2384,12 +2387,31 @@ fn configure_rows(session: &ConfigureSession) -> Vec<String> {
     ordered
 }
 
+fn input_cost_value(models: &Map<String, Value>, mid: &str) -> Option<f64> {
+    let value = models
+        .get(mid)
+        .and_then(Value::as_object)
+        .and_then(|model| model.get("cost"))
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("input"))?;
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn compare_input_costs(a: &str, b: &str, models: &Map<String, Value>) -> Ordering {
+    match (input_cost_value(models, a), input_cost_value(models, b)) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 fn reorder_groups(ordered: &mut [String], models: &Map<String, Value>, sort: ModelSort) {
-    let intel = match sort {
-        ModelSort::Intel => true,
-        ModelSort::Coding => false,
-        ModelSort::Name => return,
-    };
+    if sort == ModelSort::Name {
+        return;
+    }
     let group = |mid: &str| -> u8 {
         if model_enabled(models, mid) {
             0
@@ -2408,7 +2430,13 @@ fn reorder_groups(ordered: &mut [String], models: &Map<String, Value>, sort: Mod
             i += 1;
         }
         ordered[start..i].sort_by(|a, b| {
-            score_desc(a, b, intel).then_with(|| {
+            let primary = match sort {
+                ModelSort::Name => Ordering::Equal,
+                ModelSort::Intel => score_desc(a, b, true),
+                ModelSort::Coding => score_desc(a, b, false),
+                ModelSort::Input => compare_input_costs(a, b, models),
+            };
+            primary.then_with(|| {
                 model_name(models, a)
                     .to_lowercase()
                     .cmp(&model_name(models, b).to_lowercase())
@@ -2446,11 +2474,36 @@ fn stitch<T: Clone>(
     (out, None, 0)
 }
 
+fn input_cost_text(models: &Map<String, Value>, mid: &str) -> Option<String> {
+    let value = models
+        .get(mid)
+        .and_then(Value::as_object)
+        .and_then(|model| model.get("cost"))
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("input"))?;
+    match value {
+        Value::Number(number) => Some(format!("${number}")),
+        Value::String(value) => Some(format!("${value}")),
+        _ => None,
+    }
+}
+
 fn configure_grid(session: &ConfigureSession) -> Grid {
     let sorted = core::sort_model_indices(&session.ids, &session.models, Some(&session.query));
     let enabled_count = sorted.enabled_count;
     let free_count = sorted.free_disabled_count;
     let mids = configure_rows(session);
+    let input_w = capped_width(
+        "Input",
+        session
+            .ids
+            .iter()
+            .filter_map(|mid| input_cost_text(&session.models, mid))
+            .map(|cost| cost.chars().count())
+            .max()
+            .unwrap_or(0),
+        14,
+    );
     let seps = sep_before(enabled_count, free_count, mids.len());
     let (rows, _, _) = stitch(&mids, &seps, |mid| {
         let enabled = model_enabled(&session.models, mid);
@@ -2485,6 +2538,19 @@ fn configure_grid(session: &ConfigureSession) -> Grid {
             score(scores.map(|s| s.intel), INTEL_COL_W),
             score(scores.map(|s| s.coding), CODING_COL_W),
             SpanText {
+                text: input_cost_text(&session.models, mid)
+                    .map(|cost| {
+                        format!(
+                            "{:>width$}",
+                            clip(&cost, input_w as usize),
+                            width = input_w as usize
+                        )
+                    })
+                    .unwrap_or_else(|| " ".repeat(input_w as usize)),
+                tone: Tone::Blue,
+                protect: false,
+            },
+            SpanText {
                 text: format!("({})", clip(&session.pname, PROVIDER_NAME_COL_MAX)),
                 tone: Tone::Text,
                 protect: false,
@@ -2513,6 +2579,13 @@ fn configure_grid(session: &ConfigureSession) -> Grid {
         PROVIDER_NAME_COL_MAX + 2,
     );
     let mut headers = model_headers(session.sort.hot_col(), name_w);
+    headers.push(Col {
+        label: "Input".into(),
+        hot: session.sort == ModelSort::Input,
+        right: true,
+        width: input_w,
+        fill: false,
+    });
     headers.push(Col {
         label: "Provider".into(),
         hot: false,
@@ -3536,6 +3609,93 @@ mod tests {
         let by_intel = enabled_models(&doc(), EnabledSort::Intel);
         assert_eq!(by_intel[0].mid, "glm-5");
         assert_eq!(reasoning_level(&doc(), "opencode", "glm-5"), "high");
+    }
+
+    #[test]
+    fn configure_models_grid_shows_input_cost_column() {
+        let session = ConfigureSession {
+            provider_id: "provider".into(),
+            pname: "Provider".into(),
+            ids: vec!["costed".into(), "plain".into()],
+            models: serde_json::from_value(json!({
+                "costed": {
+                    "name": "Costed",
+                    "enabled": false,
+                    "cost": { "input": 0.1 }
+                },
+                "plain": { "name": "Plain", "enabled": false }
+            }))
+            .unwrap(),
+            query: String::new(),
+            selected: 0,
+            offset: 0,
+            sort: ModelSort::Name,
+            changed: false,
+        };
+        let grid = configure_grid(&session);
+        assert_eq!(grid.headers[3].label, "Input");
+        let rows: Vec<&Vec<SpanText>> = grid
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                GridRow::Cells(cells) => Some(cells),
+                GridRow::Sep(_) => None,
+            })
+            .collect();
+        assert!(rows.iter().any(|cells| cells[3].text.trim() == "$0.1"));
+        let plain = rows
+            .iter()
+            .find(|cells| cells[0].text.trim() == "Plain")
+            .expect("plain model row");
+        assert!(plain[3].text.trim().is_empty());
+    }
+
+    #[test]
+    fn configure_input_sort_is_ascending_and_missing_values_are_last() {
+        let models = serde_json::from_value(json!({
+            "expensive": {
+                "name": "A expensive",
+                "enabled": false,
+                "cost": { "input": 0.2 }
+            },
+            "cheap": {
+                "name": "B cheap",
+                "enabled": false,
+                "cost": { "input": 0.05 }
+            },
+            "missing": { "name": "C missing", "enabled": false },
+            "same-price": {
+                "name": "D same price",
+                "enabled": false,
+                "cost": { "input": 0.05 }
+            }
+        }))
+        .unwrap();
+        let session = ConfigureSession {
+            provider_id: "provider".into(),
+            pname: "Provider".into(),
+            ids: vec![
+                "expensive".into(),
+                "cheap".into(),
+                "missing".into(),
+                "same-price".into(),
+            ],
+            models,
+            query: String::new(),
+            selected: 0,
+            offset: 0,
+            sort: ModelSort::Input,
+            changed: false,
+        };
+        assert_eq!(
+            configure_rows(&session),
+            ["cheap", "same-price", "expensive", "missing"]
+        );
+        let grid = configure_grid(&session);
+        assert_eq!(grid.headers[3].label, "Input");
+        assert!(grid.headers[3].hot);
+        assert_eq!(ModelSort::Coding.cycle(), ModelSort::Input);
+        assert_eq!(ModelSort::Input.cycle(), ModelSort::Name);
     }
 
     #[test]

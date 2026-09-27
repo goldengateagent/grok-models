@@ -106,9 +106,10 @@ pub const PROVIDER_KEY_ORDER: [&str; 11] = [
     "auth_models_list",
     "models",
 ];
-const MODEL_KEY_ORDER: [&str; 10] = [
+const MODEL_KEY_ORDER: [&str; 11] = [
     "enabled",
     "name",
+    "cost",
     "description",
     "modalities",
     "npm",
@@ -519,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn order_provider_entry_places_modalities_after_description() {
+    fn order_provider_entry_places_cost_before_description() {
         let p = serde_json::json!({
             "id": "p",
             "name": "P",
@@ -531,6 +532,7 @@ mod tests {
                     "enabled": true,
                     "name": "M",
                     "description": "d",
+                    "cost": { "input": 0.1, "output": 0.32 },
                     "npm": "@ai-sdk/openai",
                     "api_backend": "responses",
                     "modalities": { "input": ["text"], "output": ["text"] }
@@ -551,6 +553,7 @@ mod tests {
             [
                 "enabled",
                 "name",
+                "cost",
                 "description",
                 "modalities",
                 "npm",

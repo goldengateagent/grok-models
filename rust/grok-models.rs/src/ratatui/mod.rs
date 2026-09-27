@@ -194,6 +194,28 @@ mod tests {
     }
 
     #[test]
+    fn configure_models_screen_renders_input_cost() {
+        let mut doc = sample();
+        doc["providers"][0]["models"]["glm-5"]["cost"] = json!({ "input": 0.1 });
+        let mut app = App::new();
+        for _ in 0..2 {
+            app.on_key(
+                &mut doc,
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            )
+            .unwrap();
+        }
+        let text = frame(&mut app, &doc);
+        assert!(text.contains("Configure Models"), "{text}");
+        assert!(text.contains("Input"), "{text}");
+        assert!(text.contains("$0.1"), "{text}");
+        assert!(text.find("Coding").unwrap() < text.find("Input").unwrap());
+    }
+
+    #[test]
     fn selected_provider_row_keeps_env_colors() {
         let doc = sample();
         let mut app = App::new();

@@ -57,6 +57,8 @@ pub struct ModelsDevModel {
     pub reasoning: Option<Value>,
     #[serde(default)]
     pub reasoning_options: Vec<Value>,
+    #[serde(default)]
+    pub cost: Option<Value>,
 }
 
 /// Per-model provider override carrying an npm package.

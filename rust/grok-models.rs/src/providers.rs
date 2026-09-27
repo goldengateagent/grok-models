@@ -109,8 +109,8 @@ pub fn write_api_backend(
 
 /// Fill a model's missing attributes (context window, reasoning effort
 /// options) from its models.dev catalog entry. Existing values are never
-/// overwritten — user-set preferences win. Catalog `modalities` and `npm`
-/// are refreshed whenever the catalog carries them.
+/// overwritten — user-set preferences win. Catalog `modalities`, `npm`, and
+/// `cost` are refreshed from the catalog.
 pub fn enrich_model_entry(
     entry: &mut Map<String, Value>,
     minfo: &ModelsDevModel,
@@ -126,6 +126,9 @@ pub fn enrich_model_entry(
         entry.insert("npm".to_string(), Value::String(model_npm.to_string()));
     }
     write_api_backend(entry, provider_id, provider_npm);
+    if let Some(cost) = minfo.cost.clone().filter(|v| v.is_object()) {
+        entry.insert("cost".to_string(), cost);
+    }
     if let Some(mods) = minfo.modalities.clone().filter(|v| v.is_object()) {
         entry.insert("modalities".to_string(), mods);
     }
@@ -958,6 +961,91 @@ mod tests {
             config.contains("[model.prov-plain]"),
             "re-added provider's tables must return"
         );
+    }
+
+    #[test]
+    fn cost_values_and_order_survive_providers_json_round_trip() {
+        let catalog: HashMap<String, ModelsDevModel> = serde_json::from_value(serde_json::json!({
+            "m": {
+                "name": "Model",
+                "description": "Description",
+                "cost": { "input": 0.1, "output": 0.32, "cache_read": 0.02 }
+            }
+        }))
+        .unwrap();
+        let items = vec![("m".to_string(), Some("Model".to_string()))];
+        let seeded = seed_models_from_items(&items, &catalog, "prov", None);
+        let mut doc = serde_json::json!({
+            "providers": [{
+                "id": "prov",
+                "name": "Provider",
+                "enabled": true,
+                "models": seeded
+            }]
+        });
+        let path = std::env::temp_dir().join(format!(
+            "grok-models-cost-round-trip-{}.json",
+            std::process::id()
+        ));
+
+        jsonio::dump_providers(&path, &mut doc).expect("write providers.json");
+        let mut loaded = jsonio::load_providers_from(&path).expect("reload providers.json");
+        let model = &loaded["providers"][0]["models"]["m"];
+        assert_eq!(
+            model["cost"],
+            serde_json::json!({ "input": 0.1, "output": 0.32, "cache_read": 0.02 })
+        );
+        let keys: Vec<&str> = model
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let name_pos = keys.iter().position(|key| *key == "name").unwrap();
+        let cost_pos = keys.iter().position(|key| *key == "cost").unwrap();
+        let description_pos = keys.iter().position(|key| *key == "description").unwrap();
+        assert!(
+            name_pos < cost_pos && cost_pos < description_pos,
+            "{keys:?}"
+        );
+
+        let updated_catalog: HashMap<String, ModelsDevModel> =
+            serde_json::from_value(serde_json::json!({
+                "m": {
+                    "name": "Model",
+                    "description": "Description",
+                    "cost": { "input": 0.12, "output": 0.35, "cache_read": 0.03 }
+                }
+            }))
+            .unwrap();
+        reconcile_models_map(
+            loaded["providers"][0]["models"].as_object_mut().unwrap(),
+            &items,
+            &updated_catalog,
+            "prov",
+            None,
+        );
+        jsonio::dump_providers(&path, &mut loaded).expect("write updated providers.json");
+        let reloaded = jsonio::load_providers_from(&path).expect("reload updated providers.json");
+        let model = &reloaded["providers"][0]["models"]["m"];
+        assert_eq!(
+            model["cost"],
+            serde_json::json!({ "input": 0.12, "output": 0.35, "cache_read": 0.03 })
+        );
+        let keys: Vec<&str> = model
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let name_pos = keys.iter().position(|key| *key == "name").unwrap();
+        let cost_pos = keys.iter().position(|key| *key == "cost").unwrap();
+        let description_pos = keys.iter().position(|key| *key == "description").unwrap();
+        assert!(
+            name_pos < cost_pos && cost_pos < description_pos,
+            "{keys:?}"
+        );
+        std::fs::remove_file(path).expect("remove temporary providers.json");
     }
 
     #[test]
