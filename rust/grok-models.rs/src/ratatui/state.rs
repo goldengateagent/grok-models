@@ -2474,6 +2474,18 @@ fn stitch<T: Clone>(
     (out, None, 0)
 }
 
+fn format_input_cost(value: &str) -> String {
+    let Ok(_) = value.parse::<f64>() else {
+        return format!("${value}");
+    };
+    match value.split_once('.') {
+        Some((whole, fraction)) if fraction.is_empty() => format!("${whole}.00"),
+        Some((whole, fraction)) if fraction.len() == 1 => format!("${whole}.{fraction}0"),
+        Some(_) => format!("${value}"),
+        None => format!("${value}.00"),
+    }
+}
+
 fn input_cost_text(models: &Map<String, Value>, mid: &str) -> Option<String> {
     let value = models
         .get(mid)
@@ -2482,8 +2494,8 @@ fn input_cost_text(models: &Map<String, Value>, mid: &str) -> Option<String> {
         .and_then(Value::as_object)
         .and_then(|cost| cost.get("input"))?;
     match value {
-        Value::Number(number) => Some(format!("${number}")),
-        Value::String(value) => Some(format!("${value}")),
+        Value::Number(number) => Some(format_input_cost(&number.to_string())),
+        Value::String(value) => Some(format_input_cost(value)),
         _ => None,
     }
 }
@@ -3612,16 +3624,43 @@ mod tests {
     }
 
     #[test]
-    fn configure_models_grid_shows_input_cost_column() {
+    fn configure_models_grid_formats_input_costs_as_dollars() {
         let session = ConfigureSession {
             provider_id: "provider".into(),
             pname: "Provider".into(),
-            ids: vec!["costed".into(), "plain".into()],
+            ids: vec![
+                "whole".into(),
+                "three-tenths".into(),
+                "exact-cents".into(),
+                "precise".into(),
+                "string-cost".into(),
+                "plain".into(),
+            ],
             models: serde_json::from_value(json!({
-                "costed": {
-                    "name": "Costed",
+                "whole": {
+                    "name": "Whole",
                     "enabled": false,
-                    "cost": { "input": 0.1 }
+                    "cost": { "input": 2 }
+                },
+                "three-tenths": {
+                    "name": "Three tenths",
+                    "enabled": false,
+                    "cost": { "input": 0.3 }
+                },
+                "exact-cents": {
+                    "name": "Exact cents",
+                    "enabled": false,
+                    "cost": { "input": 0.25 }
+                },
+                "precise": {
+                    "name": "Precise",
+                    "enabled": false,
+                    "cost": { "input": 0.834 }
+                },
+                "string-cost": {
+                    "name": "String cost",
+                    "enabled": false,
+                    "cost": { "input": "0.4" }
                 },
                 "plain": { "name": "Plain", "enabled": false }
             }))
@@ -3642,12 +3681,20 @@ mod tests {
                 GridRow::Sep(_) => None,
             })
             .collect();
-        assert!(rows.iter().any(|cells| cells[3].text.trim() == "$0.1"));
-        let plain = rows
-            .iter()
-            .find(|cells| cells[0].text.trim() == "Plain")
-            .expect("plain model row");
-        assert!(plain[3].text.trim().is_empty());
+        let input_for = |name: &str| {
+            rows.iter()
+                .find(|cells| cells[0].text.trim() == name)
+                .unwrap_or_else(|| panic!("missing model row: {name}"))[3]
+                .text
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(input_for("Whole"), "$2.00");
+        assert_eq!(input_for("Three tenths"), "$0.30");
+        assert_eq!(input_for("Exact cents"), "$0.25");
+        assert_eq!(input_for("Precise"), "$0.834");
+        assert_eq!(input_for("String cost"), "$0.40");
+        assert!(input_for("Plain").is_empty());
     }
 
     #[test]

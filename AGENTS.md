@@ -2,9 +2,9 @@
 
 ## Communication
 
-- Do not edit files unless the user tells you to. If they ask a question or
-are discussing an approach, answer in chat only. Do not change code until
-they agree on the approach and tell you to apply it.
+- Do not edit files unless the user is direct or approves a plan and is not
+currently asking a question. If they ask a question or are discussing an
+approach, answer in chat only until the approach is agreed upon.
 - Never form feedback. Do not call `send_feedback`, write feedback drafts, or
 open `/feedback`.
 

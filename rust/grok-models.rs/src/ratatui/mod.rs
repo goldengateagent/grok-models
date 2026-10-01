@@ -155,12 +155,14 @@ mod tests {
         app.tab = state::Tab::Benchmarks;
         let text = frame(&mut app, &doc);
         assert!(text.contains("Artificial Analysis"), "{text}");
-        assert!(text.contains("(81)"), "{text}");
+        let expected_count = format!("({})", crate::benchmarks::BENCHMARKS.len());
+        assert!(text.contains(expected_count.as_str()), "{text}");
         assert!(text.contains("| Search:"), "{text}");
         assert!(text.contains("Name"), "{text}");
         assert!(text.contains("Slug"), "{text}");
-        assert!(text.contains("Claude 4 Sonnet (Reasoning)"), "{text}");
-        assert!(text.contains("claude-4-sonnet-thinking"), "{text}");
+        assert!(text.contains("Gemini 3.8 Flash (high)"), "{text}");
+        assert!(text.contains("GLM-5.1 (Reasoning)"), "{text}");
+        assert!(text.contains("Gemma 4 31B (Reasoning)"), "{text}");
         assert!(text.contains("Shift+S"), "{text}");
         assert!(text.contains("ESC"), "{text}");
         assert!(text.contains("cancel"), "{text}");
@@ -211,7 +213,7 @@ mod tests {
         let text = frame(&mut app, &doc);
         assert!(text.contains("Configure Models"), "{text}");
         assert!(text.contains("Input"), "{text}");
-        assert!(text.contains("$0.1"), "{text}");
+        assert!(text.contains("$0.10"), "{text}");
         assert!(text.find("Coding").unwrap() < text.find("Input").unwrap());
     }
 
